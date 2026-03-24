@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+
+# Build
+build/
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Temp files
+*.xls
+*.xlsx
+data/*.json
+ui/views/__pycache__/management_view.cpython-310.pyc
