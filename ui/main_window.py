@@ -213,7 +213,7 @@ class MainWindow(QMainWindow):
         self.course_loader.start()
 
     def on_courses_delivered(self, courses):
-        # 显示所有课程，已结课的标记“(已结课)”以便新建课程立即可见
+        # 显示所有课程，已结课的标记"(已结课)"以便新建课程立即可见
         ongoing_courses = [c for c in courses if not c.is_finished]
         finished_courses = [c for c in courses if c.is_finished]
 
@@ -227,12 +227,30 @@ class MainWindow(QMainWindow):
             f"就绪，共 {len(courses)} 门课程，进行中 {len(ongoing_courses)} 门，已结课 {len(finished_courses)} 门"
         )
         if courses:
+            # 尝试恢复上次选择的课程
+            settings = QSettings("SIAS", "Xuexitong")
+            last_course_id = settings.value("last_course_id")
+            
+            if last_course_id:
+                # 查找匹配的课程
+                for i in range(self.course_box.count()):
+                    course = self.course_box.itemData(i)
+                    if course and str(course.id) == last_course_id:
+                        self.course_box.setCurrentIndex(i)
+                        self.on_course_changed(i)
+                        return
+            
+            # 如果没有找到或没有保存的课程，默认选择第一个
             self.course_box.setCurrentIndex(0)
             self.on_course_changed(0)
 
     def on_course_changed(self, index):
         course = self.course_box.itemData(index)
         if not course: return
+
+        # 保存选择的课程ID
+        settings = QSettings("SIAS", "Xuexitong")
+        settings.setValue("last_course_id", str(course.id))
 
         # 切课时重置 session 内的 courseid 和 clazzid，避免沿用上一门课的班级ID
         self.crawler.session_manager.course_params['courseid'] = str(course.id)
@@ -264,8 +282,23 @@ class MainWindow(QMainWindow):
         self.clazz_box.blockSignals(False)
         
         if ongoing_classes:
-            self.clazz_box.setCurrentIndex(0)
-            self.on_class_selected(0)
+            # 尝试恢复上次选择的班级
+            settings = QSettings("SIAS", "Xuexitong")
+            last_class_id = settings.value("last_class_id")
+            
+            found = False
+            if last_class_id:
+                for i in range(self.clazz_box.count()):
+                    if self.clazz_box.itemData(i) == last_class_id:
+                        self.clazz_box.setCurrentIndex(i)
+                        self.on_class_selected(i)
+                        found = True
+                        break
+            
+            if not found:
+                self.clazz_box.setCurrentIndex(0)
+                self.on_class_selected(0)
+            
             hidden_count = len(classes) - len(ongoing_classes)
             if hidden_count > 0:
                 self.status_label.setText(f"已加载 {len(ongoing_classes)} 个进行中的班级 (已隐藏 {hidden_count} 个结课班级)")
@@ -276,6 +309,10 @@ class MainWindow(QMainWindow):
         class_id = self.clazz_box.itemData(index)
         course = self.course_box.currentData()
         if class_id and course:
+            # 保存选择的班级ID
+            settings = QSettings("SIAS", "Xuexitong")
+            settings.setValue("last_class_id", class_id)
+
             self.crawler.session_manager.course_params['clazzid'] = class_id
             self.status_label.setText(f"切换班级 {class_id}")
             

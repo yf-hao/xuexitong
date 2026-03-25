@@ -2646,48 +2646,231 @@ class XuexitongCrawler(CourseAPI, ClassAPI):
         import base64
         from io import BytesIO
 
-        if not hasattr(self, "_math_img_cache"):
-            self._math_img_cache = {}
+        # 每次上传题库时清除公式缓存，确保使用最新的渲染逻辑
+        self._math_img_cache = {}
 
         def render_math_expr(expr: str):
-            """用 matplotlib.mathtext 渲染表达式为图片并上传，返回 (url, width, height)"""
+            """用 matplotlib.mathtext 渲染表达式为图片并上传，返回 (url, width, height, plain_text)"""
+            print(f"DEBUG render_math_expr: 开始渲染，表达式长度={len(expr)}")
             img_w, img_h = 0, 0
             try:
                 import matplotlib
                 matplotlib.use("Agg")
                 from matplotlib import mathtext
+                import re as re2
 
                 expr_render = expr.strip()
-                if not expr_render.startswith("$"):
-                    expr_render = f"${expr_render}$"
-
-                # 使用 pyplot 渲染，控制留白与透明背景
-                import matplotlib.pyplot as plt
-                fig = plt.figure(figsize=(2, 1))
-                fig.text(0.5, 0.5, expr_render, ha="center", va="center", fontsize=16)
-                buf = BytesIO()
-                plt.savefig(buf, dpi=260, format="png", bbox_inches="tight", pad_inches=0.05, transparent=True)
-                plt.close(fig)
-                png_bytes = buf.getvalue()
-
-                # 缩放：限制最大高度，不再额外留白
-                try:
+                print(f"DEBUG render_math_expr: 表达式前100字符: {expr_render[:100]}")
+                
+                # 检查是否只包含普通字符（不需要渲染为图片）
+                # 普通字符：字母、数字、括号、基本运算符、下标上标符号
+                # 如果只包含普通字符，返回转换后的文本
+                plain_chars_pattern = r'^[a-zA-Z0-9\s\(\)\[\]\{\}_\^+\-=<>,\.\';:\!]+$'
+                if re2.match(plain_chars_pattern, expr_render):
+                    print(f"DEBUG render_math_expr: 只包含普通字符，返回文本: {expr_render}")
+                    return None, 0, 0, expr_render
+                
+                # LaTeX 命令转换为 Unicode 符号（用于保留为文本显示）
+                expr_text = expr_render.replace(r"\iff", "⟺")  # 当且仅当
+                expr_text = expr_text.replace(r"\implies", "⇒")  # 蕴含
+                expr_text = expr_text.replace(r"\land", "∧")  # 逻辑与
+                expr_text = expr_text.replace(r"\lor", "∨")  # 逻辑或
+                expr_text = expr_text.replace(r"\lnot", "¬")  # 逻辑非
+                expr_text = expr_text.replace(r"\neg", "¬")  # 逻辑非
+                expr_text = expr_text.replace(r"\forall", "∀")  # 全称量词
+                expr_text = expr_text.replace(r"\exists", "∃")  # 存在量词
+                expr_text = expr_text.replace(r"\to", "→")  # 箭头
+                expr_text = expr_text.replace(r"\rightarrow", "→")  # 箭头
+                expr_text = expr_text.replace(r"\leftrightarrow", "↔")  # 双向箭头
+                expr_text = expr_text.replace(r"\leq", "≤")  # 小于等于
+                expr_text = expr_text.replace(r"\geq", "≥")  # 大于等于
+                expr_text = expr_text.replace(r"\neq", "≠")  # 不等于
+                expr_text = expr_text.replace(r"\in", "∈")  # 属于
+                expr_text = expr_text.replace(r"\notin", "∉")  # 不属于
+                expr_text = expr_text.replace(r"\subset", "⊂")  # 子集
+                expr_text = expr_text.replace(r"\supset", "⊃")  # 超集
+                expr_text = expr_text.replace(r"\cup", "∪")  # 并集
+                expr_text = expr_text.replace(r"\cap", "∩")  # 交集
+                expr_text = expr_text.replace(r"\wedge", "∧")  # 逻辑与
+                expr_text = expr_text.replace(r"\vee", "∨")  # 逻辑或
+                expr_text = expr_text.replace("...", "…")  # 省略号
+                expr_text = expr_text.replace(r"\ldots", "…")  # 省略号
+                expr_text = expr_text.replace(r"&", "")  # 移除对齐符 &
+                expr_text = expr_text.replace(r"\lrarr", "↔")  # 双向箭头
+                
+                # 再次检查：如果转换后只包含普通字符和Unicode符号，也跳过渲染
+                # 扩展普通字符模式，包含Unicode数学符号
+                extended_pattern = r'^[a-zA-Z0-9\s\(\)\[\]\{\}_\^+\-=<>,\.\';:\!¬∀∃∧∨→↔⇒⟺∈∉⊂⊃⊆⊇∪∩∅≤≥≠≈≡±×÷∞∂∇∑∏∫√…]+$'
+                print(f"DEBUG render_math_expr: LaTeX转Unicode后: {expr_text}")
+                if re2.match(extended_pattern, expr_text):
+                    print(f"DEBUG render_math_expr: 转换后只包含Unicode符号，返回文本: {expr_text}")
+                    return None, 0, 0, expr_text
+                
+                # 预处理：替换不支持的命令为 matplotlib 支持的命令（用于渲染）
+                
+                # Unicode 符号转换为 LaTeX 命令（后面加空格避免粘连）
+                # 逻辑符号
+                expr_render = expr_render.replace("¬", r"\neg ")  # 逻辑非
+                expr_render = expr_render.replace("∀", r"\forall ")  # 全称量词
+                expr_render = expr_render.replace("∃", r"\exists ")  # 存在量词
+                expr_render = expr_render.replace("∧", r"\wedge ")  # 逻辑与
+                expr_render = expr_render.replace("∨", r"\vee ")  # 逻辑或
+                expr_render = expr_render.replace("→", r"\rightarrow ")  # 箭头
+                expr_render = expr_render.replace("↔", r"\leftrightarrow ")  # 双向箭头
+                expr_render = expr_render.replace("⇒", r"\Rightarrow ")  # 蕴含
+                expr_render = expr_render.replace("⇔", r"\Leftrightarrow ")  # 等价
+                expr_render = expr_render.replace("⟺", r"\leftrightarrow ")  # 当且仅当 (iff)
+                expr_render = expr_render.replace("⊤", r"\top ")  # 真
+                expr_render = expr_render.replace("⊥", r"\bot ")  # 假
+                expr_render = expr_render.replace("…", r"\ldots ")  # 省略号
+                # 集合符号
+                expr_render = expr_render.replace("∈", r"\in ")  # 属于
+                expr_render = expr_render.replace("∉", r"\notin ")  # 不属于
+                expr_render = expr_render.replace("⊂", r"\subset ")  # 真子集
+                expr_render = expr_render.replace("⊃", r"\supset ")  # 真超集
+                expr_render = expr_render.replace("⊆", r"\subseteq ")  # 子集
+                expr_render = expr_render.replace("⊇", r"\supseteq ")  # 超集
+                expr_render = expr_render.replace("∪", r"\cup ")  # 并集
+                expr_render = expr_render.replace("∩", r"\cap ")  # 交集
+                expr_render = expr_render.replace("∅", r"\emptyset ")  # 空集
+                # 关系符号
+                expr_render = expr_render.replace("≤", r"\leq ")  # 小于等于
+                expr_render = expr_render.replace("≥", r"\geq ")  # 大于等于
+                expr_render = expr_render.replace("≠", r"\neq ")  # 不等于
+                expr_render = expr_render.replace("≈", r"\approx ")  # 约等于
+                expr_render = expr_render.replace("≡", r"\equiv ")  # 恒等于
+                expr_render = expr_render.replace("±", r"\pm ")  # 正负号
+                expr_render = expr_render.replace("×", r"\times ")  # 乘号
+                expr_render = expr_render.replace("÷", r"\div ")  # 除号
+                # 其他符号
+                expr_render = expr_render.replace("∞", r"\infty ")  # 无穷
+                expr_render = expr_render.replace("∂", r"\partial ")  # 偏导
+                expr_render = expr_render.replace("∇", r"\nabla ")  # 梯度
+                expr_render = expr_render.replace("∑", r"\sum ")  # 求和
+                expr_render = expr_render.replace("∏", r"\prod ")  # 求积
+                expr_render = expr_render.replace("∫", r"\int ")  # 积分
+                expr_render = expr_render.replace("√", r"\sqrt ")  # 根号
+                # 清理多余空格
+                expr_render = re2.sub(r'\s+', ' ', expr_render).strip()
+                
+                # 检测是否是多行公式
+                is_multiline = re2.search(r"\\begin\{align\}|\\\\", expr_render)
+                print(f"DEBUG render_math_expr: is_multiline={bool(is_multiline)}")
+                
+                actual_line_count = 1  # 记录实际行数
+                
+                if is_multiline:
+                    print("DEBUG render_math_expr: 检测到多行公式，开始拆分")
+                    # 多行公式：拆分并分别渲染
+                    # 移除 align 环境
+                    expr_render = re2.sub(r"\\begin\{align\}", "", expr_render)
+                    expr_render = re2.sub(r"\\end\{align\}", "", expr_render)
+                    expr_render = re2.sub(r"\\begin\{aligned\}", "", expr_render)
+                    expr_render = re2.sub(r"\\end\{aligned\}", "", expr_render)
+                    
+                    # 按 \\ 拆分
+                    lines = re2.split(r"\\\\", expr_render)
+                    lines = [line.strip() for line in lines if line.strip()]
+                    print(f"DEBUG render_math_expr: 拆分出 {len(lines)} 行")
+                    
+                    # 渲染每行
+                    line_images = []
+                    max_width = 0
+                    total_height = 0
+                    line_spacing = 4  # 行间距
+                    
+                    import matplotlib.pyplot as plt
+                    for i, line in enumerate(lines):
+                        line_expr = line.strip()
+                        if not line_expr:
+                            continue
+                        print(f"DEBUG render_math_expr: 渲染第 {i+1} 行: {line_expr[:50]}...")
+                        if not line_expr.startswith("$"):
+                            line_expr = f"${line_expr}$"
+                        
+                        fig = plt.figure(figsize=(2, 1))
+                        fig.text(0.5, 0.5, line_expr, ha="center", va="center", fontsize=16)
+                        buf = BytesIO()
+                        plt.savefig(buf, dpi=260, format="png", bbox_inches="tight", pad_inches=0.05, transparent=True)
+                        plt.close(fig)
+                        
+                        from PIL import Image
+                        line_im = Image.open(BytesIO(buf.getvalue()))
+                        print(f"DEBUG render_math_expr: 第 {i+1} 行渲染成功，尺寸={line_im.width}x{line_im.height}")
+                        line_images.append(line_im)
+                        max_width = max(max_width, line_im.width)
+                        total_height += line_im.height + line_spacing
+                    
+                    if not line_images:
+                        print("DEBUG render_math_expr: 没有成功渲染的行")
+                        return None, 0, 0
+                    
+                    actual_line_count = len(line_images)  # 记录实际行数
+                    print(f"DEBUG render_math_expr: 实际行数={actual_line_count}")
+                    
+                    # 垂直拼接所有行
+                    total_height -= line_spacing  # 移除最后一行的间距
+                    print(f"DEBUG render_math_expr: 拼接 {len(line_images)} 行，总尺寸={max_width}x{total_height}")
+                    combined = Image.new("RGBA", (max_width, total_height), (0, 0, 0, 0))
+                    y_offset = 0
+                    for line_im in line_images:
+                        x_offset = 0  # 左对齐
+                        combined.paste(line_im, (x_offset, y_offset))
+                        y_offset += line_im.height + line_spacing
+                    
+                    img_w, img_h = combined.width, combined.height
+                    buf2 = BytesIO()
+                    combined.save(buf2, format="PNG")
+                    png_bytes = buf2.getvalue()
+                else:
+                    print("DEBUG render_math_expr: 单行公式")
+                    # 单行公式
+                    if not expr_render.startswith("$"):
+                        expr_render = f"${expr_render}$"
+                    
+                    import matplotlib.pyplot as plt
+                    fig = plt.figure(figsize=(2, 1))
+                    fig.text(0.5, 0.5, expr_render, ha="center", va="center", fontsize=16)
+                    buf = BytesIO()
+                    plt.savefig(buf, dpi=260, format="png", bbox_inches="tight", pad_inches=0.05, transparent=True)
+                    plt.close(fig)
+                    png_bytes = buf.getvalue()
+                    
                     from PIL import Image
                     im = Image.open(BytesIO(png_bytes))
-                    max_h = 48
-                    if im.height > max_h:
-                        new_w = int(im.width * max_h / im.height)
-                        im = im.resize((new_w, max_h), Image.LANCZOS)
                     img_w, img_h = im.width, im.height
+
+                # 缩放：限制最大宽度，并缩放到合适的高度
+                from PIL import Image
+                im = Image.open(BytesIO(png_bytes))
+                
+                # 计算目标高度：使用实际行数
+                target_height = actual_line_count * 24
+                
+                # 缩放到目标高度
+                if im.height > target_height:
+                    scale = target_height / im.height
+                    new_w = int(im.width * scale)
+                    im = im.resize((new_w, target_height), Image.LANCZOS)
+                    print(f"DEBUG render_math_expr: 缩放图片从 {img_w}x{img_h} 到 {new_w}x{target_height}")
+                
+                # 限制最大宽度
+                max_w = 800
+                if im.width > max_w:
+                    new_h = int(im.height * max_w / im.width)
+                    im = im.resize((max_w, new_h), Image.LANCZOS)
                     
-                    buf2 = BytesIO()
-                    im.save(buf2, format="PNG", optimize=True)
-                    png_bytes = buf2.getvalue()
-                except Exception as ie:
-                    print(f"DEBUG 公式缩放失败（忽略缩放） {expr}: {ie}")
+                img_w, img_h = im.width, im.height
+                print(f"DEBUG render_math_expr: 最终尺寸={img_w}x{img_h}")
+                
+                buf2 = BytesIO()
+                im.save(buf2, format="PNG", optimize=True)
+                png_bytes = buf2.getvalue()
             except Exception as e:
                 print(f"DEBUG 渲染公式失败 {expr}: {e}")
-                return None, 0, 0
+                import traceback
+                traceback.print_exc()
+                return None, 0, 0, None
 
             # 上传图片，复用 upload_cover_image 通过临时文件
             tmp_path = None
@@ -2697,10 +2880,10 @@ class XuexitongCrawler(CourseAPI, ClassAPI):
                     tmp_path = tmp.name
                 upload_result = self.upload_cover_image(tmp_path)
                 if upload_result.get("success"):
-                    return upload_result.get("url", ""), img_w, img_h
+                    return upload_result.get("url", ""), img_w, img_h, None
                 else:
                     print(f"DEBUG 公式上传失败: {upload_result}")
-                    return None, 0, 0
+                    return None, 0, 0, None
             finally:
                 if tmp_path:
                     try:
@@ -2713,35 +2896,62 @@ class XuexitongCrawler(CourseAPI, ClassAPI):
             # 仅当含有 $ 或 \[ 时才尝试解析，避免无关文本的正则开销
             if not text or not re.search(r"\$|\\\[", text):
                 return text, {}
-            pattern = re.compile(r"\$\$(.+?)\$\$|\$(.+?)\$|\\\\\[(.+?)\\\\\]", re.DOTALL)
+            # 改进正则：支持 $$ 后有空行的情况
+            pattern = re.compile(r"\$\$\s*(.+?)\s*\$\$|\$\s*(.+?)\s*\$|\\\[\s*(.+?)\s*\\\]", re.DOTALL)
             replacements = {}
             new_text = text
             for idx, m in enumerate(pattern.finditer(text)):
                 expr = m.group(1) or m.group(2) or m.group(3) or ""
                 expr = expr.strip()
+                print(f"DEBUG: 匹配到公式表达式: {expr[:100]}...")
                 if not expr:
                     continue
                     
                 if expr in self._math_img_cache:
-                    url_info = self._math_img_cache[expr]
-                    if isinstance(url_info, tuple):
-                        url, w, h = url_info
+                    cache_info = self._math_img_cache[expr]
+                    if cache_info and cache_info[0] == "text":
+                        # 缓存标记为纯文本
+                        url, w, h, plain_text = None, 0, 0, cache_info[3]
+                    elif isinstance(cache_info, tuple) and len(cache_info) == 4:
+                        url, w, h, plain_text = cache_info
+                    elif isinstance(cache_info, tuple):
+                        url, w, h = cache_info
+                        plain_text = None
                     else:
-                        url, w, h = url_info, 0, 48 # 兼容旧缓存
+                        url, w, h = cache_info, 0, 48 # 兼容旧缓存
+                        plain_text = None
                 else:
-                    url, w, h = render_math_expr(expr)
+                    result = render_math_expr(expr)
+                    if result is None or len(result) < 4:
+                        url, w, h = result[0] if result else None, result[1] if result else 0, result[2] if result else 0
+                        plain_text = None
+                    else:
+                        url, w, h, plain_text = result
                     if url:
-                        self._math_img_cache[expr] = (url, w, h)
+                        self._math_img_cache[expr] = (url, w, h, plain_text)
+                    elif plain_text:
+                        self._math_img_cache[expr] = ("text", 0, 0, plain_text)  # 缓存纯文本
                         
-                if not url:
-                    continue
+                if plain_text:
+                    # 纯文本模式：直接替换为转换后的文本（去掉 $ 符号）
+                    placeholder = f"__MATH_TEXT_{len(replacements)}__"
+                    replacements[placeholder] = plain_text
+                    new_text = new_text.replace(m.group(0), placeholder, 1)
+                elif url:
+                    # 图片模式：替换为图片标签
+                    placeholder = f"__MATH_IMG_{len(replacements)}__"
+                    # 根据实际高度计算行数，每行高度 24px
+                    if h > 0:
+                        import math
+                        lines = math.ceil(h / 24)  # 向上取整得到行数
+                        img_h = lines * 24  # 最终高度 = 行数 * 24
+                        img_html = f'<img src="{url}" alt="{expr}" style="vertical-align:middle; height:{img_h}px;"  />'
+                    else:
+                        img_html = f'<img src="{url}" alt="{expr}" style="vertical-align:middle; height:24px;"  />'
                     
-                placeholder = f"__MATH_IMG_{len(replacements)}__"
-                # 在 HTML 中仅控制高度，宽度保持自适应以确保比例正常
-                img_html = f'<img src="{url}" alt="{expr}" style="vertical-align:middle; height:24px;"  />'
-                
-                replacements[placeholder] = img_html
-                new_text = new_text.replace(m.group(0), placeholder, 1)
+                    replacements[placeholder] = img_html
+                    new_text = new_text.replace(m.group(0), placeholder, 1)
+                # 如果既没有plain_text也没有url，保留原样（不替换）
             return new_text, replacements
 
         content, content_repl = replace_math(content)
