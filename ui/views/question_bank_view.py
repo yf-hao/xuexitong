@@ -5,10 +5,9 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLabel, QFrame, QFileDialog, QMenu, QDialog,
-    QLineEdit, QDialogButtonBox, QTextEdit, QComboBox, QProgressBar,
-    QMessageBox, QSplitter, QInputDialog
+    QLineEdit, QDialogButtonBox, QMessageBox, QSplitter, QInputDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction
 
 
@@ -156,27 +155,27 @@ class QuestionBankView(QWidget):
     def setup_ui(self):
         """设置界面布局"""
         self.setStyleSheet("background-color: #1e1e1e;")
-        
+
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        
+
         # 使用 Splitter 分割左右区域
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # ====== 左侧：文件夹树 ======
+
+        # 左侧：文件夹树
         left_panel = self.create_left_panel()
         splitter.addWidget(left_panel)
-        
-        # ====== 右侧：上传区域 ======
+
+        # 右侧：题目列表展示区（预留接口）
         right_panel = self.create_right_panel()
         splitter.addWidget(right_panel)
-        
+
         # 设置分割比例
-        splitter.setSizes([500, 600])
+        splitter.setSizes([350, 650])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        
+
         main_layout.addWidget(splitter)
     
     def create_left_panel(self) -> QWidget:
@@ -252,189 +251,143 @@ class QuestionBankView(QWidget):
         self.folder_tree.customContextMenuRequested.connect(self.show_folder_menu)
         self.folder_tree.itemClicked.connect(self.on_folder_selected)
         layout.addWidget(self.folder_tree)
-        
+
         return panel
-    
+
     def create_right_panel(self) -> QWidget:
-        """创建右侧上传面板"""
+        """创建右侧题目列表展示面板（预留接口）"""
         panel = QFrame()
         panel.setStyleSheet("background-color: #1e1e1e;")
-        
+
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
-        
+
         # 标题
-        title = QLabel("📚 题库上传")
-        title.setStyleSheet("""
+        self.question_title = QLabel("📝 题目列表")
+        self.question_title.setStyleSheet("""
             QLabel {
                 color: #ffffff;
                 font-size: 18px;
                 font-weight: bold;
             }
         """)
-        layout.addWidget(title)
-        
-        # 拖拽上传区域
-        self.drop_area = QFrame()
-        self.drop_area.setFixedHeight(150)
-        self.drop_area.setStyleSheet("""
-            QFrame {
-                background-color: #252526;
-                border: 2px dashed #3e3e42;
-                border-radius: 8px;
+        layout.addWidget(self.question_title)
+
+        # 开发中提示
+        self.dev_hint = QLabel("🚧 开发中...")
+        self.dev_hint.setStyleSheet("""
+            QLabel {
+                color: #ff9800;
+                font-size: 24px;
+                font-weight: bold;
+                padding: 50px;
             }
         """)
-        self.drop_area.setAcceptDrops(True)
-        
-        drop_layout = QVBoxLayout(self.drop_area)
-        drop_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        drop_icon = QLabel("📄")
-        drop_icon.setStyleSheet("font-size: 40px;")
-        drop_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_layout.addWidget(drop_icon)
-        
-        drop_text = QLabel("拖拽 Markdown 文件到此处\n\n或点击下方按钮选择文件")
-        drop_text.setStyleSheet("color: #888888; font-size: 14px;")
-        drop_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_layout.addWidget(drop_text)
-        
-        layout.addWidget(self.drop_area)
-        
-        # 选择文件按钮
-        select_file_btn = QPushButton("📁 选择文件")
-        select_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        select_file_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 20px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-            }
-        """)
-        select_file_btn.clicked.connect(self.select_file)
-        layout.addWidget(select_file_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        
-        # 分隔线
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("background-color: #3e3e42;")
-        layout.addWidget(line)
-        
-        # 目标文件夹选择
-        folder_layout = QHBoxLayout()
-        folder_label = QLabel("目标文件夹:")
-        folder_label.setStyleSheet("color: #cccccc; font-size: 13px;")
-        
-        self.folder_combo = QComboBox()
-        self.folder_combo.setStyleSheet("""
-            QComboBox {
+        self.dev_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.dev_hint)
+
+        # 题目列表占位区域（未来用于展示题目）
+        self.question_list = QTreeWidget()
+        self.question_list.setHeaderLabels(["题号", "题目内容", "类型", "难度"])
+        self.question_list.setColumnWidth(0, 60)
+        self.question_list.setColumnWidth(1, 400)
+        self.question_list.setColumnWidth(2, 80)
+        self.question_list.setColumnWidth(3, 80)
+        self.question_list.setStyleSheet("""
+            QTreeWidget {
                 background-color: #252526;
-                color: #ffffff;
+                color: #cccccc;
                 border: 1px solid #3e3e42;
                 border-radius: 4px;
-                padding: 8px 12px;
-                min-width: 300px;
+                font-size: 13px;
             }
-            QComboBox:hover {
-                border: 1px solid #007acc;
+            QTreeWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #3e3e42;
             }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #252526;
+            QTreeWidget::item:selected {
+                background-color: #094771;
                 color: #ffffff;
-                selection-background-color: #094771;
+            }
+            QTreeWidget::item:hover {
+                background-color: #2a2d2e;
+            }
+            QHeaderView::section {
+                background-color: #333333;
+                color: #ffffff;
+                padding: 8px;
+                border: none;
+                border-bottom: 1px solid #3e3e42;
+                font-weight: bold;
             }
         """)
-        folder_layout.addWidget(folder_label)
-        folder_layout.addWidget(self.folder_combo)
-        folder_layout.addStretch()
-        layout.addLayout(folder_layout)
-        
-        # 分隔线
-        line2 = QFrame()
-        line2.setFrameShape(QFrame.Shape.HLine)
-        line2.setStyleSheet("background-color: #3e3e42;")
-        layout.addWidget(line2)
-        
-        # 操作按钮
+        layout.addWidget(self.question_list)
+
+        # 提示标签
+        self.hint_label = QLabel("💡 选择左侧文件夹后，题目将显示在此处")
+        self.hint_label.setStyleSheet("""
+            QLabel {
+                color: #888888;
+                font-size: 13px;
+                padding: 20px;
+            }
+        """)
+        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.hint_label)
+
+        # 操作按钮区域（预留）
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
-        preview_btn = QPushButton("预览解析")
-        preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        preview_btn.setStyleSheet("""
+
+        self.btn_refresh = QPushButton("🔄 刷新")
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.setStyleSheet("""
             QPushButton {
                 background-color: #3e3e42;
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
-                padding: 10px 20px;
+                padding: 8px 16px;
                 font-size: 13px;
             }
             QPushButton:hover {
                 background-color: #4e4e52;
             }
         """)
-        preview_btn.clicked.connect(self.preview_parsing)
-        btn_layout.addWidget(preview_btn)
-        
-        upload_btn = QPushButton("开始上传")
-        upload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        upload_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 30px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #005c99;
-            }
-        """)
-        upload_btn.clicked.connect(self.start_upload)
-        btn_layout.addWidget(upload_btn)
-        
+        self.btn_refresh.clicked.connect(self._on_refresh_questions)
+        btn_layout.addWidget(self.btn_refresh)
+
         layout.addLayout(btn_layout)
-        layout.addStretch()
-        
+
         return panel
-    
+
+    def _on_refresh_questions(self):
+        """刷新题目列表（预留接口）"""
+        self.status_update.emit("刷新题目列表...")
+        # TODO: 实现题目加载逻辑
+
     def load_sample_folders(self):
         """加载示例文件夹数据（用于测试）"""
         self.folder_tree.clear()
-        self.folder_combo.clear()
         self._folder_items = {}
         self._folder_data = {}
-        
+
         for folder in SAMPLE_FOLDERS:
             self._add_folder_item(None, folder)
-    
+
     def load_folders(self):
         """从服务器加载真实文件夹数据"""
         if not self.crawler:
             self.status_update.emit("未初始化爬虫，加载示例数据")
             self.load_sample_folders()
             return
-        
+
         self.status_update.emit("正在加载题库文件夹...")
         self.folder_tree.clear()
-        self.folder_combo.clear()
         self._folder_items = {}
         self._folder_data = {}
-        
+
         # 添加根节点"全部题目"
         root_item = QTreeWidgetItem(["📁 全部题目"])
         root_item.setData(0, Qt.ItemDataRole.UserRole, "root")
@@ -478,50 +431,42 @@ class QuestionBankView(QWidget):
         folder_id = folder_data.get("id", "")
         name = folder_data.get("name", "未命名")
         count = folder_data.get("count", 0)
-        
+
         item = QTreeWidgetItem([f"📁 {name} ({count})"])
         item.setData(0, Qt.ItemDataRole.UserRole, folder_id)
-        
+
         # 存储映射
         self._folder_items[folder_id] = item
         self._folder_data[folder_id] = folder_data
-        
+
         if parent:
             parent.addChild(item)
         else:
             self.folder_tree.addTopLevelItem(item)
-        
-        # 添加到下拉框
-        path = self._get_folder_path(item)
-        self.folder_combo.addItem(path, folder_id)
-        
+
         item.setExpanded(True)
-    
+
     def on_show(self):
         """视图显示时调用"""
         self.load_folders()
-    
+
     def _add_folder_item(self, parent: QTreeWidgetItem, folder_data: dict):
         """递归添加文件夹项"""
         item = QTreeWidgetItem([f"📁 {folder_data['name']} ({folder_data['count']})"])
         item.setData(0, Qt.ItemDataRole.UserRole, folder_data['id'])
-        
+
         # 存储映射
         self._folder_items[folder_data['id']] = item
-        
+
         if parent:
             parent.addChild(item)
         else:
             self.folder_tree.addTopLevelItem(item)
-        
-        # 添加到下拉框
-        path = self._get_folder_path(parent) + folder_data['name'] if parent else folder_data['name']
-        self.folder_combo.addItem(path, folder_data['id'])
-        
+
         # 递归添加子文件夹
         for child in folder_data.get('children', []):
             self._add_folder_item(item, child)
-        
+
         item.setExpanded(True)
     
     def _get_folder_path(self, item: QTreeWidgetItem) -> str:
@@ -586,71 +531,59 @@ class QuestionBankView(QWidget):
         folder_id = item.data(0, Qt.ItemDataRole.UserRole)
         self.current_folder_id = folder_id
         self.current_folder_path = self._get_folder_path(item).rstrip(" > ")
-        
-        # 更新下拉框
-        index = self.folder_combo.findData(folder_id)
-        if index >= 0:
-            self.folder_combo.setCurrentIndex(index)
-        
+
         # 更新状态
         self.status_update.emit(f"已选择文件夹: {self.current_folder_path}")
-        
+
         # 加载子文件夹（如果尚未加载）
         self._load_subfolders(item)
-    
+
     def _load_subfolders(self, item: QTreeWidgetItem):
         """加载子文件夹"""
         # 检查是否已经加载过子文件夹
         if item.data(0, Qt.ItemDataRole.UserRole + 1):  # 使用 UserRole+1 存储加载状态
             return
-        
+
         folder_id = item.data(0, Qt.ItemDataRole.UserRole)
         if not folder_id or folder_id.startswith("new-"):
             # 新建的文件夹，标记为已加载
             item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
             return
-        
+
         # 标记为正在加载
         item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
-        
+
         # 获取子文件夹
         try:
             # 特殊处理：root 节点不需要再加载子文件夹（已由 load_folders 加载）
             if folder_id == "root":
                 return
-            
+
             subfolders = self.crawler.get_question_subfolders(folder_id)
-            
+
             if subfolders:
-                # 获取父文件夹路径用于下拉框
-                parent_path = self._get_folder_path(item).rstrip(" > ")
-                
                 for sf in subfolders:
                     # 避免重复添加：检查是否已存在相同 ID 的文件夹
                     existing_ids = set()
                     for i in range(item.childCount()):
                         child_item = item.child(i)
                         existing_ids.add(child_item.data(0, Qt.ItemDataRole.UserRole))
-                    
+
                     if sf['id'] not in existing_ids:
                         child = QTreeWidgetItem([f"📁 {sf['name']} ({sf['count']})"])
                         child.setData(0, Qt.ItemDataRole.UserRole, sf['id'])
                         child.setData(0, Qt.ItemDataRole.UserRole + 1, False)  # 子文件夹未加载
                         item.addChild(child)
-                        
+
                         # 存储映射
                         self._folder_items[sf['id']] = child
-                        
-                        # 添加到下拉框（包含完整路径）
-                        full_path = parent_path + " > " + sf['name'] if parent_path != "全部题目" else sf['name']
-                        self.folder_combo.addItem(full_path, sf['id'])
-                
+
                 item.setExpanded(True)
                 self.status_update.emit(f"已加载 {len(subfolders)} 个子文件夹")
             else:
                 # 没有子文件夹
                 pass
-                
+
         except Exception as e:
             print(f"加载子文件夹失败: {e}")
             # 加载失败，重置状态以便下次重试
@@ -679,23 +612,20 @@ class QuestionBankView(QWidget):
                         item.setData(0, Qt.ItemDataRole.UserRole + 1, True)  # 已加载（无子文件夹）
                         root_item.addChild(item)
                         root_item.setExpanded(True)
-                        
+
                         # 存储映射
                         self._folder_items[folder_id] = item
-                        
-                        # 添加到下拉框
-                        self.folder_combo.addItem(name, folder_id)
-                    
+
                     self.status_update.emit(f"已创建文件夹: {name}")
                 else:
                     QMessageBox.warning(self, "创建失败", result.get("msg", "无法创建文件夹"))
                     self.status_update.emit(f"创建文件夹失败: {name}")
-    
+
     def create_subfolder(self, parent_item: QTreeWidgetItem):
         """创建子文件夹"""
         parent_id = parent_item.data(0, Qt.ItemDataRole.UserRole)
         parent_path = self._get_folder_path(parent_item).rstrip(" > ")
-        
+
         # 确定父文件夹 ID
         # "root" 节点下创建的文件夹，pid 应该是 "0"（根目录）
         if parent_id == "root":
@@ -705,7 +635,7 @@ class QuestionBankView(QWidget):
             return
         else:
             api_parent_id = parent_id
-        
+
         dialog = CreateFolderDialog(parent_path, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             name = dialog.get_folder_name()
@@ -713,10 +643,10 @@ class QuestionBankView(QWidget):
                 if not self.crawler:
                     self.status_update.emit("未初始化爬虫，无法创建文件夹")
                     return
-                
+
                 # 调用 API 创建
                 result = self.crawler.create_question_folder(name, parent_id=api_parent_id)
-                
+
                 if result.get("success"):
                     folder_id = result.get("id", "")
                     # 创建新项
@@ -725,14 +655,11 @@ class QuestionBankView(QWidget):
                     item.setData(0, Qt.ItemDataRole.UserRole + 1, True)  # 已加载（无子文件夹）
                     parent_item.addChild(item)
                     parent_item.setExpanded(True)
-                    
+
                     # 存储映射
                     self._folder_items[folder_id] = item
-                    
-                    # 添加到下拉框
+
                     full_path = parent_path + " > " + name
-                    self.folder_combo.addItem(full_path, folder_id)
-                    
                     self.status_update.emit(f"已创建子文件夹: {full_path}")
                 else:
                     QMessageBox.warning(self, "创建失败", result.get("msg", "无法创建文件夹"))
@@ -970,20 +897,7 @@ class QuestionBankView(QWidget):
             QMessageBox.warning(self, "上传失败", f"上传过程中出错: {e}")
             import traceback
             traceback.print_exc()
-    
-    def select_file(self):
-        """选择文件（用于右侧面板的上传按钮）"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择题目文件",
-            "",
-            "题目文件 (*.md *.txt);;Markdown 文件 (*.md);;文本文件 (*.txt);;所有文件 (*)"
-        )
-        
-        if file_path:
-            self.selected_file = file_path
-            self.status_update.emit(f"已选择文件: {file_path}")
-    
+
     def filter_folders(self, text: str):
         """过滤文件夹"""
         # 简单实现：隐藏不匹配的项
@@ -1008,38 +922,7 @@ class QuestionBankView(QWidget):
                 any_visible = True
         
         return any_visible
-    
-    def preview_parsing(self):
-        """预览解析结果"""
-        if not hasattr(self, 'selected_file'):
-            QMessageBox.warning(self, "提示", "请先选择要解析的文件")
-            return
-        
-        try:
-            with open(self.selected_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            questions = self._parse_questions(content)
-            
-            if questions:
-                preview_text = f"共解析到 {len(questions)} 道题目：\n\n"
-                type_names = {0: '单选', 1: '多选', 2: '填空', 3: '判断'}
-                for i, q in enumerate(questions[:5]):  # 只显示前5道
-                    preview_text += f"{i+1}. {q['content'][:50]}...\n"
-                    preview_text += f"   类型: {type_names.get(q['q_type'], '未知')}\n"
-                    display_answer = q.get('original_answer', q['answer'])
-                    preview_text += f"   答案: {display_answer}\n\n"
-                
-                if len(questions) > 5:
-                    preview_text += f"... 还有 {len(questions) - 5} 道题目"
-                
-                QMessageBox.information(self, "解析结果", preview_text)
-            else:
-                QMessageBox.warning(self, "解析结果", "未能解析到任何题目")
-                
-        except Exception as e:
-            QMessageBox.warning(self, "解析失败", f"解析文件失败: {e}")
-    
+
     def _parse_questions(self, content: str) -> list:
         """解析题目内容：更稳健的题号切分，避免解析中的 1. 2. 被误识别"""
         import re
@@ -1284,83 +1167,3 @@ class QuestionBankView(QWidget):
             "difficulty": difficulty,
             "easy": easy  # 难度等级 (0=易, 1=中, 2=难)
         }
-    
-    def start_upload(self):
-        """开始上传"""
-        folder_id = self.folder_combo.currentData()
-        if not folder_id:
-            QMessageBox.warning(self, "提示", "请先选择目标文件夹")
-            return
-        
-        if folder_id == "root":
-            QMessageBox.warning(self, "提示", "请选择具体的文件夹，不能上传到根目录")
-            return
-        
-        if not hasattr(self, 'selected_file'):
-            QMessageBox.warning(self, "提示", "请先选择要上传的文件")
-            return
-        
-        if not self.crawler:
-            QMessageBox.warning(self, "提示", "未初始化爬虫")
-            return
-        
-        # 解析文件
-        try:
-            with open(self.selected_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            questions = self._parse_questions(content)
-            
-            if not questions:
-                QMessageBox.warning(self, "提示", "未能解析到任何题目")
-                return
-            
-            # 确认上传
-            reply = QMessageBox.question(
-                self, "确认上传",
-                f"共解析到 {len(questions)} 道题目\n确定上传到当前文件夹吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-            
-            # 开始上传
-            success_count = 0
-            duplicate_count = 0
-            fail_count = 0
-            total = len(questions)
-            
-            for i, q in enumerate(questions):
-                self.status_update.emit(f"正在上传第 {i+1}/{total} 道题目...")
-                
-                result = self.crawler.add_question(folder_id, q)
-                
-                if result.get("success"):
-                    success_count += 1
-                    print(f"题目 {i+1} 上传成功: {q['content'][:30]}...")
-                else:
-                    # 检查是否是"题目已存在"
-                    result_msg = result.get("msg", "")
-                    if "已存在相同题目" in result_msg or "重复添加" in result_msg:
-                        duplicate_count += 1
-                        print(f"题目 {i+1} 已存在，跳过")
-                    else:
-                        fail_count += 1
-                        print(f"题目 {i+1} 上传失败: {result_msg}")
-            
-            # 显示结果
-            msg = f"上传完成！\n总共: {total} 道\n成功添加: {success_count} 道\n重复: {duplicate_count} 道\n失败: {fail_count} 道"
-            self.status_update.emit(msg)
-            QMessageBox.information(self, "上传完成", msg)
-            
-            # 刷新当前文件夹
-            if success_count > 0:
-                parent_item = self._folder_items.get("root")
-                if parent_item:
-                    self._refresh_current_level(parent_item)
-            
-        except Exception as e:
-            QMessageBox.warning(self, "上传失败", f"上传过程中出错: {e}")
-            import traceback
-            traceback.print_exc()

@@ -1,6 +1,8 @@
 from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from core.config import DEFAULT_FID
+
 class CourseWorker(QThread):
     """Worker thread to fetch initial course list."""
     courses_ready = pyqtSignal(list)
@@ -241,6 +243,183 @@ class AddGroupWorker(QThread):
     def run(self):
         success, message = self.crawler.add_group(self.course_id, self.class_id, self.name)
         self.group_added.emit(success, message)
+
+
+class GetTeachersWorker(QThread):
+    """Worker thread to fetch teacher team list."""
+    teachers_ready = pyqtSignal(bool, str, list)
+
+    def __init__(self, crawler, course_id, clazz_id):
+        super().__init__()
+        self.crawler = crawler
+        self.course_id = course_id
+        self.clazz_id = clazz_id
+
+    def run(self):
+        try:
+            teachers = self.crawler.get_teachers_for_clazz(self.course_id, self.clazz_id)
+            self.teachers_ready.emit(True, "加载成功", teachers)
+        except Exception as e:
+            self.teachers_ready.emit(False, f"加载教师团队失败: {e}", [])
+
+
+class AddTeamTeacherWorker(QThread):
+    """Worker thread to add teachers to the team."""
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, crawler, course_id, teacher_info_list):
+        super().__init__()
+        self.crawler = crawler
+        self.course_id = course_id
+        self.teacher_info_list = teacher_info_list
+
+    def run(self):
+        try:
+            success, message = self.crawler.add_team_teacher(self.course_id, self.teacher_info_list)
+            self.finished.emit(success, message)
+        except Exception as e:
+            self.finished.emit(False, f"添加教师失败: {e}")
+
+
+class RemoveTeamTeacherWorker(QThread):
+    """Worker thread to remove teachers from the team."""
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, crawler, course_id, teacher_ids):
+        super().__init__()
+        self.crawler = crawler
+        self.course_id = course_id
+        self.teacher_ids = teacher_ids
+
+    def run(self):
+        try:
+            success, message = self.crawler.remove_team_teacher(self.course_id, self.teacher_ids)
+            self.finished.emit(success, message)
+        except Exception as e:
+            self.finished.emit(False, f"移除教师失败: {e}")
+
+
+class CloneVerifyWorker(QThread):
+    """Worker thread for clone pre-verification flow."""
+    code_required = pyqtSignal(dict)
+    verification_done = pyqtSignal(bool, str, object)
+
+    def __init__(self, crawler, course_id, cpi, clazz_id=""):
+        super().__init__()
+        self.crawler = crawler
+        self.course_id = course_id
+        self.cpi = cpi
+        self.clazz_id = clazz_id
+
+    def _fetch_image_bytes(self, image_ref):
+        if not image_ref:
+            return None
+        if isinstance(image_ref, bytes):
+            return image_ref
+        if isinstance(image_ref, str) and image_ref.startswith("http"):
+            resp = self.crawler.session.get(image_ref, timeout=15)
+            resp.raise_for_status()
+            return resp.content
+        return None
+
+    def run(self):
+        try:
+            verify_status = self.crawler.check_clone_verify_status(self.course_id, self.cpi)
+            if not verify_status.get("status"):
+                self.verification_done.emit(False, verify_status.get("msg", "校验状态获取失败"), None)
+                return
+
+            if not verify_status.get("needVerifyCode"):
+                self.verification_done.emit(True, "无需验证码", {
+                    "copymapenc": "",
+                    "copymaptime": "",
+                })
+                return
+
+            captcha_data = self.crawler.get_clone_captcha(self.course_id)
+            if not captcha_data.get("success"):
+                self.verification_done.emit(False, "获取滑块验证码失败", None)
+                return
+
+            shade_bytes = self._fetch_image_bytes(captcha_data.get("shade_image"))
+            cutout_bytes = self._fetch_image_bytes(captcha_data.get("cutout_image"))
+            if not shade_bytes or not cutout_bytes:
+                self.verification_done.emit(False, "下载滑块验证码图片失败", None)
+                return
+
+            x_coord = self.crawler.detect_slider_displacement(shade_bytes, cutout_bytes)
+            validate = self.crawler.submit_clone_captcha(
+                token=captcha_data.get("token"),
+                iv=captcha_data.get("iv"),
+                x_coord=x_coord,
+            )
+            if not validate:
+                self.verification_done.emit(False, "滑块验证失败", None)
+                return
+
+            verify_data = self.crawler.fetch_clone_verify_code(
+                self.course_id,
+                self.cpi,
+                validate,
+                self.clazz_id,
+            )
+
+            if verify_data.get("result") is True and verify_data.get("needVerifyCode"):
+                self.code_required.emit(verify_data)
+                return
+
+            if verify_data.get("result") is True and verify_data.get("copymapenc") and verify_data.get("copymaptime"):
+                self.verification_done.emit(True, "校验成功", {
+                    "copymapenc": verify_data.get("copymapenc"),
+                    "copymaptime": verify_data.get("copymaptime"),
+                })
+                return
+
+            self.verification_done.emit(False, verify_data.get("msg", "克隆校验失败"), None)
+        except Exception as e:
+            self.verification_done.emit(False, f"克隆校验异常: {e}", None)
+
+
+class CloneSubmitVerifyWorker(QThread):
+    """Worker thread to submit SMS verify code for cloning."""
+    submit_finished = pyqtSignal(bool, str, object)
+
+    def __init__(self, crawler, course_id, cpi, verify_code):
+        super().__init__()
+        self.crawler = crawler
+        self.course_id = course_id
+        self.cpi = cpi
+        self.verify_code = verify_code
+
+    def run(self):
+        try:
+            result = self.crawler.submit_clone_verify_code(self.verify_code, self.course_id, self.cpi)
+            if result.get("success"):
+                self.submit_finished.emit(True, "验证码校验成功", {
+                    "copymapenc": result.get("copymapenc"),
+                    "copymaptime": result.get("copymaptime"),
+                })
+            else:
+                self.submit_finished.emit(False, result.get("msg", "验证码校验失败"), None)
+        except Exception as e:
+            self.submit_finished.emit(False, f"验证码校验异常: {e}", None)
+
+
+class CloneActionWorker(QThread):
+    """Worker thread to execute final clone action."""
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, crawler, payload):
+        super().__init__()
+        self.crawler = crawler
+        self.payload = payload
+
+    def run(self):
+        try:
+            result = self.crawler.request_clone_course(self.payload)
+            self.finished.emit(bool(result.get("status")), result.get("msg", "克隆完成"))
+        except Exception as e:
+            self.finished.emit(False, f"克隆请求异常: {e}")
 
 
 class CreateCourseWorker(QThread):
@@ -555,173 +734,114 @@ class FullCourseInfoWorker(QThread):
             print(f"FullCourseInfoWorker error: {e}")
             import traceback
             traceback.print_exc()
-            self.finished.emit({"success": False, "error": str(e)})
 
-class GetTeachersWorker(QThread):
-    """Worker thread to fetch the list of teachers for a class."""
-    teachers_ready = pyqtSignal(bool, str, list)  # success, message, teachers_list
 
-    def __init__(self, crawler, course_id, clazz_id):
-        super().__init__()
-        self.crawler = crawler
-        self.course_id = course_id
-        self.clazz_id = clazz_id
-
-    def run(self):
-        try:
-            teachers = self.crawler.get_teachers_for_clazz(self.course_id, self.clazz_id)
-            # transform dict to list if needed, but get_teachers_for_clazz returns list
-            if isinstance(teachers, list):
-                self.teachers_ready.emit(True, "获取成功", teachers)
-            else:
-                self.teachers_ready.emit(False, "获取教师列表失败", [])
-        except Exception as e:
-            self.teachers_ready.emit(False, f"获取失败: {str(e)}", [])
-
-class AddTeamTeacherWorker(QThread):
-    """Worker thread to add teachers to the course team."""
-    finished = pyqtSignal(bool, str)
-
-    def __init__(self, crawler, course_id, teachers_data):
-        super().__init__()
-        self.crawler = crawler
-        self.course_id = course_id
-        self.teachers_data = teachers_data # List of dicts with personId and enc
-
-    def run(self):
-        try:
-            success, message = self.crawler.add_team_teacher(self.course_id, self.teachers_data)
-            self.finished.emit(success, message)
-        except Exception as e:
-            self.finished.emit(False, f"添加异常: {str(e)}")
-
-class RemoveTeamTeacherWorker(QThread):
-    """Worker thread to remove teachers from the course team."""
-    finished = pyqtSignal(bool, str)
-
-    def __init__(self, crawler, course_id, teacher_ids):
-        super().__init__()
-        self.crawler = crawler
-        self.course_id = course_id
-        self.teacher_ids = teacher_ids # List of personIds (strings)
-
-    def run(self):
-        try:
-            success, message = self.crawler.remove_team_teacher(self.course_id, self.teacher_ids)
-            self.finished.emit(success, message)
-        except Exception as e:
-            self.finished.emit(False, f"移除异常: {str(e)}")
-
-class CloneVerifyWorker(QThread):
-    """处理克隆前的校验流程（滑块、验证码请求）"""
-    code_required = pyqtSignal(dict) # verify_data
-    verification_done = pyqtSignal(bool, str, dict) # success, message, tokens
+class AttendanceWorker(QThread):
+    """Worker thread to fetch attendance activities (考勤情况)."""
     
-    def __init__(self, crawler, course_id, cpi, clazz_id=""):
+    attendance_ready = pyqtSignal(object)  # list or error string
+    
+    def __init__(self, crawler):
         super().__init__()
         self.crawler = crawler
-        self.course_id = course_id
-        self.cpi = cpi
-        self.clazz_id = clazz_id
-        
+    
     def run(self):
         try:
-            # 1. 检查校验状态 (对标 need_verify)
-            status = self.crawler.check_clone_verify_status(self.course_id, self.cpi)
+            result = self.crawler.get_attendance_activities()
+            self.attendance_ready.emit(result)
+        except Exception as e:
+            print(f"AttendanceWorker error: {e}")
+            self.attendance_ready.emit(f"获取考勤活动失败: {e}")
+
+
+class AttendanceDetailWorker(QThread):
+    """Worker thread to fetch attendance detail (签到详情)."""
+    
+    detail_ready = pyqtSignal(object)  # AttendanceDetail or error string
+    
+    def __init__(self, crawler, active_id: str):
+        super().__init__()
+        self.crawler = crawler
+        self.active_id = active_id
+    
+    def run(self):
+        try:
+            result = self.crawler.get_attendance_detail(self.active_id)
+            self.detail_ready.emit(result)
+        except Exception as e:
+            print(f"AttendanceDetailWorker error: {e}")
+            self.detail_ready.emit(f"获取签到详情失败: {e}")
+
+
+class AbsenceStatsWorker(QThread):
+    """Worker thread to calculate absence statistics (缺勤统计)."""
+    
+    stats_ready = pyqtSignal(object)  # dict of absence stats or error string
+    
+    def __init__(self, crawler, activities):
+        super().__init__()
+        self.crawler = crawler
+        self.activities = activities
+    
+    def run(self):
+        try:
+            absence_stats = {}  # {uid: {name, username, absent_count, total_count}}
             
-            if not status.get("status"):
-                 self.verification_done.emit(False, f"判断是否需要验证失败: {status.get('msg', '接口状态异常')}", {})
-                 return
-                 
-            # 对标 Snippet 逻辑: if verify_info["verifycodeSucc"]: skip else: full flow
-            if status.get("verifycodeSucc"):
-                print("DEBUG: CloneVerifyWorker - already trusted, skipping verification")
-                self.verification_done.emit(True, "无需校验", {
-                    "copymapenc": status.get("copymapenc"),
-                    "copymaptime": status.get("copymaptime")
-                })
-                return
+            for activity in self.activities:
+                # 获取每个活动的详情
+                detail = self.crawler.get_attendance_detail(activity.active_id)
                 
-            # 2. 需要滑块验证
-            print("DEBUG: CloneVerifyWorker - verifycodeSucc is False, proceeding with full flow")
-            captcha = self.crawler.get_clone_captcha(self.course_id)
-            print(f"DEBUG: CloneVerifyWorker get_clone_captcha result: {captcha}")
-            if not captcha.get("success"):
-                self.verification_done.emit(False, "获取滑块验证码失败", {})
-                return
+                if isinstance(detail, str):
+                    # 跳过错误的活动
+                    continue
                 
-            # 识别滑块
-            print("DEBUG: CloneVerifyWorker downloading captcha images...")
-            img_headers = {
-                "Referer": "https://mooc2-gray.chaoxing.com/",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+                # 遍历所有记录
+                for record in detail:
+                    uid = record.uid
+                    
+                    # 如果该学生还未在统计中，初始化
+                    if uid not in absence_stats:
+                        absence_stats[uid] = {
+                            'name': record.name,
+                            'username': record.username,
+                            'absent_count': 0,
+                            'total_count': 0
+                        }
+                    
+                    # 统计总次数
+                    absence_stats[uid]['total_count'] += 1
+                    
+                    # 统计缺勤次数（status为0未签或5缺勤）
+                    if record.status in [0, 5]:
+                        absence_stats[uid]['absent_count'] += 1
+            
+            # 只保留有缺勤的学生
+            result = {
+                uid: stats for uid, stats in absence_stats.items() 
+                if stats['absent_count'] > 0
             }
-            shade_bytes = self.crawler.session.get(captcha["shade_image"], headers=img_headers).content
-            cutout_bytes = self.crawler.session.get(captcha["cutout_image"], headers=img_headers).content
-            x_coord = self.crawler.detect_slider_displacement(shade_bytes, cutout_bytes)
-            print(f"DEBUG: CloneVerifyWorker detected x_coord: {x_coord}")
             
-            # 3. 提交滑块
-            print(f"DEBUG: CloneVerifyWorker submitting slider captcha with token={captcha['token']}, x={x_coord}")
-            validate = self.crawler.submit_clone_captcha(captcha["token"], captcha["iv"], x_coord)
-            print(f"DEBUG: CloneVerifyWorker slider submission validate result: {validate}")
-            if not validate:
-                self.verification_done.emit(False, "滑块校验失败", {})
-                return
-                
-            # 4. 请求验证码
-            print(f"DEBUG: CloneVerifyWorker fetching verify code with validate={validate}")
-            verify_data = self.crawler.fetch_clone_verify_code(self.course_id, self.cpi, validate, self.clazz_id)
-            print(f"DEBUG: CloneVerifyWorker fetch_clone_verify_code result: {verify_data}")
-            # 只有当明确返回 result 为 False 时才视为失败，有些接口可能直接返回 {"msg": "发送成功"} 且不包含 result 字段
-            if verify_data.get("result") is False:
-                 self.verification_done.emit(False, f"获取验证码失败: {verify_data.get('msg', '未知错误')}", {})
-                 return
-                 
-            # 5. 通知 UI 需要输入验证码
-            self.code_required.emit(verify_data)
-            
+            self.stats_ready.emit(result)
         except Exception as e:
-            self.verification_done.emit(False, f"校验过程异常: {str(e)}", {})
+            print(f"AbsenceStatsWorker error: {e}")
+            self.stats_ready.emit(f"统计缺勤数据失败: {e}")
 
-class CloneSubmitVerifyWorker(QThread):
-    """提交验证码并获取最终 token"""
-    submit_finished = pyqtSignal(bool, str, dict) # success, message, tokens
+
+class HomeworkWorker(QThread):
+    """Worker thread to fetch homework stats (作业情况)."""
     
-    def __init__(self, crawler, course_id, cpi, verify_code):
+    homework_ready = pyqtSignal(object)  # list of StudentWorkStats or error string
+    
+    def __init__(self, crawler, course_id: str, class_id: str):
         super().__init__()
         self.crawler = crawler
         self.course_id = course_id
-        self.cpi = cpi
-        self.verify_code = verify_code
-        
-    def run(self):
-        try:
-            print(f"DEBUG: CloneSubmitVerifyWorker submitting code: {self.verify_code}")
-            result = self.crawler.submit_clone_verify_code(self.verify_code, self.course_id, self.cpi)
-            print(f"DEBUG: CloneSubmitVerifyWorker result: {result}")
-            if result.get("success"):
-                self.submit_finished.emit(True, "校验成功", result)
-            else:
-                self.submit_finished.emit(False, result.get("msg", "验证失败"), {})
-        except Exception as e:
-            self.submit_finished.emit(False, f"提交验证码异常: {str(e)}", {})
-
-class CloneActionWorker(QThread):
-    """执行最终的克隆操作"""
-    finished = pyqtSignal(bool, str)
+        self.class_id = class_id
     
-    def __init__(self, crawler, payload):
-        super().__init__()
-        self.crawler = crawler
-        self.payload = payload
-        
     def run(self):
         try:
-            res = self.crawler.request_clone_course(self.payload)
-            if res.get("status"):
-                self.finished.emit(True, res.get("msg", "克隆成功"))
-            else:
-                self.finished.emit(False, res.get("msg", "克隆失败"))
+            result = self.crawler.get_student_work_stats(self.course_id, self.class_id)
+            self.homework_ready.emit(result)
         except Exception as e:
-            self.finished.emit(False, f"克隆操作异常: {str(e)}")
+            print(f"HomeworkWorker error: {e}")
+            self.homework_ready.emit(f"获取学生作业统计失败: {e}")

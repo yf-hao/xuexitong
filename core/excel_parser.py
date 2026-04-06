@@ -28,7 +28,7 @@ def parse_students_xls(path: str) -> List[Dict[str, str]]:
         for i in range(sheet.nrows):
             row = sheet.row_values(i)
 
-            student_id = str(row[1]).strip()  # 第二列 - 学号/工号
+student_id = str(row[1]).strip()  # 第二列 - 学号/工号
             name = str(row[2]).strip()        # 第三列 - 姓名
 
             # 防止被当成数字读出来

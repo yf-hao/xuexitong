@@ -5,7 +5,3 @@ lxml
 jsonpath
 pycryptodome
 xlrd==1.2.0
-PyInstaller
-opencv-python-headless
-matplotlib
-Pillow
