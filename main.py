@@ -1,5 +1,9 @@
 import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget
+
+# QtWebEngineWidgets 必须在 QApplication 创建之前导入
+from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+
 from ui.login_window import LoginWindow
 from ui.main_window import MainWindow
 from core.crawler import XuexitongCrawler

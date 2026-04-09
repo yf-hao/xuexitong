@@ -1,3 +1,5 @@
+from core.utils.latex_utils import latex_to_unicode, apply_latex_unicode_map, is_simple_unicode
+
 class QuestionBankAPI:
     """题库目录与题目相关接口。"""
     
@@ -735,263 +737,279 @@ class QuestionBankAPI:
                     expr_text = expr_text.replace(r"\text", "")
                     return None, 0, 0, expr_text
                 
-                # 检查是否包含矩阵环境（优先使用CodeCogs API，超时后用matplotlib table）
-                if re2.search(r'\\begin\{(pmatrix|matrix|bmatrix|vmatrix|Vmatrix)\}', expr_render):
-                    print(f"DEBUG render_math_expr: 包含矩阵环境")
-                    
-                    # ===== 方案1: 尝试使用 CodeCogs API（在线），超时3秒 =====
-                    def try_codecogs_api(latex_expr):
-                        """使用 CodeCogs 在线 API 渲染 LaTeX，超时3秒"""
-                        try:
-                            import urllib.parse
-                            import urllib.request
-                            import socket
+                # ===== 方案1: 尝试使用 CodeCogs API（在线），超时5秒 =====
+                # 检测是否包含复杂命令（矩阵、积分、求和、大括号等）
+                has_matrix = bool(re2.search(r'\\begin\{(pmatrix|matrix|bmatrix|vmatrix|Vmatrix)\}', expr_render))
+                has_complex_commands = bool(re2.search(
+                    r'\\int|\\sum|\\prod|\\Big|\\bigg|\\Bigg|\\big|\\oint|\\iint|\\iiint|\\lim|\\sup|\\inf|\\max|\\min',
+                    expr_render
+                ))
+                
+                def try_codecogs_api(latex_expr):
+                    """使用 CodeCogs 在线 API 渲染 LaTeX，超时5秒"""
+                    try:
+                        import urllib.parse
+                        import urllib.request
+                        import socket
+                        
+                        # 准备 LaTeX 表达式
+                        latex_code = latex_expr.strip()
+                        # 移除 $$ 标记（如果有）
+                        if latex_code.startswith('$$'):
+                            latex_code = latex_code[2:]
+                        if latex_code.endswith('$$'):
+                            latex_code = latex_code[:-2]
+                        latex_code = latex_code.strip()
+                        
+                        # 清理换行符和多余空格（保留 LaTeX 的 \\ 和 \quad 等）
+                        # 将普通换行符替换为空格
+                        latex_code_clean = re2.sub(r'\n\s*', ' ', latex_code)
+                        # 清理多余空格
+                        latex_code_clean = re2.sub(r'\s+', ' ', latex_code_clean)
+                        
+                        print(f"DEBUG render_math_expr: 尝试 CodeCogs API（超时20秒）...")
+                        
+                        # URL 编码
+                        encoded_latex = urllib.parse.quote(latex_code_clean)
+                        
+                        # CodeCogs API URL
+                        api_url = f"https://latex.codecogs.com/png.latex?{encoded_latex}"
+                        
+                        # 设置超时为20秒
+                        socket.setdefaulttimeout(20)
+                        
+                        # 下载图片
+                        req = urllib.request.Request(
+                            api_url,
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                        )
+                        response = urllib.request.urlopen(req, timeout=20)
+                        img_data = response.read()
+                        
+                        print(f"DEBUG render_math_expr: CodeCogs API 成功，图片大小={len(img_data)} bytes")
+                        
+                        if img_data and len(img_data) > 100:  # 确保下载了有效图片
+                            # 获取图片尺寸
+                            from PIL import Image
+                            import io
+                            img = Image.open(io.BytesIO(img_data))
+                            img_w, img_h = img.size
                             
-                            # 准备 LaTeX 表达式
-                            latex_code = latex_expr.strip()
-                            # 移除 $$ 标记（如果有）
-                            if latex_code.startswith('$$'):
-                                latex_code = latex_code[2:]
-                            if latex_code.endswith('$$'):
-                                latex_code = latex_code[:-2]
-                            latex_code = latex_code.strip()
-                            
-                            # 清理换行符和多余空格（保留 LaTeX 的 \\ 和 \quad 等）
-                            # 将普通换行符替换为空格
-                            latex_code_clean = re2.sub(r'\n\s*', ' ', latex_code)
-                            # 清理多余空格
-                            latex_code_clean = re2.sub(r'\s+', ' ', latex_code_clean)
-                            
-                            print(f"DEBUG render_math_expr: 尝试 CodeCogs API（超时5秒）...")
-                            
-                            # URL 编码
-                            encoded_latex = urllib.parse.quote(latex_code_clean)
-                            
-                            # CodeCogs API URL
-                            api_url = f"https://latex.codecogs.com/png.latex?{encoded_latex}"
-                            
-                            # 设置超时为5秒
-                            socket.setdefaulttimeout(5)
-                            
-                            # 下载图片
-                            req = urllib.request.Request(
-                                api_url,
-                                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                            )
-                            response = urllib.request.urlopen(req, timeout=5)
-                            img_data = response.read()
-                            
-                            print(f"DEBUG render_math_expr: CodeCogs API 成功，图片大小={len(img_data)} bytes")
-                            
-                            if img_data and len(img_data) > 100:  # 确保下载了有效图片
-                                # 获取图片尺寸
-                                from PIL import Image
-                                import io
-                                img = Image.open(io.BytesIO(img_data))
-                                img_w, img_h = img.size
-                                
-                                # 上传图片
-                                upload_url = self.upload_image_bytes(img_data, f"codecogs_{hash(latex_expr)}.png")
-                                if upload_url:
-                                    print(f"DEBUG render_math_expr: CodeCogs 图片上传成功")
-                                    # 生成文本格式
-                                    expr_text = latex_expr
-                                    def matrix_to_text(m):
-                                        content = m.group(2).replace('\\\\', ';').replace('&', ',')
-                                        return f"({content})"
-                                    expr_text = re2.sub(r'\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\}(.*?)\\end\{\1\}',
-                                                       matrix_to_text,
-                                                       expr_text, flags=re2.DOTALL)
-                                    expr_text = expr_text.replace('$$', '').replace('$', '').strip()
-                                    return upload_url, img_w, img_h, expr_text
-                            
-                            return None
-                        except Exception as e:
-                            print(f"DEBUG render_math_expr: CodeCogs API 超时或失败: {str(e)}，切换到 matplotlib")
-                            return None
+                            # 上传图片
+                            upload_url = self.upload_image_bytes(img_data, f"codecogs_{hash(latex_expr)}.png")
+                            if upload_url:
+                                print(f"DEBUG render_math_expr: CodeCogs 图片上传成功")
+                                # 生成文本格式
+                                expr_text = latex_expr
+                                def matrix_to_text(m):
+                                    content = m.group(2).replace('\\\\', ';').replace('&', ',')
+                                    return f"({content})"
+                                expr_text = re2.sub(r'\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\}(.*?)\\end\{\1\}',
+                                                   matrix_to_text,
+                                                   expr_text, flags=re2.DOTALL)
+                                expr_text = expr_text.replace('$$', '').replace('$', '').strip()
+                                return upload_url, img_w, img_h, expr_text
+                        
+                        return None
+                    except Exception as e:
+                        print(f"DEBUG render_math_expr: CodeCogs API 超时或失败: {str(e)}，切换到 matplotlib")
+                        return None
+                
+                # 对于复杂命令，优先尝试 CodeCogs API
+                if has_matrix or has_complex_commands:
+                    if has_matrix:
+                        print(f"DEBUG render_math_expr: 包含矩阵环境，优先使用 CodeCogs API")
+                    else:
+                        print(f"DEBUG render_math_expr: 包含复杂命令（积分/求和/大括号等），优先使用 CodeCogs API")
                     
                     # 尝试 CodeCogs API
                     result = try_codecogs_api(expr_render)
                     if result:
                         return result
                     
-                    # ===== 方案2: Fallback 到 matplotlib table（离线）=====
-                    print(f"DEBUG render_math_expr: 使用 matplotlib table 绘制矩阵")
-                    
-                    import matplotlib.pyplot as plt
-                    
-                    def draw_matrix_with_matplotlib(expr_with_matrix):
-                        """使用matplotlib绘制矩阵"""
-                        import numpy as np
+                    # CodeCogs API 失败后的 fallback 处理
+                    if has_matrix:
+                        # 矩阵：使用 matplotlib table 绘制（离线）
+                        print(f"DEBUG render_math_expr: CodeCogs API 失败，使用 matplotlib table 绘制矩阵")
                         
-                        # 查找所有矩阵
-                        matrices = []
-                        pattern = r'\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\}(.*?)\\end\{\1\}'
+                        import matplotlib.pyplot as plt
                         
-                        def parse_matrix_content(content):
-                            """解析矩阵内容为二维数组"""
-                            # 分割行
-                            rows = content.split('\\\\')
-                            matrix_data = []
-                            for row in rows:
-                                # 分割列
-                                cells = row.split('&')
-                                matrix_data.append([c.strip() for c in cells])
-                            return matrix_data
+                        def draw_matrix_with_matplotlib(expr_with_matrix):
+                            """使用matplotlib绘制矩阵"""
+                            import numpy as np
+                            
+                            # 查找所有矩阵
+                            matrices = []
+                            pattern = r'\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\}(.*?)\\end\{\1\}'
+                            
+                            def parse_matrix_content(content):
+                                """解析矩阵内容为二维数组"""
+                                # 分割行
+                                rows = content.split('\\\\')
+                                matrix_data = []
+                                for row in rows:
+                                    # 分割列
+                                    cells = row.split('&')
+                                    matrix_data.append([c.strip() for c in cells])
+                                return matrix_data
+                            
+                            # 提取所有矩阵
+                            for match in re2.finditer(pattern, expr_with_matrix, re2.DOTALL):
+                                env_type = match.group(1)
+                                content = match.group(2)
+                                matrix_data = parse_matrix_content(content)
+                                matrices.append({
+                                    'type': env_type,
+                                    'data': matrix_data,
+                                    'full_match': match.group(0)
+                                })
+                            
+                            if not matrices:
+                                return None
+                            
+                            # 绘制所有矩阵
+                            fig, ax = plt.subplots(figsize=(8, 4), dpi=150)
+                            ax.set_xlim(0, 10)
+                            ax.set_ylim(0, 5)
+                            ax.axis('off')
+                            
+                            x_offset = 0.5
+                            for matrix_info in matrices:
+                                matrix_type = matrix_info['type']
+                                matrix_data = matrix_info['data']
+                                
+                                # 计算矩阵尺寸
+                                n_rows = len(matrix_data)
+                                n_cols = max(len(row) for row in matrix_data) if matrix_data else 0
+                                
+                                # 单元格大小
+                                cell_width = 0.8
+                                cell_height = 0.5
+                                
+                                # 矩阵起始位置
+                                matrix_x = x_offset
+                                matrix_y = 4.0
+                                
+                                # 绘制表格
+                                table_data = []
+                                for i, row in enumerate(matrix_data):
+                                    row_data = []
+                                    for j, cell in enumerate(row):
+                                        row_data.append(cell)
+                                    # 填充空列
+                                    while len(row_data) < n_cols:
+                                        row_data.append('')
+                                    table_data.append(row_data)
+                                
+                                table = ax.table(
+                                    cellText=table_data,
+                                    loc='upper left',
+                                    bbox=[matrix_x + 0.3, matrix_y - n_rows * cell_height, 
+                                          n_cols * cell_width, n_rows * cell_height],
+                                    cellLoc='center',
+                                    edges=''
+                                )
+                                
+                                # 设置表格样式
+                                table.auto_set_font_size(False)
+                                table.set_fontsize(14)
+                                for key, cell in table.get_celld().items():
+                                    cell.set_edgecolor('none')
+                                    cell.set_facecolor('none')
+                                    cell.set_text_props(color='black')
+                                
+                                # 绘制括号
+                                total_height = n_rows * cell_height
+                                bracket_x = matrix_x + 0.1
+                                bracket_y = matrix_y - total_height
+                                
+                                if matrix_type == 'pmatrix':
+                                    # 圆括号
+                                    ax.text(bracket_x, matrix_y - total_height/2, '(', 
+                                           fontsize=30, ha='center', va='center', 
+                                           fontweight='bold', color='black',
+                                           transform=ax.transData)
+                                    ax.text(matrix_x + 0.3 + n_cols * cell_width + 0.15, 
+                                           matrix_y - total_height/2, ')',
+                                           fontsize=30, ha='center', va='center',
+                                           fontweight='bold', color='black',
+                                           transform=ax.transData)
+                                elif matrix_type == 'bmatrix':
+                                    # 方括号
+                                    ax.text(bracket_x, matrix_y - total_height/2, '[',
+                                           fontsize=30, ha='center', va='center',
+                                           fontweight='bold', color='black',
+                                           transform=ax.transData)
+                                    ax.text(matrix_x + 0.3 + n_cols * cell_width + 0.15,
+                                           matrix_y - total_height/2, ']',
+                                           fontsize=30, ha='center', va='center',
+                                           fontweight='bold', color='black',
+                                           transform=ax.transData)
+                                elif matrix_type in ['vmatrix', 'Vmatrix']:
+                                    # 竖线
+                                    lines_count = 2 if matrix_type == 'Vmatrix' else 1
+                                    for idx in range(lines_count):
+                                        offset = idx * 0.05
+                                        ax.plot([bracket_x + offset, bracket_x + offset],
+                                               [bracket_y, matrix_y],
+                                               color='black', linewidth=2, transform=ax.transData)
+                                        ax.plot([matrix_x + 0.3 + n_cols * cell_width + 0.15 - offset,
+                                               matrix_x + 0.3 + n_cols * cell_width + 0.15 - offset],
+                                               [bracket_y, matrix_y],
+                                               color='black', linewidth=2, transform=ax.transData)
+                                
+                                # 更新x偏移
+                                x_offset = matrix_x + 0.3 + n_cols * cell_width + 0.6
+                            
+                            plt.tight_layout()
+                            return fig
                         
-                        # 提取所有矩阵
-                        for match in re2.finditer(pattern, expr_with_matrix, re2.DOTALL):
-                            env_type = match.group(1)
-                            content = match.group(2)
-                            matrix_data = parse_matrix_content(content)
-                            matrices.append({
-                                'type': env_type,
-                                'data': matrix_data,
-                                'full_match': match.group(0)
-                            })
+                        # 绘制矩阵
+                        fig = draw_matrix_with_matplotlib(expr_render)
+                        if fig:
+                            # 保存图片
+                            import io
+                            buf = io.BytesIO()
+                            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                                       facecolor='white', edgecolor='none')
+                            buf.seek(0)
+                            plt.close(fig)
+                            
+                            # 获取图片尺寸
+                            from PIL import Image
+                            img = Image.open(buf)
+                            img_w, img_h = img.size
+                            
+                            # 上传图片
+                            upload_url = self.upload_image_bytes(buf.getvalue(), f"matrix_{hash(expr_render)}.png")
+                            if upload_url:
+                                print(f"DEBUG render_math_expr: matplotlib table 渲染成功")
+                                # 生成文本格式
+                                expr_text = expr_render
+                                def matrix_to_text_2(m):
+                                    content = m.group(2).replace('\\\\', ';').replace('&', ',')
+                                    return f"matrix({content})"
+                                expr_text = re2.sub(r'\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\}(.*?)\\end\{\1\}', 
+                                                  matrix_to_text_2, 
+                                                  expr_text, flags=re2.DOTALL)
+                                expr_text = expr_text.replace('$$', '').replace('$', '').strip()
+                                return upload_url, img_w, img_h, expr_text
                         
-                        if not matrices:
-                            return None
-                        
-                        # 绘制所有矩阵
-                        fig, ax = plt.subplots(figsize=(8, 4), dpi=150)
-                        ax.set_xlim(0, 10)
-                        ax.set_ylim(0, 5)
-                        ax.axis('off')
-                        
-                        x_offset = 0.5
-                        for matrix_info in matrices:
-                            matrix_type = matrix_info['type']
-                            matrix_data = matrix_info['data']
-                            
-                            # 计算矩阵尺寸
-                            n_rows = len(matrix_data)
-                            n_cols = max(len(row) for row in matrix_data) if matrix_data else 0
-                            
-                            # 单元格大小
-                            cell_width = 0.8
-                            cell_height = 0.5
-                            
-                            # 矩阵起始位置
-                            matrix_x = x_offset
-                            matrix_y = 4.0
-                            
-                            # 绘制表格
-                            table_data = []
-                            for i, row in enumerate(matrix_data):
-                                row_data = []
-                                for j, cell in enumerate(row):
-                                    row_data.append(cell)
-                                # 填充空列
-                                while len(row_data) < n_cols:
-                                    row_data.append('')
-                                table_data.append(row_data)
-                            
-                            table = ax.table(
-                                cellText=table_data,
-                                loc='upper left',
-                                bbox=[matrix_x + 0.3, matrix_y - n_rows * cell_height, 
-                                      n_cols * cell_width, n_rows * cell_height],
-                                cellLoc='center',
-                                edges=''
-                            )
-                            
-                            # 设置表格样式
-                            table.auto_set_font_size(False)
-                            table.set_fontsize(14)
-                            for key, cell in table.get_celld().items():
-                                cell.set_edgecolor('none')
-                                cell.set_facecolor('none')
-                                cell.set_text_props(color='black')
-                            
-                            # 绘制括号
-                            total_height = n_rows * cell_height
-                            bracket_x = matrix_x + 0.1
-                            bracket_y = matrix_y - total_height
-                            
-                            if matrix_type == 'pmatrix':
-                                # 圆括号
-                                ax.text(bracket_x, matrix_y - total_height/2, '(', 
-                                       fontsize=30, ha='center', va='center', 
-                                       fontweight='bold', color='black',
-                                       transform=ax.transData)
-                                ax.text(matrix_x + 0.3 + n_cols * cell_width + 0.15, 
-                                       matrix_y - total_height/2, ')',
-                                       fontsize=30, ha='center', va='center',
-                                       fontweight='bold', color='black',
-                                       transform=ax.transData)
-                            elif matrix_type == 'bmatrix':
-                                # 方括号
-                                ax.text(bracket_x, matrix_y - total_height/2, '[',
-                                       fontsize=30, ha='center', va='center',
-                                       fontweight='bold', color='black',
-                                       transform=ax.transData)
-                                ax.text(matrix_x + 0.3 + n_cols * cell_width + 0.15,
-                                       matrix_y - total_height/2, ']',
-                                       fontsize=30, ha='center', va='center',
-                                       fontweight='bold', color='black',
-                                       transform=ax.transData)
-                            elif matrix_type in ['vmatrix', 'Vmatrix']:
-                                # 竖线
-                                lines_count = 2 if matrix_type == 'Vmatrix' else 1
-                                for idx in range(lines_count):
-                                    offset = idx * 0.05
-                                    ax.plot([bracket_x + offset, bracket_x + offset],
-                                           [bracket_y, matrix_y],
-                                           color='black', linewidth=2, transform=ax.transData)
-                                    ax.plot([matrix_x + 0.3 + n_cols * cell_width + 0.15 - offset,
-                                           matrix_x + 0.3 + n_cols * cell_width + 0.15 - offset],
-                                           [bracket_y, matrix_y],
-                                           color='black', linewidth=2, transform=ax.transData)
-                            
-                            # 更新x偏移
-                            x_offset = matrix_x + 0.3 + n_cols * cell_width + 0.6
-                        
-                        plt.tight_layout()
-                        return fig
-                    
-                    # 绘制矩阵
-                    fig = draw_matrix_with_matplotlib(expr_render)
-                    if fig:
-                        # 保存图片
-                        import io
-                        buf = io.BytesIO()
-                        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                                   facecolor='white', edgecolor='none')
-                        buf.seek(0)
-                        plt.close(fig)
-                        
-                        # 获取图片尺寸
-                        from PIL import Image
-                        img = Image.open(buf)
-                        img_w, img_h = img.size
-                        
-                        # 上传图片
-                        upload_url = self.upload_image_bytes(buf.getvalue(), f"matrix_{hash(expr_render)}.png")
-                        if upload_url:
-                            print(f"DEBUG render_math_expr: matplotlib table 渲染成功")
-                            # 生成文本格式
-                            expr_text = expr_render
-                            def matrix_to_text_2(m):
-                                content = m.group(2).replace('\\\\', ';').replace('&', ',')
-                                return f"matrix({content})"
-                            expr_text = re2.sub(r'\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\}(.*?)\\end\{\1\}', 
-                                              matrix_to_text_2, 
-                                              expr_text, flags=re2.DOTALL)
-                            expr_text = expr_text.replace('$$', '').replace('$', '').strip()
-                            return upload_url, img_w, img_h, expr_text
-                    
-                    # 如果绘制失败，fallback到文本格式
-                    print(f"DEBUG render_math_expr: 矩阵绘制失败，使用文本格式")
-                    expr_text = expr_render
-                    def matrix_to_text_3(m):
-                        content = m.group(2).replace('\\\\', ';').replace('&', ',')
-                        return f"({content})"
-                    expr_text = re2.sub(r'\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\}(.*?)\\end\{\1\}',
-                                       matrix_to_text_3,
-                                       expr_text, flags=re2.DOTALL)
-                    expr_text = expr_text.replace('$$', '').replace('$', '').strip()
-                    return None, 0, 0, expr_text
+                        # 如果绘制失败，fallback到文本格式
+                        print(f"DEBUG render_math_expr: 矩阵绘制失败，使用文本格式")
+                        expr_text = expr_render
+                        def matrix_to_text_3(m):
+                            content = m.group(2).replace('\\\\', ';').replace('&', ',')
+                            return f"({content})"
+                        expr_text = re2.sub(r'\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\}(.*?)\\end\{\1\}',
+                                           matrix_to_text_3,
+                                           expr_text, flags=re2.DOTALL)
+                        expr_text = expr_text.replace('$$', '').replace('$', '').strip()
+                        return None, 0, 0, expr_text
+                    else:
+                        # 其他复杂命令：继续用后面的 matplotlib mathtext 流程
+                        print(f"DEBUG render_math_expr: CodeCogs API 失败，尝试 matplotlib mathtext")
+                        # 不返回，继续执行后面的 mathtext 渲染逻辑
                 
                 # 检查是否包含上标 ^ 或下标 _，如果有则需要渲染
                 has_superscript = '^' in expr_render
@@ -1008,76 +1026,26 @@ class QuestionBankAPI:
                         return None, 0, 0, expr_render
                 
                 # LaTeX 命令转换为 Unicode 符号（用于保留为文本显示）
-                # 先处理 \langle 和 \rangle（LaTeX 尖括号命令）
-                expr_text = expr_render.replace(r"\langle", "⟨")  # 左尖括号
-                expr_text = expr_text.replace(r"\rangle", "⟩")  # 右尖括号
+                # 使用工具函数处理下标、上标、尖括号、花括号
+                print(f"DEBUG render_math_expr: 原始表达式: {repr(expr_render)}")
+                expr_text = latex_to_unicode(expr_render)
+                print(f"DEBUG render_math_expr: latex_to_unicode后: {repr(expr_text)}")
                 # 处理 LaTeX 空格命令（\ 后跟空格或 ; 或 : 或 ,）
                 expr_text = re2.sub(r'\\[,;: ]', ' ', expr_text)  # \, \; \: \  → 空格
-                # 再处理普通尖括号（转换为数学尖括号，避免 HTML 转义）
-                expr_text = expr_text.replace("<", "⟨")  # < → ⟨
-                expr_text = expr_text.replace(">", "⟩")  # > → ⟩
-                expr_text = expr_text.replace(r"\iff", "⟺")  # 当且仅当
-                expr_text = expr_text.replace(r"\implies", "⇒")  # 蕴含
-                expr_text = expr_text.replace(r"\land", "∧")  # 逻辑与
-                expr_text = expr_text.replace(r"\lor", "∨")  # 逻辑或
-                expr_text = expr_text.replace(r"\lnot", "¬")  # 逻辑非
-                expr_text = expr_text.replace(r"\neg", "¬")  # 逻辑非
-                expr_text = expr_text.replace(r"\forall", "∀")  # 全称量词
-                expr_text = expr_text.replace(r"\exists", "∃")  # 存在量词
-                # 注意：先替换长的命令，再替换短的命令
-                expr_text = expr_text.replace(r"\leftrightarrow", "↔")  # 双向箭头
-                expr_text = expr_text.replace(r"\rightarrow", "→")  # 箭头
-                expr_text = expr_text.replace(r"\to", "→")  # 箭头
-                expr_text = expr_text.replace(r"\leq", "≤")  # 小于等于
-                expr_text = expr_text.replace(r"\geq", "≥")  # 大于等于
-                expr_text = expr_text.replace(r"\neq", "≠")  # 不等于
-                # 注意：先替换长的命令，再替换短的命令
-                # \not\xxx 形式（先处理，因为更长）
-                expr_text = expr_text.replace(r"\not\subseteq", "⊈")  # 不是子集或等于
-                expr_text = expr_text.replace(r"\not\supseteq", "⊉")  # 不是超集或等于
-                expr_text = expr_text.replace(r"\not\subset", "⊄")  # 不是真子集
-                expr_text = expr_text.replace(r"\not\supset", "⊅")  # 不是真超集
-                expr_text = expr_text.replace(r"\not\in", "∉")  # 不属于
-                expr_text = expr_text.replace(r"\not=", "≠")  # 不等于
-                # \nxxx 形式
-                expr_text = expr_text.replace(r"\nsubseteq", "⊈")  # 不是子集或等于
-                expr_text = expr_text.replace(r"\nsupseteq", "⊉")  # 不是超集或等于
-                expr_text = expr_text.replace(r"\nsubset", "⊄")  # 不是真子集
-                expr_text = expr_text.replace(r"\nsupset", "⊅")  # 不是真超集
-                expr_text = expr_text.replace(r"\notin", "∉")  # 不属于
-                # 基本符号
-                expr_text = expr_text.replace(r"\subseteq", "⊆")  # 子集或等于
-                expr_text = expr_text.replace(r"\supseteq", "⊇")  # 超集或等于
-                expr_text = expr_text.replace(r"\subset", "⊂")  # 真子集
-                expr_text = expr_text.replace(r"\supset", "⊃")  # 真超集
-                expr_text = expr_text.replace(r"\in", "∈")  # 属于
-                expr_text = expr_text.replace(r"\cup", "∪")  # 并集
-                expr_text = expr_text.replace(r"\cap", "∩")  # 交集
+                print(f"DEBUG render_math_expr: 处理空格命令后: {repr(expr_text)}")
+                # 其他 LaTeX 命令转换（使用映射表）
+                expr_text = apply_latex_unicode_map(expr_text)
+                print(f"DEBUG render_math_expr: apply_latex_unicode_map后: {repr(expr_text)}")
+                # 其他转换
                 expr_text = expr_text.replace("~", " ")  # 不间断空格转普通空格
-                expr_text = expr_text.replace(r"\emptyset", "∅")  # 空集
-                expr_text = expr_text.replace(r"\empty", "∅")  # 空集
-                expr_text = expr_text.replace(r"\wedge", "∧")  # 逻辑与
-                expr_text = expr_text.replace(r"\vee", "∨")  # 逻辑或
                 expr_text = expr_text.replace("...", "…")  # 省略号
-                expr_text = expr_text.replace(r"\ldots", "…")  # 省略号
                 expr_text = expr_text.replace(r"&", "")  # 移除对齐符 &
-                expr_text = expr_text.replace(r"\lrarr", "↔")  # 双向箭头
-                # 花括号转义（\{ 和 \} 表示字面的花括号）
-                expr_text = expr_text.replace(r"\{", "{")  # 左花括号
-                expr_text = expr_text.replace(r"\}", "}")  # 右花括号
                 
-                # 再次检查：如果转换后只包含普通字符和简单Unicode符号，可以跳过渲染
-                # 注意：∉ 是组合字符，某些环境可能显示异常，需要渲染成图片
-                # 注意：^ 和 _ 是上标下标，需要渲染成图片
-                # 包含基本字符和大部分符号的模式（排除 ∉、^ 和 _）
-                # | 用于集合描述法（如 {x | x > 0}）
-                # ⟨ ⟩ 是数学尖括号（由 < > 转换而来）
-                simple_pattern = r'^[a-zA-Z0-9\s\(\)\[\]\{\}|+\-=,.\'\';:\!¬∀∃∧∨→↔⇒⟺∈⊂⊃⊆⊇∪∩∅≤≥≠≈≡±×÷∞…⊈⊉⊄⊅⟨⟩]+$'
-                print(f"DEBUG render_math_expr: LaTeX转Unicode后: {expr_text}")
-                # 检查是否包含 ∉（组合字符），如果有则必须渲染
-                if '∉' in expr_text:
-                    print(f"DEBUG render_math_expr: 包含组合字符∉，需要渲染")
-                elif re2.match(simple_pattern, expr_text):
+                # 再次检查：如果转换后只包含简单 Unicode 符号，可以跳过渲染
+                print(f"DEBUG render_math_expr: LaTeX转Unicode后: {repr(expr_text)}")
+                is_simple = is_simple_unicode(expr_text)
+                print(f"DEBUG render_math_expr: is_simple_unicode返回: {is_simple}")
+                if is_simple:
                     print(f"DEBUG render_math_expr: 转换后只包含简单Unicode符号，返回文本: {expr_text}")
                     return None, 0, 0, expr_text
                 
@@ -1668,11 +1636,15 @@ class QuestionBankAPI:
             
             # 提取题干
             stem_div = soup.find("div", class_="stem_con")
-            stem = stem_div.decode_contents() if stem_div else ""
             
-            # 提取题型信息
+            # 提取题型信息（从题干中移除）
             type_span = stem_div.find("span", class_="colorShallow") if stem_div else None
             question_type_info = type_span.get_text(strip=True) if type_span else ""
+            
+            # 移除题型信息 span 后再获取纯题干内容
+            if stem_div and type_span:
+                type_span.decompose()
+            stem = stem_div.decode_contents() if stem_div else ""
             
             # 提取选项
             options = []

@@ -7,6 +7,7 @@ a = Analysis(
     pathex=['.'],
     binaries=[],
     datas=[
+        ('assets/katex', 'assets/katex'),
     ],
     hiddenimports=[
         'PyQt6.QtCore',
@@ -14,6 +15,9 @@ a = Analysis(
         'PyQt6.QtWidgets',
         'PyQt6.QtNetwork',
         'PyQt6.QtSvg',
+        'PyQt6.QtWebEngineWidgets',
+        'PyQt6.QtWebEngineCore',
+        'PyQt6.QtWebChannel',
         'requests',
         'bs4',
         'lxml',

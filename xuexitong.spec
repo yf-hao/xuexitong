@@ -14,6 +14,7 @@ a = Analysis(
     datas=[
         (os.path.join(qt_plugins, 'platforms'), 'platforms'),
         (os.path.join(qt_plugins, 'imageformats'), 'imageformats'),
+        ('assets/katex', 'assets/katex'),
     ],
     hiddenimports=[
         'PyQt6.QtNetwork',
@@ -21,6 +22,9 @@ a = Analysis(
         'PyQt6.QtWidgets',
         'PyQt6.QtGui',
         'PyQt6.QtSvg',
+        'PyQt6.QtWebEngineWidgets',
+        'PyQt6.QtWebEngineCore',
+        'PyQt6.QtWebChannel',
         'bs4',
         'requests',
         'lxml',

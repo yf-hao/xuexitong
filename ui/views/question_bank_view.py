@@ -2,12 +2,14 @@
 题库管理视图 - 支持文件夹管理和 Markdown 文件上传
 """
 
+import os
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLabel, QFrame, QFileDialog, QMenu, QDialog,
     QLineEdit, QDialogButtonBox, QMessageBox, QSplitter, QInputDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl
 from PyQt6.QtGui import QIcon, QAction
 
 
@@ -1257,51 +1259,42 @@ class QuestionBankView(QWidget):
 
 
 class QuestionDetailDialog(QDialog):
-    """题目详情对话框 - 使用 QTextBrowser 渲染，支持图片显示"""
+    """题目详情对话框 - 使用 QWebEngineView + 内置 KaTeX 渲染"""
+    
+    # KaTeX 资源路径
+    _KATEX_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "assets", "katex")
     
     def __init__(self, question_data: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("题目详情")
         self.setMinimumSize(850, 650)
         self.setStyleSheet("background-color: #1e1e1e;")
-        # 图片缓存 {url: base64_data}
-        self._image_cache = {}
         self.setup_ui(question_data)
     
     def setup_ui(self, question_data: dict):
         """设置界面"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        # 预处理 HTML：下载图片并转为 base64
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        
+        self.web_view = QWebEngineView()
+        self.web_view.setStyleSheet("background-color: #1e1e1e; border: none;")
+        
+        # 预处理：下载远程图片转为 base64 data URL
         processed_data = self._process_images(question_data)
         
-        # 构建 HTML
+        # 构建完整 HTML（包含内联 KaTeX）
         html = self._build_html(processed_data)
+        self.web_view.setHtml(html, QUrl.fromLocalFile(self._KATEX_DIR + "/"))
         
-        # 使用 QTextBrowser
-        from PyQt6.QtWidgets import QTextBrowser
-        self.text_browser = QTextBrowser()
-        self.text_browser.setOpenExternalLinks(True)
-        self.text_browser.setHtml(html)
-        self.text_browser.setStyleSheet("""
-            QTextBrowser {
-                background-color: #1e1e1e;
-                color: #cccccc;
-                border: none;
-                font-size: 14px;
-                padding: 8px;
-            }
-        """)
-        
-        layout.addWidget(self.text_browser)
+        layout.addWidget(self.web_view)
         
         # 底部按钮栏
         btn_bar = QWidget()
         btn_bar.setStyleSheet("background-color: #2d2d2d; border-top: 1px solid #3e3e42;")
         btn_layout = QHBoxLayout(btn_bar)
         btn_layout.setContentsMargins(20, 8, 20, 8)
-        
         btn_layout.addStretch()
         
         close_btn = QPushButton("关闭")
@@ -1324,75 +1317,96 @@ class QuestionDetailDialog(QDialog):
         layout.addWidget(btn_bar)
     
     def _process_images(self, data: dict) -> dict:
-        """下载 HTML 中的图片并转为 base64 嵌入"""
+        """下载 HTML 中的远程图片并转为 base64 data URL 嵌入"""
         import re
         import base64
-        import requests
         
         result = dict(data)
         
-        # 需要处理图片的字段
-        for key in ["stem", "analysis"]:
-            html_content = result.get(key, "")
+        def embed_images(html_content: str) -> str:
             if not html_content:
-                continue
-            
-            # 查找所有 img src
+                return html_content
             img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-            matches = img_pattern.findall(html_content)
-            
-            for img_url in matches:
-                if img_url in self._image_cache:
-                    base64_data = self._image_cache[img_url]
-                else:
-                    try:
-                        resp = requests.get(img_url, timeout=10)
-                        resp.raise_for_status()
-                        content_type = resp.headers.get("Content-Type", "image/png")
-                        base64_data = f"data:{content_type};base64,{base64.b64encode(resp.content).decode('utf-8')}"
-                        self._image_cache[img_url] = base64_data
-                    except Exception as e:
-                        print(f"下载图片失败 {img_url}: {e}")
-                        continue
+            for match in img_pattern.finditer(html_content):
+                img_url = match.group(1)
+                if img_url.startswith("data:") or not img_url.startswith("http"):
+                    continue
                 
-                # 替换 src
-                html_content = html_content.replace(f'src="{img_url}"', f'src="{base64_data}"')
-                html_content = html_content.replace(f"src='{img_url}'", f'src="{base64_data}"')
-            
-            result[key] = html_content
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(img_url)
+                    req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                    req.add_header("Referer", "https://mooc2-gray.chaoxing.com/")
+                    resp = urllib.request.urlopen(req, timeout=15)
+                    img_data = resp.read()
+                    content_type = resp.info().get("Content-Type", "image/png").split(";")[0].strip()
+                    b64_data = base64.b64encode(img_data).decode("utf-8")
+                    new_src = f"data:{content_type};base64,{b64_data}"
+                    html_content = html_content.replace(f'src="{img_url}"', f'src="{new_src}"')
+                    print(f"  图片嵌入成功: {len(img_data)} bytes")  # debug
+                except Exception as e:
+                    print(f"  下载图片失败 {img_url[:60]}... : {e}")
+            return html_content
+        
+        # 处理题干中的图片
+        stem = result.get("stem", "")
+        if stem:
+            print(f"[DEBUG] 题干原始HTML长度: {len(stem)}")
+            result["stem"] = embed_images(stem)
+            print(f"[DEBUG] 题干处理后HTML长度: {len(result['stem'])}")
+        
+        # 处理解析中的图片
+        analysis = result.get("analysis", "")
+        if analysis:
+            result["analysis"] = embed_images(analysis)
         
         # 处理选项中的图片
         options = result.get("options", [])
         new_options = []
         for opt in options:
             new_opt = dict(opt)
-            content = new_opt.get("content", "")
-            if content:
-                img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-                matches = img_pattern.findall(content)
-                for img_url in matches:
-                    if img_url in self._image_cache:
-                        base64_data = self._image_cache[img_url]
-                    else:
-                        try:
-                            resp = requests.get(img_url, timeout=10)
-                            resp.raise_for_status()
-                            content_type = resp.headers.get("Content-Type", "image/png")
-                            base64_data = f"data:{content_type};base64,{base64.b64encode(resp.content).decode('utf-8')}"
-                            self._image_cache[img_url] = base64_data
-                        except Exception as e:
-                            print(f"下载图片失败 {img_url}: {e}")
-                            continue
-                    content = content.replace(f'src="{img_url}"', f'src="{base64_data}"')
-                    content = content.replace(f"src='{img_url}'", f'src="{base64_data}"')
-                new_opt["content"] = content
+            if new_opt.get("content"):
+                new_opt["content"] = embed_images(new_opt["content"])
             new_options.append(new_opt)
         result["options"] = new_options
         
         return result
     
+    def _load_katex_js(self) -> str:
+        """加载本地 KaTeX JS 文件"""
+        katex_js_path = os.path.join(self._KATEX_DIR, "katex.min.js")
+        auto_render_path = os.path.join(self._KATEX_DIR, "auto-render.min.js")
+        
+        katex_js = ""
+        auto_render_js = ""
+        
+        try:
+            with open(katex_js_path, "r", encoding="utf-8") as f:
+                katex_js = f.read()
+        except Exception as e:
+            print(f"加载 katex.min.js 失败: {e}")
+        
+        try:
+            with open(auto_render_path, "r", encoding="utf-8") as f:
+                auto_render_js = f.read()
+        except Exception as e:
+            print(f"加载 auto-render.min.js 失败: {e}")
+        
+        return katex_js, auto_render_js
+    
+    def _load_katex_css(self) -> str:
+        """加载本地 KaTeX CSS 文件"""
+        katex_css_path = os.path.join(self._KATEX_DIR, "katex.min.css")
+        
+        try:
+            with open(katex_css_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            print(f"加载 katex.min.css 失败: {e}")
+            return ""
+    
     def _build_html(self, data: dict) -> str:
-        """构建完整的 HTML 内容"""
+        """构建完整的 HTML 页面，内联 KaTeX 资源"""
         import html as html_module
         
         stem = data.get("stem", "")
@@ -1402,26 +1416,30 @@ class QuestionDetailDialog(QDialog):
         difficulty = data.get("difficulty", "")
         question_type_info = data.get("question_type_info", "")
         
+        # 加载本地 KaTeX
+        katex_js, auto_render_js = self._load_katex_js()
+        katex_css = self._load_katex_css()
+        
         # 构建选项 HTML
         options_html = ""
         for opt in options:
             label = html_module.escape(opt.get("label", ""))
             content = opt.get("content", "")
             options_html += f"""
-            <div style="display:flex; align-items:flex-start; background-color:#252526; border:1px solid #3e3e42; border-radius:6px; padding:10px 14px; margin-bottom:8px;">
-                <span style="font-weight:bold; color:#dcdcaa; min-width:28px; margin-right:8px;">{label}</span>
-                <div style="flex:1;">{content}</div>
+            <div class="option-item">
+                <span class="option-label">{label}</span>
+                <div class="option-content">{content}</div>
             </div>"""
         
         sections = ""
         
         # 题干
         if stem:
-            type_info_html = f'<div style="color:#9cdcfe; font-size:13px; margin-bottom:8px;">{question_type_info}</div>' if question_type_info else ''
+            type_info_html = f'<div class="type-info">{question_type_info}</div>' if question_type_info else ''
             sections += f"""
-            <div style="margin-bottom:24px;">
-                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">📝 题干</div>
-                <div style="background-color:#252526; border:1px solid #3e3e42; border-radius:6px; padding:16px;">
+            <div class="section">
+                <div class="section-title">📝 题干</div>
+                <div class="stem-content">
                     {type_info_html}
                     {stem}
                 </div>
@@ -1430,39 +1448,196 @@ class QuestionDetailDialog(QDialog):
         # 选项
         if options:
             sections += f"""
-            <div style="margin-bottom:24px;">
-                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">📋 选项</div>
+            <div class="section">
+                <div class="section-title">📋 选项</div>
                 {options_html}
             </div>"""
         
         # 答案
         if answer:
             sections += f"""
-            <div style="margin-bottom:24px;">
-                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">✅ 答案</div>
-                <div style="background-color:#1e4620; border:2px solid #4caf50; border-radius:6px; padding:12px 16px; font-size:16px; font-weight:bold; color:#4caf50;">{answer}</div>
+            <div class="section">
+                <div class="section-title">✅ 答案</div>
+                <div class="answer-box">{answer}</div>
             </div>"""
         
         # 解析
         if analysis:
             sections += f"""
-            <div style="margin-bottom:24px;">
-                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">📖 答案解析</div>
-                <div style="background-color:#252526; border:1px solid #3e3e42; border-radius:6px; padding:16px;">{analysis}</div>
+            <div class="section">
+                <div class="section-title">📖 答案解析</div>
+                <div class="analysis-content">{analysis}</div>
             </div>"""
         
         # 难度
         if difficulty:
             sections += f"""
-            <div style="margin-bottom:24px;">
-                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">📊 难度</div>
-                <div style="color:#cccccc; font-size:14px;">{difficulty}</div>
+            <div class="section">
+                <div class="section-title">📊 难度</div>
+                <div class="difficulty-text">{difficulty}</div>
             </div>"""
         
-        return f"""<html><body style="background-color:#1e1e1e; color:#cccccc; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; font-size:14px; line-height:1.8; margin:0; padding:8px;">
-<style>
-    img {{ max-width:100%; vertical-align:middle; }}
-    p {{ margin:6px 0; }}
-</style>
-{sections}
-</body></html>"""
+        # 构建完整 HTML（KaTeX JS/CSS 内联，字体用本地文件）
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>{katex_css}</style>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            background-color: #1e1e1e;
+            color: #cccccc;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-size: 14px;
+            line-height: 1.8;
+            padding: 24px;
+        }}
+        .section {{
+            margin-bottom: 24px;
+        }}
+        .section-title {{
+            color: #569cd6;
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 12px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #3e3e42;
+        }}
+        .stem-content {{
+            background-color: #252526;
+            border: 1px solid #3e3e42;
+            border-radius: 6px;
+            padding: 16px;
+        }}
+        .stem-content p {{
+            margin: 6px 0;
+        }}
+        .stem-content img {{
+            max-width: 100%;
+            vertical-align: middle;
+        }}
+        .type-info {{
+            color: #9cdcfe;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }}
+        .option-item {{
+            display: flex;
+            align-items: flex-start;
+            background-color: #252526;
+            border: 1px solid #3e3e42;
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin-bottom: 8px;
+        }}
+        .option-label {{
+            font-weight: bold;
+            color: #dcdcaa;
+            min-width: 28px;
+            margin-right: 8px;
+        }}
+        .option-content {{
+            flex: 1;
+        }}
+        .option-content img {{
+            max-width: 100%;
+            vertical-align: middle;
+        }}
+        .option-content p {{
+            margin: 2px 0;
+        }}
+        .answer-box {{
+            background-color: #1e4620;
+            border: 2px solid #4caf50;
+            border-radius: 6px;
+            padding: 12px 16px;
+            font-size: 16px;
+            font-weight: bold;
+            color: #4caf50;
+        }}
+        .analysis-content {{
+            background-color: #252526;
+            border: 1px solid #3e3e42;
+            border-radius: 6px;
+            padding: 16px;
+        }}
+        .analysis-content p {{
+            margin: 6px 0;
+        }}
+        .analysis-content img {{
+            max-width: 100%;
+            vertical-align: middle;
+        }}
+        .difficulty-text {{
+            color: #cccccc;
+            font-size: 14px;
+        }}
+        .katex-display {{
+            margin: 10px 0;
+            overflow-x: auto;
+        }}
+        /* KaTeX 公式在深色主题下的颜色 */
+        .katex {{
+            color: #cccccc;
+            font-size: 1.1em;
+        }}
+    </style>
+</head>
+<body>
+    {sections}
+
+    <script>{katex_js}</script>
+    <script>{auto_render_js}</script>
+    <script>
+        window.onload = function() {{
+            try {{
+                console.log("KaTeX: 开始渲染数学公式...");
+                
+                // 预处理：修复多行 $$ 块
+                // 超星的 HTML 中 $$ 与 LaTeX 内容之间可能有换行、<p> 标签等
+                // 策略：找到所有 $$...$$ 块，剥离中间的 HTML 标签和空白，只保留纯文本内容
+                var html = document.body.innerHTML;
+                var fixedCount = 0;
+                
+                // 匹配 $$ 开头，中间有任意内容（含HTML标签），以 $$ 结尾的块
+                html = html.replace(/\$\$([\s\S]*?)\$\$/g, function(match, inner) {{
+                    // 剥离所有HTML标签，只保留文本内容
+                    var tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = inner;
+                    var text = tempDiv.textContent || tempDiv.innerText || '';
+                    var trimmed = text.trim();
+                    if (!trimmed) return match;  // 内容为空则不修改
+                    
+                    fixedCount++;
+                    return '$$' + trimmed + '$$';
+                }});
+                if (fixedCount > 0) {{
+                    document.body.innerHTML = html;
+                    console.log("KaTeX: 修复了 " + fixedCount + " 个多行 $$ 公式块");
+                }}
+                
+                var count = 0;
+                renderMathInElement(document.body, {{
+                    delimiters: [
+                        {{left: "$$", right: "$$", display: true}},
+                        {{left: "$", right: "$", display: false}},
+                        {{left: "\\\\(", right: "\\\\)", display: false}},
+                        {{left: "\\\\[", right: "\\\\]", display: true}}
+                    ],
+                    throwOnError: false,
+                    preProcess: function(data) {{ count++; return data; }}
+                }});
+                console.log("KaTeX: 渲染完成, 处理了 " + count + " 个节点");
+            }} catch(e) {{
+                console.error("KaTeX 渲染错误:", e);
+                document.body.innerHTML += '<div style="color:red;border:1px solid red;padding:10px;margin-top:20px;">KaTeX 渲染出错: ' + e.message + '</div>';
+            }}
+        }};
+    </script>
+</body>
+</html>"""
