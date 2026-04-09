@@ -120,6 +120,7 @@ class HomeworkCreateView(QWidget):
         self.page_size = 30  # 每页数量
         self.page_select_all_states = {}  # 每页的全选状态 {page: True/False}
         self.current_tab = "library"  # 当前选中的tab
+        self.target_directory_id = 0  # 目标文件夹ID（用于在指定文件夹创建作业）
         self.setup_ui()
     
     def setup_ui(self):
@@ -177,6 +178,8 @@ class HomeworkCreateView(QWidget):
         select_layout.addWidget(self.question_count_label)
         
         select_layout.addStretch()
+        
+        select_layout.addSpacing(10)
         
         # 返回上级按钮
         self.back_btn = QPushButton("⬅ 返回上级")
@@ -398,6 +401,7 @@ class HomeworkCreateView(QWidget):
         from ui.views.homework_library_view import HomeworkLibraryView
         self.library_view = HomeworkLibraryView(self.crawler, self)
         self.library_view.status_update.connect(self.status_update.emit)
+        self.library_view.create_homework_requested.connect(self.on_create_homework_requested)
         main_layout.addWidget(self.library_view)
     
     def create_filter_panel(self) -> QFrame:
@@ -1051,7 +1055,8 @@ class HomeworkCreateView(QWidget):
                 class_id=self.current_class_id,
                 title=title,
                 questions=selected_question_data,
-                q_bank_id=q_bank_id
+                q_bank_id=q_bank_id,
+                directory_id=self.target_directory_id  # 使用目标文件夹ID
             )
             
             if not result.get("status"):
@@ -1065,15 +1070,19 @@ class HomeworkCreateView(QWidget):
             
             self.status_update.emit(f"作业创建成功，正在保存...")
             
-            # 第二步：保存作业
+            # 第二步：保存作业(必须传递directory_id,否则会保存到根目录)
             save_result = self.crawler.save_work(
                 course_id=self.current_course_id,
                 class_id=self.current_class_id,
                 work_id=work_id,
-                title=title
+                title=title,
+                directory_id=self.target_directory_id  # 传递目标文件夹ID
             )
             
             if save_result.get("status"):
+                # 保存目标文件夹ID(在清空前保存)
+                target_folder_id = self.target_directory_id
+                
                 # 显示成功对话框
                 QMessageBox.information(
                     self,
@@ -1087,9 +1096,19 @@ class HomeworkCreateView(QWidget):
                 self.selected_questions.clear()
                 # 清空页面全选状态
                 self.page_select_all_states.clear()
+                # 清空目标文件夹ID
+                self.target_directory_id = 0
                 self.update_selected_count()
-                # 刷新列表
-                self.on_search(self.current_page)
+                
+                # 如果是在指定文件夹创建的作业,切换到作业库并进入该文件夹
+                if target_folder_id > 0:
+                    self.switch_tab("library")
+                    # 延迟一点时间再进入文件夹,确保作业库已加载
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(300, lambda: self.library_view.enter_folder_by_id(target_folder_id))
+                else:
+                    # 在根目录创建,刷新列表
+                    self.on_search(self.current_page)
             else:
                 # 显示失败对话框
                 error_msg = save_result.get('msg', '未知错误')
@@ -1112,6 +1131,38 @@ class HomeworkCreateView(QWidget):
             self.status_update.emit(f"❌ 创建作业失败: {str(e)}")
             import traceback
             traceback.print_exc()
+    
+    def set_target_directory(self, directory_id: int):
+        """
+        设置目标文件夹ID，用于在指定文件夹创建作业
+        
+        Args:
+            directory_id: 文件夹ID（0表示根目录）
+        """
+        self.target_directory_id = directory_id
+        print(f"设置目标文件夹ID: {directory_id}")
+    
+    def on_create_homework_requested(self, directory_id: int):
+        """
+        响应在文件夹中创建作业的请求
+        
+        Args:
+            directory_id: 文件夹ID
+        """
+        print(f"\n=== 响应创建作业请求 ===")
+        print(f"directory_id: {directory_id}")
+        
+        # 先切换到创建作业tab（会重置target_directory_id为0）
+        self.switch_tab("create")
+        
+        # 再设置目标文件夹ID
+        self.set_target_directory(directory_id)
+        
+        # 像手动切换一样，加载课程列表（如果未加载）
+        if not self.courses_loaded:
+            self.load_courses()
+        
+        self.status_update.emit(f"已切换到创建作业，目标文件夹ID: {directory_id}")
     
     def on_show(self):
         """视图显示时调用"""
@@ -1377,6 +1428,11 @@ class HomeworkCreateView(QWidget):
             self.publish_tab_btn.setStyleSheet(self._tab_style(active=False))
             self.create_container.setVisible(True)
             self.library_view.setVisible(False)
+            # 手动切换到创建作业tab时，重置目标文件夹ID为0（根目录）
+            self.target_directory_id = 0
+            # 加载课程列表（如果未加载）
+            if not self.courses_loaded:
+                self.load_courses()
             self.status_update.emit("切换到创建作业")
         elif tab_name == "library":
             self.current_tab = "library"

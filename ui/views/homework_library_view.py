@@ -164,6 +164,7 @@ class HomeworkLibraryView(QWidget):
     """作业库视图"""
     
     status_update = pyqtSignal(str)
+    create_homework_requested = pyqtSignal(int)  # 请求创建作业信号，参数为文件夹ID
     
     def __init__(self, crawler=None, parent=None):
         super().__init__(parent)
@@ -211,6 +212,29 @@ class HomeworkLibraryView(QWidget):
         header_layout.addWidget(self.path_label)
         
         header_layout.addStretch()
+        
+        # 在此创建作业按钮（进入文件夹后显示）
+        self.create_in_folder_btn = QPushButton("在此创建作业")
+        self.create_in_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.create_in_folder_btn.setMinimumHeight(28)
+        self.create_in_folder_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 15px;
+                font-size: 13px;
+                font-weight: bold;
+                margin-right: 10px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        self.create_in_folder_btn.clicked.connect(self.on_create_in_current_folder)
+        self.create_in_folder_btn.setVisible(False)
+        header_layout.addWidget(self.create_in_folder_btn)
         
         # 返回上级按钮
         self.back_btn = QPushButton("⬅ 返回上级")
@@ -445,6 +469,7 @@ class HomeworkLibraryView(QWidget):
         
         # 显示返回按钮
         self.back_btn.setVisible(True)
+        self.create_in_folder_btn.setVisible(True)
         
         # 更新路径标签
         self.update_path_label()
@@ -469,12 +494,64 @@ class HomeworkLibraryView(QWidget):
         # 如果已经回到根目录，隐藏返回按钮
         if not self.directory_path:
             self.back_btn.setVisible(False)
+            self.create_in_folder_btn.setVisible(False)
         
         # 更新路径标签
         self.update_path_label()
         
         # 重新加载
         self.load_library()
+    
+    def enter_folder_by_id(self, folder_id: int):
+        """
+        通过文件夹ID直接进入文件夹(用于从外部跳转)
+        
+        Args:
+            folder_id: 文件夹ID
+        """
+        # 清空路径栈,只保存根目录作为返回目标
+        self.directory_path = [{
+            'id': 0,  # 根目录ID
+            'name': '根目录'
+        }]
+        
+        # 设置当前文件夹ID
+        self.current_directory_id = folder_id
+        
+        # 显示返回按钮
+        self.back_btn.setVisible(True)
+        self.create_in_folder_btn.setVisible(True)
+        
+        # 更新路径标签
+        self.path_label.setText(f" / 目标文件夹")
+        
+        # 加载作业库
+        self.load_library()
+        
+        print(f"\n=== 通过ID进入文件夹 ===")
+        print(f"folder_id: {folder_id}")
+    
+    def on_create_in_current_folder(self):
+        """
+        在当前文件夹创建作业
+        点击"在此创建作业"按钮时调用
+        """
+        # 获取当前文件夹ID
+        current_folder_id = self.current_directory_id
+        
+        # 转换为整数
+        try:
+            folder_id_int = int(current_folder_id) if current_folder_id else 0
+        except (ValueError, TypeError):
+            folder_id_int = 0
+        
+        print(f"\n=== 在当前文件夹创建作业 ===")
+        print(f"current_directory_id: {current_folder_id}")
+        print(f"folder_id_int: {folder_id_int}")
+        
+        # 触发创建作业信号
+        if folder_id_int > 0:
+            self.create_homework_requested.emit(folder_id_int)
     
     def update_path_label(self):
         """更新路径标签"""
@@ -579,6 +656,11 @@ class HomeworkLibraryView(QWidget):
             menu.addAction(rename_action)
             
             menu.addSeparator()
+            
+            # 新建作业
+            create_homework_action = QAction("📝 新建作业", self)
+            create_homework_action.triggered.connect(lambda: self.create_homework_in_folder(data))
+            menu.addAction(create_homework_action)
             
             move_action = QAction("📁 移动到", self)
             move_action.triggered.connect(lambda: self.move_folder(data))
@@ -955,3 +1037,24 @@ class HomeworkLibraryView(QWidget):
                     f"❌ 删除失败: {result.get('msg', '未知错误')}",
                     QMessageBox.StandardButton.Ok
                 )
+    
+    def create_homework_in_folder(self, folder_data: dict):
+        """在文件夹中新建作业"""
+        folder_id = folder_data.get('id')
+        folder_name = folder_data.get('name')
+        
+        # 转换为整数（文件夹ID可能是字符串）
+        try:
+            folder_id_int = int(folder_id) if folder_id else 0
+        except (ValueError, TypeError):
+            folder_id_int = 0
+        
+        print(f"\n=== 在文件夹中新建作业 ===")
+        print(f"folder_id: {folder_id} (type: {type(folder_id)})")
+        print(f"folder_id_int: {folder_id_int}")
+        print(f"folder_name: {folder_name}")
+        
+        # 发送信号，请求跳转到创建作业tab
+        self.create_homework_requested.emit(folder_id_int)
+        
+        self.status_update.emit(f"正在跳转到创建作业...")

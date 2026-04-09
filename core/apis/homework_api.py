@@ -567,7 +567,8 @@ class HomeworkAPI:
         class_id: str,
         title: str,
         questions: List[Dict[str, str]],
-        q_bank_id: str = ""
+        q_bank_id: str = "",
+        directory_id: int = 0
     ) -> Dict:
         """
         创建作业。
@@ -578,6 +579,7 @@ class HomeworkAPI:
             title: 作业标题
             questions: 题目列表 [{"id": "xxx", "courseId": "xxx", "type": "x", "courseQuestionTypeId": "x"}, ...]
             q_bank_id: 题库ID（可选）
+            directory_id: 目录ID（文件夹ID，0表示根目录）
         
         Returns:
             {
@@ -613,7 +615,7 @@ class HomeworkAPI:
             "questions": json.dumps(question_params, ensure_ascii=False),  # 参数名是 questions，不是 ques
             "title": title,
             "grading": 0,
-            "directoryid": 0,
+            "directoryid": directory_id,  # 使用传入的文件夹ID
             "questionGroup": 0,
             "workLibraryType": 0,
             "evaluationQuesNum": 0

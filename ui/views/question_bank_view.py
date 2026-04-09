@@ -322,6 +322,8 @@ class QuestionBankView(QWidget):
                 font-weight: bold;
             }
         """)
+        # 连接点击事件
+        self.question_list.itemClicked.connect(self._on_question_clicked)
         layout.addWidget(self.question_list)
 
         # 提示标签
@@ -366,6 +368,46 @@ class QuestionBankView(QWidget):
         """刷新题目列表（预留接口）"""
         self.status_update.emit("刷新题目列表...")
         # TODO: 实现题目加载逻辑
+    
+    def display_questions(self, questions: list, folder_path: str = ""):
+        """显示题目列表"""
+        self.question_list.clear()
+        
+        # 更新标题
+        self.question_title.setText(f"📝 题目列表 - {folder_path}")
+        self.dev_hint.setVisible(False)
+        
+        # 添加题目
+        for i, q in enumerate(questions, start=1):
+            # 格式化正确率显示
+            accuracy_text = f"{q['accuracy']:.1f}%" if q.get('accuracy') is not None else "-"
+            
+            # 格式化难度显示
+            difficulty_text = f"{q.get('difficulty', 0.5)} ({'易' if q.get('difficulty', 0.5) >= 0.8 else '中' if q.get('difficulty', 0.5) >= 0.2 else '难'})"
+            
+            # 创建树节点
+            item = QTreeWidgetItem([
+                str(i),  # 序号
+                q.get('content', '')[:100] + "..." if len(q.get('content', '')) > 100 else q.get('content', ''),
+                q.get('question_type', '未知'),  # 题型
+                difficulty_text,  # 难度
+                str(q.get('usage_count', 0)),  # 使用量
+                accuracy_text,  # 正确率
+                q.get('author', ''),  # 作者
+                q.get('create_time', '')  # 创建时间
+            ])
+            
+            # 存储题目数据
+            item.setData(0, Qt.ItemDataRole.UserRole, q.get('id'))
+            item.setData(1, Qt.ItemDataRole.UserRole, q)  # 完整题目数据
+            
+            self.question_list.addTopLevelItem(item)
+        
+        # 更新提示标签
+        if questions:
+            self.hint_label.setText(f"💡 共找到 {len(questions)} 道题目")
+        else:
+            self.hint_label.setText("💡 当前文件夹暂无题目")
 
     def load_sample_folders(self):
         """加载示例文件夹数据（用于测试）"""
@@ -539,7 +581,7 @@ class QuestionBankView(QWidget):
         self._load_subfolders(item)
 
     def _load_subfolders(self, item: QTreeWidgetItem):
-        """加载子文件夹"""
+        """加载子文件夹和题目"""
         # 检查是否已经加载过子文件夹
         if item.data(0, Qt.ItemDataRole.UserRole + 1):  # 使用 UserRole+1 存储加载状态
             return
@@ -553,22 +595,34 @@ class QuestionBankView(QWidget):
         # 标记为正在加载
         item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
 
-        # 获取子文件夹
+        # 获取子文件夹和题目
         try:
-            # 特殊处理：root 节点不需要再加载子文件夹（已由 load_folders 加载）
+            # 特殊处理：root 节点
+            # - 不需要再加载子文件夹（已由 load_folders 加载）
+            # - 但需要加载根目录下的题目
             if folder_id == "root":
+                # 使用 "0" 作为根目录 ID 来获取题目
+                result = self.crawler.get_question_subfolders("0")
+                if result:
+                    questions = result.get("questions", [])
+                    self.display_questions(questions, self.current_folder_path)
                 return
 
-            subfolders = self.crawler.get_question_subfolders(folder_id)
-
+            result = self.crawler.get_question_subfolders(folder_id)
+            
+            if not result:
+                return
+            
+            # 处理子文件夹
+            subfolders = result.get("folders", [])
             if subfolders:
-                for sf in subfolders:
-                    # 避免重复添加：检查是否已存在相同 ID 的文件夹
-                    existing_ids = set()
-                    for i in range(item.childCount()):
-                        child_item = item.child(i)
-                        existing_ids.add(child_item.data(0, Qt.ItemDataRole.UserRole))
+                # 检查是否已存在相同 ID 的文件夹
+                existing_ids = set()
+                for i in range(item.childCount()):
+                    child_item = item.child(i)
+                    existing_ids.add(child_item.data(0, Qt.ItemDataRole.UserRole))
 
+                for sf in subfolders:
                     if sf['id'] not in existing_ids:
                         child = QTreeWidgetItem([f"📁 {sf['name']} ({sf['count']})"])
                         child.setData(0, Qt.ItemDataRole.UserRole, sf['id'])
@@ -580,12 +634,13 @@ class QuestionBankView(QWidget):
 
                 item.setExpanded(True)
                 self.status_update.emit(f"已加载 {len(subfolders)} 个子文件夹")
-            else:
-                # 没有子文件夹
-                pass
+            
+            # 处理题目列表（无论有无题目都更新显示，避免显示旧数据）
+            questions = result.get("questions", [])
+            self.display_questions(questions, self.current_folder_path)
 
         except Exception as e:
-            print(f"加载子文件夹失败: {e}")
+            print(f"加载子文件夹和题目失败: {e}")
             # 加载失败，重置状态以便下次重试
             item.setData(0, Qt.ItemDataRole.UserRole + 1, False)
     
@@ -861,6 +916,10 @@ class QuestionBankView(QWidget):
             fail_count = 0
             total = len(questions)
             
+            # 获取文件所在目录作为图片基准目录
+            import os
+            base_dir = os.path.dirname(self.selected_file) if hasattr(self, 'selected_file') and self.selected_file else None
+            
             for i, q in enumerate(questions):
                 self.status_update.emit(f"正在上传第 {i+1}/{total} 道题目...")
                 
@@ -868,7 +927,7 @@ class QuestionBankView(QWidget):
                 from PyQt6.QtWidgets import QApplication
                 QApplication.processEvents()
                 
-                result = self.crawler.add_question(folder_id, q)
+                result = self.crawler.add_question(folder_id, q, base_dir=base_dir)
                 
                 if result.get("success"):
                     success_count += 1
@@ -999,7 +1058,7 @@ class QuestionBankView(QWidget):
         easy = 1  # 默认中等难度 (0=易, 1=中, 2=难)
         question_type_hint = ""  # 题型提示
         
-        option_pattern = r'^\s*([A-Ha-h])\s*[、.．:：]\s*(.+)$'
+        option_pattern = r'^\s*([A-Ha-h])\s*[、.．:：]\s*(.*)$'  # 改为 .* 支持选项后无内容（图片在下一行）
         answer_pattern = r'^\s*(?:答案|正确答案)\s*[：:]\s*(.+)$'  # 改为匹配任意答案
         analysis_pattern = r'^\s*(?:答案解析|解析|分析)\s*[：:]\s*(.+)$'
         difficulty_pattern = r'^\s*(?:难易程度|难度)\s*[：:]\s*(易|中|难|简单|较难|困难)'
@@ -1028,14 +1087,8 @@ class QuestionBankView(QWidget):
 
             stripped = raw_line_clean.strip()
 
+            # 跳过所有空行
             if not stripped:
-                if current_section == "content":
-                    content_lines.append(raw_line_clean)
-                elif current_section == "analysis":
-                    analysis_lines.append(raw_line_clean)
-                elif current_section == "options" and options:
-                    prev = options[-1]["value"]
-                    options[-1]["value"] = (prev + "\n" + raw_line_clean) if prev else raw_line_clean
                 continue
             
             # 检查是否是题型
@@ -1167,3 +1220,249 @@ class QuestionBankView(QWidget):
             "difficulty": difficulty,
             "easy": easy  # 难度等级 (0=易, 1=中, 2=难)
         }
+    
+    def _on_question_clicked(self, item: QTreeWidgetItem):
+        """点击题目时的处理"""
+        # 获取题目 ID
+        question_id = item.data(0, Qt.ItemDataRole.UserRole)
+        question_data = item.data(1, Qt.ItemDataRole.UserRole)
+        
+        if not question_id or not self.crawler:
+            return
+        
+        # 获取当前文件夹 ID
+        folder_id = self.current_folder_id
+        if folder_id == "root":
+            folder_id = "0"
+        
+        # 显示状态
+        self.status_update.emit(f"正在加载题目详情...")
+        
+        try:
+            # 调用 API 获取题目详情
+            result = self.crawler.get_question_detail(question_id, folder_id)
+            
+            if result.get("success"):
+                # 显示题目详情对话框
+                dialog = QuestionDetailDialog(result, self)
+                dialog.exec()
+                self.status_update.emit("题目详情已加载")
+            else:
+                self.status_update.emit(f"加载题目详情失败: {result.get('msg', '未知错误')}")
+                QMessageBox.warning(self, "加载失败", f"无法加载题目详情:\n{result.get('msg', '未知错误')}")
+                
+        except Exception as e:
+            print(f"加载题目详情错误: {e}")
+            self.status_update.emit(f"加载题目详情失败: {e}")
+
+
+class QuestionDetailDialog(QDialog):
+    """题目详情对话框 - 使用 QTextBrowser 渲染，支持图片显示"""
+    
+    def __init__(self, question_data: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("题目详情")
+        self.setMinimumSize(850, 650)
+        self.setStyleSheet("background-color: #1e1e1e;")
+        # 图片缓存 {url: base64_data}
+        self._image_cache = {}
+        self.setup_ui(question_data)
+    
+    def setup_ui(self, question_data: dict):
+        """设置界面"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        
+        # 预处理 HTML：下载图片并转为 base64
+        processed_data = self._process_images(question_data)
+        
+        # 构建 HTML
+        html = self._build_html(processed_data)
+        
+        # 使用 QTextBrowser
+        from PyQt6.QtWidgets import QTextBrowser
+        self.text_browser = QTextBrowser()
+        self.text_browser.setOpenExternalLinks(True)
+        self.text_browser.setHtml(html)
+        self.text_browser.setStyleSheet("""
+            QTextBrowser {
+                background-color: #1e1e1e;
+                color: #cccccc;
+                border: none;
+                font-size: 14px;
+                padding: 8px;
+            }
+        """)
+        
+        layout.addWidget(self.text_browser)
+        
+        # 底部按钮栏
+        btn_bar = QWidget()
+        btn_bar.setStyleSheet("background-color: #2d2d2d; border-top: 1px solid #3e3e42;")
+        btn_layout = QHBoxLayout(btn_bar)
+        btn_layout.setContentsMargins(20, 8, 20, 8)
+        
+        btn_layout.addStretch()
+        
+        close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0e639c;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 24px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+        """)
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addWidget(btn_bar)
+    
+    def _process_images(self, data: dict) -> dict:
+        """下载 HTML 中的图片并转为 base64 嵌入"""
+        import re
+        import base64
+        import requests
+        
+        result = dict(data)
+        
+        # 需要处理图片的字段
+        for key in ["stem", "analysis"]:
+            html_content = result.get(key, "")
+            if not html_content:
+                continue
+            
+            # 查找所有 img src
+            img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+            matches = img_pattern.findall(html_content)
+            
+            for img_url in matches:
+                if img_url in self._image_cache:
+                    base64_data = self._image_cache[img_url]
+                else:
+                    try:
+                        resp = requests.get(img_url, timeout=10)
+                        resp.raise_for_status()
+                        content_type = resp.headers.get("Content-Type", "image/png")
+                        base64_data = f"data:{content_type};base64,{base64.b64encode(resp.content).decode('utf-8')}"
+                        self._image_cache[img_url] = base64_data
+                    except Exception as e:
+                        print(f"下载图片失败 {img_url}: {e}")
+                        continue
+                
+                # 替换 src
+                html_content = html_content.replace(f'src="{img_url}"', f'src="{base64_data}"')
+                html_content = html_content.replace(f"src='{img_url}'", f'src="{base64_data}"')
+            
+            result[key] = html_content
+        
+        # 处理选项中的图片
+        options = result.get("options", [])
+        new_options = []
+        for opt in options:
+            new_opt = dict(opt)
+            content = new_opt.get("content", "")
+            if content:
+                img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+                matches = img_pattern.findall(content)
+                for img_url in matches:
+                    if img_url in self._image_cache:
+                        base64_data = self._image_cache[img_url]
+                    else:
+                        try:
+                            resp = requests.get(img_url, timeout=10)
+                            resp.raise_for_status()
+                            content_type = resp.headers.get("Content-Type", "image/png")
+                            base64_data = f"data:{content_type};base64,{base64.b64encode(resp.content).decode('utf-8')}"
+                            self._image_cache[img_url] = base64_data
+                        except Exception as e:
+                            print(f"下载图片失败 {img_url}: {e}")
+                            continue
+                    content = content.replace(f'src="{img_url}"', f'src="{base64_data}"')
+                    content = content.replace(f"src='{img_url}'", f'src="{base64_data}"')
+                new_opt["content"] = content
+            new_options.append(new_opt)
+        result["options"] = new_options
+        
+        return result
+    
+    def _build_html(self, data: dict) -> str:
+        """构建完整的 HTML 内容"""
+        import html as html_module
+        
+        stem = data.get("stem", "")
+        options = data.get("options", [])
+        answer = data.get("answer", "")
+        analysis = data.get("analysis", "")
+        difficulty = data.get("difficulty", "")
+        question_type_info = data.get("question_type_info", "")
+        
+        # 构建选项 HTML
+        options_html = ""
+        for opt in options:
+            label = html_module.escape(opt.get("label", ""))
+            content = opt.get("content", "")
+            options_html += f"""
+            <div style="display:flex; align-items:flex-start; background-color:#252526; border:1px solid #3e3e42; border-radius:6px; padding:10px 14px; margin-bottom:8px;">
+                <span style="font-weight:bold; color:#dcdcaa; min-width:28px; margin-right:8px;">{label}</span>
+                <div style="flex:1;">{content}</div>
+            </div>"""
+        
+        sections = ""
+        
+        # 题干
+        if stem:
+            type_info_html = f'<div style="color:#9cdcfe; font-size:13px; margin-bottom:8px;">{question_type_info}</div>' if question_type_info else ''
+            sections += f"""
+            <div style="margin-bottom:24px;">
+                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">📝 题干</div>
+                <div style="background-color:#252526; border:1px solid #3e3e42; border-radius:6px; padding:16px;">
+                    {type_info_html}
+                    {stem}
+                </div>
+            </div>"""
+        
+        # 选项
+        if options:
+            sections += f"""
+            <div style="margin-bottom:24px;">
+                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">📋 选项</div>
+                {options_html}
+            </div>"""
+        
+        # 答案
+        if answer:
+            sections += f"""
+            <div style="margin-bottom:24px;">
+                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">✅ 答案</div>
+                <div style="background-color:#1e4620; border:2px solid #4caf50; border-radius:6px; padding:12px 16px; font-size:16px; font-weight:bold; color:#4caf50;">{answer}</div>
+            </div>"""
+        
+        # 解析
+        if analysis:
+            sections += f"""
+            <div style="margin-bottom:24px;">
+                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">📖 答案解析</div>
+                <div style="background-color:#252526; border:1px solid #3e3e42; border-radius:6px; padding:16px;">{analysis}</div>
+            </div>"""
+        
+        # 难度
+        if difficulty:
+            sections += f"""
+            <div style="margin-bottom:24px;">
+                <div style="color:#569cd6; font-size:16px; font-weight:bold; margin-bottom:12px; padding-bottom:6px; border-bottom:1px solid #3e3e42;">📊 难度</div>
+                <div style="color:#cccccc; font-size:14px;">{difficulty}</div>
+            </div>"""
+        
+        return f"""<html><body style="background-color:#1e1e1e; color:#cccccc; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; font-size:14px; line-height:1.8; margin:0; padding:8px;">
+<style>
+    img {{ max-width:100%; vertical-align:middle; }}
+    p {{ margin:6px 0; }}
+</style>
+{sections}
+</body></html>"""
