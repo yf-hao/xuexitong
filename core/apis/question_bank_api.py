@@ -1493,22 +1493,74 @@ class QuestionBankAPI:
             opt["value"] = opt["value"].replace(r"\{", "{").replace(r"\}", "}")
 
         # 将内容转为 HTML 格式：每行包裹 <p>，空格/制表符转为 &nbsp; 保留缩进
+        # 支持 Markdown 代码块转换为 <pre><code> 格式
         # 支持占位符替换（如公式图片 <img>），在转义后执行 replacements
         def to_html(text, replacements=None):
             import html
+            import re as re3
             if text is None:
                 return ""
-            lines = str(text).splitlines() or [""]
+
+            # 预处理：检测并转换 Markdown 代码块
+            # 匹配 ```lang\ncode\n``` 格式
+            code_block_pattern = re3.compile(r'```(\w*)\n(.*?)\n```', re3.DOTALL)
+
+            # 使用占位符保护代码块
+            code_blocks = {}
+            placeholder_counter = [0]
+
+            def replace_code_block(match):
+                lang = match.group(1) or ""  # 语言标识
+                code = match.group(2)  # 代码内容
+
+                # 转义 HTML 特殊字符
+                code_escaped = html.escape(code)
+
+                # 处理缩进和换行
+                # 制表符 -> 4个空格
+                code_escaped = code_escaped.replace("\t", "&nbsp;&nbsp;&nbsp;&nbsp;")
+                # 空格 -> &nbsp;
+                code_escaped = code_escaped.replace(" ", "&nbsp;")
+                # 换行符 -> <br/>
+                code_escaped = code_escaped.replace("\n", "<br/>")
+
+                # 生成 HTML 代码块
+                if lang:
+                    code_html = f'<pre class="hover"><code lang="{lang}" class="language-{lang}">{code_escaped}<br/></code></pre>'
+                else:
+                    code_html = f'<pre class="hover"><code>{code_escaped}<br/></code></pre>'
+
+                # 使用占位符
+                placeholder = f"__CODE_BLOCK_{placeholder_counter[0]}__"
+                placeholder_counter[0] += 1
+                code_blocks[placeholder] = code_html
+                return placeholder
+
+            # 替换代码块为占位符
+            text_with_placeholders = code_block_pattern.sub(replace_code_block, str(text))
+
+            # 处理普通文本行
+            lines = text_with_placeholders.splitlines() or [""]
             html_lines = []
             for line in lines:
-                # 先转义 HTML，再替换空格/制表符
+                # 先转义 HTML
                 escaped = html.escape(line)
+                # 转换 Markdown 粗体 **text** -> <strong>text</strong>
+                escaped = re3.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', escaped)
+                # 转换着重号 `text` -> <span style="text-emphasis: dot;">text</span>
+                escaped = re3.sub(r'`([^`]+)`', r'<span style="text-emphasis: dot;">\1</span>', escaped)
                 escaped = escaped.replace("\t", "&nbsp;&nbsp;&nbsp;&nbsp;")
-                escaped = escaped.replace(" ", "&nbsp;")
                 if escaped == "":
                     escaped = "&nbsp;"  # 空行占位
                 html_lines.append(f"<p>{escaped}</p>")
             html_str = "".join(html_lines)
+
+            # 恢复代码块
+            for placeholder, code_html in code_blocks.items():
+                # 代码块不需要 <p> 包裹，直接替换
+                html_str = html_str.replace(f"<p>{placeholder}</p>", code_html)
+
+            # 应用其他替换（如公式图片）
             if replacements:
                 for k, v in replacements.items():
                     html_str = html_str.replace(k, v)

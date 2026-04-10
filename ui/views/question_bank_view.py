@@ -1039,10 +1039,10 @@ class QuestionBankView(QWidget):
         import re
 
         def strip_md_emphasis(value: str) -> str:
-            # 移除行内 Markdown 强调符号（如 `code` -> code）
+            # 保留反引号，用于着重号标记（`text` -> <span style="text-emphasis: dot;">text</span>）
             if not value:
                 return ""
-            return re.sub(r"`([^`]*)`", r"\1", value)
+            return value
         
         lines = text.splitlines()
         
@@ -1068,23 +1068,25 @@ class QuestionBankView(QWidget):
         type_pattern = r'^\s*题型\s*[：:]\s*(.+)$'
         
         current_section = "content"
-        
+        in_code_block = False  # 跟踪是否在代码块内
+
         for line in lines:
             raw_line = line.rstrip('\r')
 
-            # 优先跳过整行代码块围栏，如 ```java / ```
+            # 检测代码块开始/结束
             if re.match(r"^\s*```", raw_line):
-                continue
-
-            raw_line_clean = strip_md_emphasis(raw_line)
-
-            # 处理行内/残留代码块标记：去掉 ```、语言标识，保留内部内容
-            if "```" in raw_line_clean:
-                raw_line_clean = re.sub(r"```\s*\w*", "", raw_line_clean)
-                raw_line_clean = raw_line_clean.replace("```", "")
+                in_code_block = not in_code_block
+                # 保留代码块围栏标记，不做任何处理
+                raw_line_clean = raw_line
+            elif in_code_block:
+                # 代码块内部：保留原始内容，不处理 Markdown 标记
+                raw_line_clean = raw_line
+            else:
+                # 普通文本：处理 Markdown 标记
+                raw_line_clean = strip_md_emphasis(raw_line)
 
             # 跳过分隔线行，如 ---
-            if raw_line_clean.strip() == "---":
+            if not in_code_block and raw_line_clean.strip() == "---":
                 continue
 
             stripped = raw_line_clean.strip()
