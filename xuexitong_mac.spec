@@ -68,7 +68,7 @@ exe = EXE(
 app = BUNDLE(
     exe,
     name='XuexitongManager.app',
-    icon=None,                # 如果有 .icns 图标，请填入路径
+    icon='assets/icon.icns',  # macOS 图标
     bundle_identifier='com.hao.xuexitong',
     info_plist={
         'NSHighResolutionCapable': 'True',

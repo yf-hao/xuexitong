@@ -53,4 +53,5 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon='assets/icon.png',  # Linux 图标 (也可以用 .png)
 )

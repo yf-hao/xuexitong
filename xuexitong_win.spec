@@ -53,5 +53,5 @@ exe = EXE(
     strip=False,
     upx=True,         # Windows 可以开
     console=False,    # GUI
-    # icon='resources/icon.ico',  # 暂时注释掉icon
+    icon='assets/icon.ico',  # Windows 图标
 )

@@ -442,68 +442,173 @@ class CloudDriveAPI:
                 "error": str(e)
             }
 
-    def download_folder(self, folder_id, encrypted_id, puid, token, save_path):
+    def download_folder(self, folder_id, folder_name, puid, enc, token, save_path, callback=None):
         """
-        下载云盘文件夹（打包为ZIP）
+        递归下载云盘文件夹（多线程）
         
         Args:
             folder_id: 文件夹ID
-            encrypted_id: 加密ID
+            folder_name: 文件夹名称
             puid: 用户ID
+            enc: 加密字符串
             token: 认证token
             save_path: 保存路径
+            callback: 进度回调函数 (current_file, total_files, current_name)
         
         Returns:
             dict: 下载结果
         """
         try:
             import os
-            from urllib.parse import unquote
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import threading
             
-            # 第一步：检查是否有子文件夹
-            check_url = "https://pan-yz.cldisk.com/opt/getSubFoldCount"
+            # 创建本地文件夹
+            local_folder_path = os.path.join(save_path, folder_name)
+            os.makedirs(local_folder_path, exist_ok=True)
             
-            check_params = {
-                "puid": puid,
-                "fileInfoId": folder_id,
-                "encryptedId": encrypted_id
+            print(f"DEBUG download_folder: 开始下载文件夹 {folder_name} 到 {local_folder_path}")
+            
+            # 收集所有需要下载的文件
+            files_to_download = []
+            folders_to_create = []
+            
+            def collect_files(current_folder_id, current_local_path):
+                """递归收集文件列表"""
+                # 获取文件夹内容
+                result = self.get_file_list(
+                    puid=puid,
+                    enc=enc,
+                    parent_id=current_folder_id,
+                    page=1,
+                    size=1000,
+                    token=token
+                )
+                
+                if not result.get("success"):
+                    print(f"DEBUG download_folder: 获取文件列表失败 - {result.get('error')}")
+                    return
+                
+                items = result.get("list", [])
+                
+                for item in items:
+                    item_name = item.get("name", "未知")
+                    is_file = item.get("isfile", False)
+                    
+                    if is_file:
+                        # 收集文件信息
+                        files_to_download.append({
+                            "file_id": item.get("id"),
+                            "encrypted_id": item.get("encryptedId"),
+                            "folder_id": current_folder_id,
+                            "name": item_name,
+                            "local_path": current_local_path
+                        })
+                    else:
+                        # 创建子文件夹并递归收集
+                        sub_folder_name = item_name
+                        sub_local_path = os.path.join(current_local_path, sub_folder_name)
+                        os.makedirs(sub_local_path, exist_ok=True)
+                        
+                        folders_to_create.append(sub_local_path)
+                        
+                        # 递归收集子文件夹内容
+                        collect_files(item.get("id"), sub_local_path)
+            
+            # 收集所有文件
+            collect_files(folder_id, local_folder_path)
+            
+            total_files = len(files_to_download)
+            print(f"DEBUG download_folder: 共 {total_files} 个文件待下载")
+            
+            if total_files == 0:
+                return {
+                    "success": True,
+                    "file_path": local_folder_path,
+                    "total_files": 0,
+                    "downloaded_files": 0,
+                    "message": "文件夹为空"
+                }
+            
+            # 统计下载结果
+            downloaded_files = 0
+            failed_files = []
+            lock = threading.Lock()
+            
+            def download_single_file(file_info):
+                """下载单个文件"""
+                nonlocal downloaded_files, failed_files
+                
+                try:
+                    if callback:
+                        callback(downloaded_files + 1, total_files, file_info["name"])
+                    
+                    print(f"DEBUG download_folder: 下载文件 {file_info['name']}")
+                    
+                    result = self.download_file(
+                        file_id=file_info["file_id"],
+                        encrypted_id=file_info["encrypted_id"],
+                        puid=puid,
+                        current_folder_id=file_info["folder_id"],
+                        token=token,
+                        save_path=file_info["local_path"]
+                    )
+                    
+                    with lock:
+                        if result.get("success"):
+                            downloaded_files += 1
+                        else:
+                            failed_files.append({
+                                "name": file_info["name"],
+                                "error": result.get("error")
+                            })
+                    
+                    return result
+                    
+                except Exception as e:
+                    with lock:
+                        failed_files.append({
+                            "name": file_info["name"],
+                            "error": str(e)
+                        })
+                    return {"success": False, "error": str(e)}
+            
+            # 使用线程池并行下载（最多10个并发）
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(download_single_file, f) for f in files_to_download]
+                
+                # 等待所有下载完成
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"DEBUG download_folder: 下载任务异常 - {str(e)}")
+            
+            # 返回结果
+            if failed_files:
+                return {
+                    "success": True,
+                    "file_path": local_folder_path,
+                    "total_files": total_files,
+                    "downloaded_files": downloaded_files,
+                    "failed_files": failed_files,
+                    "message": f"下载完成，成功 {downloaded_files}/{total_files} 个文件"
+                }
+            else:
+                return {
+                    "success": True,
+                    "file_path": local_folder_path,
+                    "total_files": total_files,
+                    "downloaded_files": downloaded_files,
+                    "message": f"下载完成，共 {downloaded_files} 个文件"
+                }
+                
+        except Exception as e:
+            print(f"DEBUG download_folder: 下载失败 - {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
             }
-            
-            headers = {
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Pragma": "no-cache",
-                "Referer": "https://pan-yz.cldisk.com/pcuserpan/index",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Storage-Access": "active",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-                "X-Requested-With": "XMLHttpRequest",
-                "p-auth-token": token,
-                "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"macOS"'
-            }
-            
-            check_response = self.session.get(check_url, params=check_params, headers=headers)
-            
-            print(f"DEBUG download_folder: 检查子文件夹 状态码={check_response.status_code}")
-            print(f"DEBUG download_folder: 检查子文件夹 响应={check_response.text}")
-            
-            if check_response.status_code == 200:
-                check_result = check_response.json()
-                if not check_result.get("result"):
-                    # 有子文件夹，无法下载
-                    return {
-                        "success": False,
-                        "error": "文件夹内包含子文件夹，请安装学习通客户端下载。"
-                    }
-            
-            # 第二步：获取 Md5Enc
             md5_url = "https://pan-yz.cldisk.com/pcsharepan/getMd5Enc"
             
             md5_data = {
@@ -1181,6 +1286,144 @@ class CloudDriveAPI:
                 
         except Exception as e:
             print(f"DEBUG move_cloud_drive_item: 移动失败 - {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def set_top(self, item_id, parent_id, token):
+        """
+        置顶文件或文件夹
+        
+        Args:
+            item_id: 文件或文件夹ID
+            parent_id: 父文件夹ID
+            token: 认证token
+        
+        Returns:
+            dict: 置顶结果
+        """
+        try:
+            url = f"https://pan-yz.cldisk.com/opt/setupTop?parentId={parent_id}&fileinfoId={item_id}"
+            
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://pan-yz.cldisk.com",
+                "Pragma": "no-cache",
+                "Referer": "https://pan-yz.cldisk.com/pcuserpan/index",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Storage-Access": "active",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                "X-Requested-With": "XMLHttpRequest",
+                "p-auth-token": token,
+                "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"macOS"'
+            }
+            
+            response = self.session.post(url, headers=headers)
+            
+            print(f"DEBUG set_top: 状态码={response.status_code}")
+            print(f"DEBUG set_top: 响应={response.text}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                is_success = result.get("result", False)
+                msg = result.get("msg", "")
+                
+                if is_success:
+                    return {
+                        "success": True,
+                        "message": msg or "置顶成功"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": msg or "置顶失败"
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"请求失败，状态码: {response.status_code}"
+                }
+                
+        except Exception as e:
+            print(f"DEBUG set_top: 置顶失败 - {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def cancel_top(self, item_id, parent_id, token):
+        """
+        取消置顶文件或文件夹
+        
+        Args:
+            item_id: 文件或文件夹ID
+            parent_id: 父文件夹ID
+            token: 认证token
+        
+        Returns:
+            dict: 取消置顶结果
+        """
+        try:
+            url = f"https://pan-yz.cldisk.com/opt/cancalTop?parentId={parent_id}&fileinfoId={item_id}"
+            
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://pan-yz.cldisk.com",
+                "Pragma": "no-cache",
+                "Referer": "https://pan-yz.cldisk.com/pcuserpan/index",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Storage-Access": "active",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                "X-Requested-With": "XMLHttpRequest",
+                "p-auth-token": token,
+                "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"macOS"'
+            }
+            
+            response = self.session.post(url, headers=headers)
+            
+            print(f"DEBUG cancel_top: 状态码={response.status_code}")
+            print(f"DEBUG cancel_top: 响应={response.text}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                is_success = result.get("result", False)
+                msg = result.get("msg", "")
+                
+                if is_success:
+                    return {
+                        "success": True,
+                        "message": msg or "取消置顶成功"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": msg or "取消置顶失败"
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"请求失败，状态码: {response.status_code}"
+                }
+                
+        except Exception as e:
+            print(f"DEBUG cancel_top: 取消置顶失败 - {str(e)}")
             return {
                 "success": False,
                 "error": str(e)

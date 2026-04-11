@@ -47,6 +47,7 @@ class CloudDriveView(QWidget):
         self.crawler = crawler
         self.cloud_info = None
         self.current_folder_id = None  # 当前文件夹ID
+        self.path_stack = []  # 路径栈：[(folder_id, folder_name), ...]
         self.setup_ui()
     
     def setup_ui(self):
@@ -224,6 +225,12 @@ class CloudDriveView(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # 类型列
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # 大小列
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # 时间列
+        header.sectionClicked.connect(self.on_header_clicked)  # 表头点击事件
+        
+        # 排序状态
+        self.sort_column = -1  # -1 表示默认排序（按topsort）
+        self.sort_order = Qt.SortOrder.DescendingOrder  # 排序顺序
+        self.current_file_list = []  # 当前文件列表缓存
         
         # 其他表格设置
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -308,6 +315,9 @@ class CloudDriveView(QWidget):
     
     def reset_path_navigation(self):
         """重置路径导航栏"""
+        # 清空路径栈
+        self.path_stack = []
+        
         # 找到 stretch 的位置
         stretch_index = -1
         for i in range(self.path_layout.count()):
@@ -367,13 +377,33 @@ class CloudDriveView(QWidget):
     
     def display_file_list(self, file_list):
         """显示文件列表"""
-        self.file_table.setRowCount(len(file_list))
+        # 缓存文件列表
+        self.current_file_list = file_list
         
-        for row, item in enumerate(file_list):
+        # 根据排序状态排序
+        if self.sort_column == -1:
+            # 默认排序：按 topsort 降序
+            sorted_list = sorted(file_list, key=lambda x: x.get("topsort", 0), reverse=True)
+        elif self.sort_column == 3:
+            # 按修改时间排序
+            sorted_list = sorted(file_list, key=lambda x: x.get("modifyDate", 0), 
+                               reverse=(self.sort_order == Qt.SortOrder.DescendingOrder))
+        else:
+            sorted_list = file_list
+        
+        self.file_table.setRowCount(len(sorted_list))
+        
+        for row, item in enumerate(sorted_list):
             # 名称列
             name = item.get("name", "未知")
             icon = self.get_file_icon(item)
-            name_item = QTableWidgetItem(f"{icon} {name}")
+            # 如果置顶，添加标记
+            topsort = item.get("topsort", 0)
+            if topsort > 0:
+                display_name = f"{icon} {name} 🏷️"
+            else:
+                display_name = f"{icon} {name}"
+            name_item = QTableWidgetItem(display_name)
             name_item.setData(Qt.ItemDataRole.UserRole, item)  # 存储原始数据
             name_item.setForeground(QColor("#e1e1e1"))
             self.file_table.setItem(row, 0, name_item)
@@ -425,6 +455,25 @@ class CloudDriveView(QWidget):
             return f"{size/1024/1024:.1f} MB"
         else:
             return f"{size/1024/1024/1024:.1f} GB"
+    
+    def on_header_clicked(self, column):
+        """表头点击事件"""
+        # 只处理修改时间列（列3）
+        if column == 3:
+            if self.sort_column == column:
+                # 切换排序顺序
+                self.sort_order = Qt.SortOrder.AscendingOrder if self.sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
+            else:
+                # 切换到修改时间列，默认降序
+                self.sort_column = column
+                self.sort_order = Qt.SortOrder.DescendingOrder
+        else:
+            # 点击其他列，恢复默认排序
+            self.sort_column = -1
+        
+        # 重新显示列表
+        if self.current_file_list:
+            self.display_file_list(self.current_file_list)
     
     def on_cell_double_clicked(self, row, column):
         """双击单元格事件"""
@@ -489,8 +538,15 @@ class CloudDriveView(QWidget):
         move_action = QAction("📁 移动到", self)
         delete_action = QAction("🗑️ 删除", self)
         
+        # 根据置顶状态添加相应菜单项
+        topsort = file_data.get("topsort", 0)
+        if topsort == 0:
+            pin_action = QAction("📌 置顶", self)
+        else:
+            pin_action = QAction("📌 取消置顶", self)
+        
         # 设置菜单项样式
-        for action in [download_action, rename_action, move_action, delete_action]:
+        for action in [download_action, rename_action, move_action, delete_action, pin_action]:
             action.setFont(self.font())
         
         # 连接下载动作
@@ -505,6 +561,11 @@ class CloudDriveView(QWidget):
         # 连接删除动作
         delete_action.triggered.connect(lambda: self.delete_item(file_data))
         
+        # 连接置顶/取消置顶动作
+        pin_action.triggered.connect(lambda: self.toggle_pin(file_data))
+        
+        menu.addAction(pin_action)
+        menu.addSeparator()
         menu.addAction(download_action)
         menu.addSeparator()
         menu.addAction(rename_action)
@@ -588,20 +649,36 @@ class CloudDriveView(QWidget):
                 self.crawler,
                 'folder',
                 folder_id=file_data.get("id"),
-                encrypted_id=file_data.get("encryptedId"),
+                folder_name=item_name,
                 puid=self.cloud_info.get("currentPuid"),
+                enc=self.cloud_info.get("encstr"),
                 token=self.cloud_info.get("token"),
                 save_path=save_path
             )
             
             def on_download_finished(result):
                 if result.get("success"):
-                    self.status_update.emit(f"下载成功: {result.get('filename')}")
-                    QMessageBox.information(
-                        self,
-                        "下载成功",
-                        f"文件夹已打包为 ZIP 保存到:\n{result.get('file_path')}"
-                    )
+                    total = result.get("total_files", 0)
+                    downloaded = result.get("downloaded_files", 0)
+                    failed = result.get("failed_files", [])
+                    
+                    if failed:
+                        failed_names = [f["name"] for f in failed[:5]]
+                        msg = f"下载完成：成功 {downloaded}/{total} 个文件\n\n失败的文件：\n" + "\n".join(failed_names)
+                        if len(failed) > 5:
+                            msg += f"\n... 等 {len(failed)} 个文件"
+                        QMessageBox.warning(
+                            self,
+                            "下载完成（部分失败）",
+                            msg
+                        )
+                    else:
+                        self.status_update.emit(f"下载成功: {downloaded} 个文件")
+                        QMessageBox.information(
+                            self,
+                            "下载成功",
+                            f"已保存到:\n{result.get('file_path')}\n\n共 {downloaded} 个文件"
+                        )
                 else:
                     self.status_update.emit(f"下载失败: {result.get('error')}")
                     QMessageBox.critical(
@@ -733,6 +810,67 @@ class CloudDriveView(QWidget):
                 "删除出错",
                 f"错误: {str(e)}"
             )
+    
+    def toggle_pin(self, file_data):
+        """置顶或取消置顶文件/文件夹"""
+        if not self.cloud_info:
+            QMessageBox.warning(self, "错误", "云盘信息未加载")
+            return
+        
+        topsort = file_data.get("topsort", 0)
+        item_name = file_data.get("name", "未知")
+        item_id = file_data.get("id")
+        
+        if topsort == 0:
+            # 置顶操作
+            self.status_update.emit(f"正在置顶: {item_name}...")
+            
+            try:
+                result = self.crawler.set_top(
+                    item_id=item_id,
+                    parent_id=self.current_folder_id,
+                    token=self.cloud_info.get("token")
+                )
+                
+                if result.get("success"):
+                    self.status_update.emit(f"置顶成功")
+                    # 刷新当前文件夹列表
+                    if self.current_folder_id == self.cloud_info.get("rootdir"):
+                        self.refresh_info()
+                    else:
+                        self.navigate_to_folder(self.current_folder_id, "当前文件夹")
+                else:
+                    self.status_update.emit(f"置顶失败: {result.get('error')}")
+                    QMessageBox.critical(self, "置顶失败", f"错误: {result.get('error')}")
+                    
+            except Exception as e:
+                self.status_update.emit(f"置顶出错: {str(e)}")
+                QMessageBox.critical(self, "置顶出错", f"错误: {str(e)}")
+        else:
+            # 取消置顶操作
+            self.status_update.emit(f"正在取消置顶: {item_name}...")
+            
+            try:
+                result = self.crawler.cancel_top(
+                    item_id=item_id,
+                    parent_id=self.current_folder_id,
+                    token=self.cloud_info.get("token")
+                )
+                
+                if result.get("success"):
+                    self.status_update.emit(f"取消置顶成功")
+                    # 刷新当前文件夹列表
+                    if self.current_folder_id == self.cloud_info.get("rootdir"):
+                        self.refresh_info()
+                    else:
+                        self.navigate_to_folder(self.current_folder_id, "当前文件夹")
+                else:
+                    self.status_update.emit(f"取消置顶失败: {result.get('error')}")
+                    QMessageBox.critical(self, "取消置顶失败", f"错误: {result.get('error')}")
+                    
+            except Exception as e:
+                self.status_update.emit(f"取消置顶出错: {str(e)}")
+                QMessageBox.critical(self, "取消置顶出错", f"错误: {str(e)}")
     
     def move_item(self, file_data):
         """移动文件或文件夹"""
@@ -987,8 +1125,14 @@ class CloudDriveView(QWidget):
                 f"错误: {str(e)}"
             )
     
-    def navigate_to_folder(self, folder_id, folder_name):
-        """导航到指定文件夹"""
+    def navigate_to_folder(self, folder_id, folder_name, clear_stack=False):
+        """导航到指定文件夹
+        
+        Args:
+            folder_id: 文件夹ID
+            folder_name: 文件夹名称
+            clear_stack: 是否清空路径栈（用于直接跳转）
+        """
         if not self.cloud_info:
             return
         
@@ -1010,8 +1154,22 @@ class CloudDriveView(QWidget):
                 # 更新当前文件夹ID
                 self.current_folder_id = folder_id
                 
+                # 更新路径栈
+                if clear_stack:
+                    self.path_stack = [(folder_id, folder_name)]
+                else:
+                    # 检查是否已经在栈中（返回上级的情况）
+                    for i, (fid, fname) in enumerate(self.path_stack):
+                        if fid == folder_id:
+                            # 截断到该位置
+                            self.path_stack = self.path_stack[:i+1]
+                            break
+                    else:
+                        # 添加新路径
+                        self.path_stack.append((folder_id, folder_name))
+                
                 # 更新路径导航
-                self.update_path_navigation(folder_id, folder_name)
+                self.update_path_navigation()
                 
                 # 显示文件列表
                 self.display_file_list(result["list"])
@@ -1033,10 +1191,12 @@ class CloudDriveView(QWidget):
         if not self.cloud_info:
             return
         
+        # 清空路径栈
+        self.path_stack = []
         self.refresh_info()
     
-    def update_path_navigation(self, folder_id, folder_name):
-        """更新路径导航栏"""
+    def update_path_navigation(self):
+        """更新路径导航栏，显示完整路径"""
         # 清空当前路径（保留根目录按钮、stretch和右侧按钮）
         # 布局顺序：根目录按钮 | 路径元素... | stretch | 上传按钮 | 新建文件夹按钮
         
@@ -1048,30 +1208,60 @@ class CloudDriveView(QWidget):
                 stretch_index = i
                 break
         
-        # 如果找到 stretch，删除根目录按钮和 stretch 之间的所有元素
-        if stretch_index > 1:  # 位置0是根目录按钮，位置1+是路径元素
+        # 删除根目录按钮和 stretch 之间的所有元素
+        if stretch_index > 1:
             for i in range(stretch_index - 1, 0, -1):
                 item = self.path_layout.takeAt(i)
                 if item.widget():
                     item.widget().deleteLater()
         
-        # 在根目录按钮后添加分隔符
-        separator = QLabel(">")
-        separator.setStyleSheet("color: #888888; font-size: 13px;")
-        self.path_layout.insertWidget(1, separator)
+        # 根据路径栈重建路径导航
+        insert_pos = 1
         
-        # 添加当前文件夹
-        current_folder = QLabel(folder_name)
-        current_folder.setStyleSheet("""
-            QLabel {
-                color: #ffffff;
-                font-size: 13px;
-                padding: 5px 10px;
-                background-color: #2a2d2e;
-                border-radius: 4px;
-            }
-        """)
-        self.path_layout.insertWidget(2, current_folder)
+        for folder_id, folder_name in self.path_stack:
+            # 添加分隔符
+            separator = QLabel(">")
+            separator.setStyleSheet("color: #888888; font-size: 13px;")
+            self.path_layout.insertWidget(insert_pos, separator)
+            insert_pos += 1
+            
+            # 添加路径按钮
+            is_last = (folder_id == self.path_stack[-1][0])
+            
+            if is_last:
+                # 最后一个：显示为白色背景
+                path_label = QLabel(folder_name)
+                path_label.setStyleSheet("""
+                    QLabel {
+                        color: #ffffff;
+                        font-size: 13px;
+                        padding: 5px 10px;
+                        background-color: #2a2d2e;
+                        border-radius: 4px;
+                    }
+                """)
+            else:
+                # 可点击：显示为蓝色链接样式
+                path_label = QLabel(folder_name)
+                path_label.setStyleSheet("""
+                    QLabel {
+                        color: #007acc;
+                        font-size: 13px;
+                        padding: 5px 10px;
+                        background-color: #1e1e1e;
+                        border-radius: 4px;
+                    }
+                    QLabel:hover {
+                        background-color: #2a2d2e;
+                        text-decoration: underline;
+                    }
+                """)
+                path_label.setCursor(Qt.CursorShape.PointingHandCursor)
+                # 绑定点击事件
+                path_label.mousePressEvent = lambda e, fid=folder_id, fname=folder_name: self.navigate_to_folder(fid, fname)
+            
+            self.path_layout.insertWidget(insert_pos, path_label)
+            insert_pos += 1
     
     def on_show(self):
         """视图显示时调用"""
