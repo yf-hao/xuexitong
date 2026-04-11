@@ -2,7 +2,7 @@ import os
 import sys
 
 # Constants and default configurations for the application
-APP_TITLE = "学习通教学资源管理系统V0.5.0"
+APP_TITLE = "学习通教学资源管理系统V0.5.1"
 
 # Default Institution ID (郑州西亚斯学院)
 DEFAULT_FID = "4311"
