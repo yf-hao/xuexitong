@@ -11,6 +11,7 @@ from core.apis.question_bank_api import QuestionBankAPI
 from core.apis.material_api import MaterialAPI
 from core.apis.activity_api import ActivityAPI
 from core.apis.homework_api import HomeworkAPI
+from core.apis.cloud_drive_api import CloudDriveAPI
 
 
 class XuexitongCrawler(
@@ -26,6 +27,7 @@ class XuexitongCrawler(
     MaterialAPI,
     ActivityAPI,
     HomeworkAPI,
+    CloudDriveAPI,
 ):
     """聚合各业务域 API 的门面类，仅保留会话与聚合职责。"""
 

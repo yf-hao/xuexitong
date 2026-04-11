@@ -1430,6 +1430,37 @@ class QuestionBankAPI:
                     
                     print(f"DEBUG: 读取图片成功，大小={len(img_bytes)} bytes")
                     
+                    # 如果有缩放比例，实际缩放图片
+                    if scale_percent is not None and scale_percent < 100:
+                        from PIL import Image
+                        import io
+                        
+                        # 打开图片
+                        img = Image.open(io.BytesIO(img_bytes))
+                        
+                        # 计算新尺寸
+                        original_w, original_h = img.size
+                        scale_factor = scale_percent / 100.0
+                        new_w = int(original_w * scale_factor)
+                        new_h = int(original_h * scale_factor)
+                        
+                        print(f"DEBUG: 原始尺寸: {original_w}x{original_h}, 缩放比例: {scale_percent}%, 新尺寸: {new_w}x{new_h}")
+                        
+                        # 缩放图片（使用高质量重采样）
+                        img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                        
+                        # 转换为字节
+                        buf = io.BytesIO()
+                        # 保存时保持原格式
+                        img_format = img.format if img.format else 'PNG'
+                        if img_format == 'JPEG':
+                            img_resized.save(buf, format='JPEG', quality=95)
+                        else:
+                            img_resized.save(buf, format=img_format)
+                        
+                        img_bytes = buf.getvalue()
+                        print(f"DEBUG: 缩放后图片大小={len(img_bytes)} bytes")
+                    
                     # 上传图片
                     upload_url = self.upload_image_bytes(img_bytes, os.path.basename(full_path))
                     
@@ -1438,9 +1469,9 @@ class QuestionBankAPI:
                         # 替换为超星URL
                         placeholder = f"__LOCAL_IMG_{len(replacements)}__"
                         
-                        # 应用缩放比例或像素高度
+                        # 图片已实际缩放，显示为100%宽度
                         if scale_percent is not None:
-                            img_html = f'<img src="{upload_url}" alt="{alt_text_clean}" style="width:{scale_percent}%; height:auto;" />'
+                            img_html = f'<img src="{upload_url}" alt="{alt_text_clean}" style="width:100%; height:auto;" />'
                         elif target_height_px is not None:
                             img_html = f'<img src="{upload_url}" alt="{alt_text_clean}" style="height:{target_height_px}px; width:auto; max-width:100%;" />'
                         else:
@@ -1502,8 +1533,8 @@ class QuestionBankAPI:
                 return ""
 
             # 预处理：检测并转换 Markdown 代码块
-            # 匹配 ```lang\ncode\n``` 格式
-            code_block_pattern = re3.compile(r'```(\w*)\n(.*?)\n```', re3.DOTALL)
+            # 匹配 ```lang\ncode``` 或 ```lang\ncode\n``` 格式（更灵活）
+            code_block_pattern = re3.compile(r'```(\w*)\n(.*?)\n?```', re3.DOTALL)
 
             # 使用占位符保护代码块
             code_blocks = {}
@@ -1539,20 +1570,200 @@ class QuestionBankAPI:
             # 替换代码块为占位符
             text_with_placeholders = code_block_pattern.sub(replace_code_block, str(text))
 
-            # 处理普通文本行
+            # 处理普通文本行（包含表格处理）
             lines = text_with_placeholders.splitlines() or [""]
             html_lines = []
-            for line in lines:
-                # 先转义 HTML
-                escaped = html.escape(line)
-                # 转换 Markdown 粗体 **text** -> <strong>text</strong>
-                escaped = re3.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', escaped)
-                # 转换着重号 `text` -> <span style="text-emphasis: dot;">text</span>
-                escaped = re3.sub(r'`([^`]+)`', r'<span style="text-emphasis: dot;">\1</span>', escaped)
-                escaped = escaped.replace("\t", "&nbsp;&nbsp;&nbsp;&nbsp;")
-                if escaped == "":
-                    escaped = "&nbsp;"  # 空行占位
-                html_lines.append(f"<p>{escaped}</p>")
+
+            def hex_to_rgb(hex_color):
+                """十六进制颜色转 RGB"""
+                hex_color = hex_color.lstrip('#')
+                if len(hex_color) == 3:
+                    hex_color = ''.join([c*2 for c in hex_color])
+                if len(hex_color) == 6:
+                    r = int(hex_color[0:2], 16)
+                    g = int(hex_color[2:4], 16)
+                    b = int(hex_color[4:6], 16)
+                    return f"rgb({r}, {g}, {b})"
+                return hex_color
+
+            def replace_color_tag(match):
+                color = match.group(1)
+                text = match.group(2)
+                rgb_color = hex_to_rgb(color)
+                # 处理内部的粗体和着重号标记
+                text = re3.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+                text = re3.sub(r'`([^`]+)`', r'<span style="text-emphasis: dot;">\1</span>', text)
+                return f'<span style="color: {rgb_color};">{text}</span>'
+
+            def parse_table_row(line):
+                """解析表格行，返回单元格列表"""
+                # 去除首尾的 | 和空白
+                stripped = line.strip()
+                if stripped.startswith('|'):
+                    stripped = stripped[1:]
+                if stripped.endswith('|'):
+                    stripped = stripped[:-1]
+                # 分割单元格
+                cells = [cell.strip() for cell in stripped.split('|')]
+                return cells
+
+            def is_table_line(line):
+                """检测是否是表格行"""
+                stripped = line.strip()
+                return stripped.startswith('|') and stripped.endswith('|') and '|' in stripped[1:-1]
+
+            def is_separator_line(line):
+                """检测是否是表格分隔符行"""
+                stripped = line.strip()
+                if not is_table_line(line):
+                    return False
+                cells = parse_table_row(line)
+                return all(cell.replace('-', '').replace(':', '') == '' for cell in cells)
+
+            def table_to_html(table_lines):
+                """将 Markdown 表格转换为 HTML"""
+                if not table_lines:
+                    return ""
+                
+                # 解析所有行
+                rows = [parse_table_row(line) for line in table_lines]
+                
+                # 过滤掉分隔符行
+                data_rows = []
+                for i, row in enumerate(rows):
+                    if i == 1 and is_separator_line(table_lines[i]):
+                        continue  # 跳过第2行（分隔符行）
+                    data_rows.append(row)
+                
+                if not data_rows:
+                    return ""
+                
+                # 构建 HTML（不设置固定宽度，让表格自适应内容）
+                trs_html = ''
+                for row in data_rows:
+                    trs_html += '<tr>'
+                    for i, cell in enumerate(row):
+                        # 转义 HTML
+                        cell_escaped = html.escape(cell)
+                        # 转换粗体
+                        cell_escaped = re3.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', cell_escaped)
+                        # 转换着重号
+                        cell_escaped = re3.sub(r'`([^`]+)`', r'<span style="text-emphasis: dot;">\1</span>', cell_escaped)
+                        # 转换颜色标记
+                        cell_escaped = re3.sub(r'\{color:([^}]+)\}(.+?)\{/color\}', replace_color_tag, cell_escaped)
+                        
+                        # 第一列添加 valign 和 word-break
+                        if i == 0:
+                            trs_html += f'<td valign="top" style="word-break: break-all; padding: 8px;">{cell_escaped}</td>'
+                        else:
+                            trs_html += f'<td style="padding: 8px;">{cell_escaped}</td>'
+                    trs_html += '</tr>'
+                
+                return f'<table class="editor-table" style="border-collapse: collapse; width: auto;"><tbody>{trs_html}</tbody></table>'
+
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                
+                # 检测表格开始
+                if is_table_line(line) and i + 1 < len(lines) and is_separator_line(lines[i + 1]):
+                    # 收集表格行
+                    table_lines = [line]
+                    i += 1
+                    # 跳过分隔符行
+                    table_lines.append(lines[i])
+                    i += 1
+                    # 收集数据行
+                    while i < len(lines) and is_table_line(lines[i]):
+                        if not is_separator_line(lines[i]):
+                            table_lines.append(lines[i])
+                        i += 1
+                    
+                    # 转换表格为 HTML
+                    table_html = table_to_html(table_lines)
+                    html_lines.append(table_html)
+                else:
+                    # 普通文本处理
+                    # 先转义 HTML
+                    escaped = html.escape(line)
+                    
+                    # 转换标题 == text == 或 == text -> <h2>text</h2>，支持 h1-h5（1-5个等号）
+                    # 先尝试匹配闭合格式
+                    header_match = re3.match(r'^(={1,5})\s+(.+?)\s+\1$', escaped)
+                    if not header_match:
+                        # 再尝试匹配不闭合格式
+                        header_match = re3.match(r'^(={1,5})\s+(.+)$', escaped)
+                    
+                    if header_match:
+                        level = len(header_match.group(1))
+                        header_text = header_match.group(2).strip()
+                        # 如果是闭合格式，去掉尾部等号（已被 strip 处理）
+                        # 转换粗体、着重号、颜色标记
+                        header_text = re3.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', header_text)
+                        header_text = re3.sub(r'`([^`]+)`', r'<span style="text-emphasis: dot;">\1</span>', header_text)
+                        header_text = re3.sub(r'\{color:([^}]+)\}(.+?)\{/color\}', replace_color_tag, header_text)
+                        html_lines.append(f"<h{level}>{header_text}</h{level}>")
+                        i += 1
+                        continue
+                    
+                    # 检测颜色标记包裹的标题 {color:#xxx}= text{/color}
+                    colored_header_match = re3.match(r'^\{color:([^}]+)\}(={1,5})\s+(.+?)\s+\2\{/color\}$', escaped)
+                    if not colored_header_match:
+                        colored_header_match = re3.match(r'^\{color:([^}]+)\}(={1,5})\s+(.+)\{/color\}$', escaped)
+                    
+                    if colored_header_match:
+                        color = colored_header_match.group(1)
+                        level = len(colored_header_match.group(2))
+                        header_text = colored_header_match.group(3).strip()
+                        rgb_color = hex_to_rgb(color)
+                        # 转换粗体、着重号
+                        header_text = re3.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', header_text)
+                        header_text = re3.sub(r'`([^`]+)`', r'<span style="text-emphasis: dot;">\1</span>', header_text)
+                        html_lines.append(f'<h{level}><span style="color: {rgb_color};">{header_text}</span></h{level}>')
+                        i += 1
+                        continue
+                    
+                    # 检测粗体包裹的标题 **= text**
+                    bold_header_match = re3.match(r'^\*\*(={1,5})\s+(.+?)\s+\1\*\*$', escaped)
+                    if not bold_header_match:
+                        bold_header_match = re3.match(r'^\*\*(={1,5})\s+(.+)\*\*$', escaped)
+                    
+                    if bold_header_match:
+                        level = len(bold_header_match.group(1))
+                        header_text = bold_header_match.group(2).strip()
+                        # 转换颜色标记、着重号
+                        header_text = re3.sub(r'`([^`]+)`', r'<span style="text-emphasis: dot;">\1</span>', header_text)
+                        header_text = re3.sub(r'\{color:([^}]+)\}(.+?)\{/color\}', replace_color_tag, header_text)
+                        html_lines.append(f'<h{level}><strong>{header_text}</strong></h{level}>')
+                        i += 1
+                        continue
+                    
+                    # 检测着重号包裹的标题 `= text`
+                    emphasis_header_match = re3.match(r'^`(={1,5})\s+(.+?)\s+\1`$', escaped)
+                    if not emphasis_header_match:
+                        emphasis_header_match = re3.match(r'^`(={1,5})\s+(.+)`$', escaped)
+                    
+                    if emphasis_header_match:
+                        level = len(emphasis_header_match.group(1))
+                        header_text = emphasis_header_match.group(2).strip()
+                        # 转换颜色标记、粗体
+                        header_text = re3.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', header_text)
+                        header_text = re3.sub(r'\{color:([^}]+)\}(.+?)\{/color\}', replace_color_tag, header_text)
+                        html_lines.append(f'<h{level}><span style="text-emphasis: dot;">{header_text}</span></h{level}>')
+                        i += 1
+                        continue
+                    
+                    # 转换 Markdown 粗体 **text** -> <strong>text</strong>
+                    escaped = re3.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', escaped)
+                    # 转换着重号 `text` -> <span style="text-emphasis: dot;">text</span>
+                    escaped = re3.sub(r'`([^`]+)`', r'<span style="text-emphasis: dot;">\1</span>', escaped)
+                    # 转换颜色标记 {color:#xxx}text{/color} -> <span style="color: rgb(...);">text</span>
+                    escaped = re3.sub(r'\{color:([^}]+)\}(.+?)\{/color\}', replace_color_tag, escaped)
+                    escaped = escaped.replace("\t", "&nbsp;&nbsp;&nbsp;&nbsp;")
+                    if escaped == "":
+                        escaped = "&nbsp;"  # 空行占位
+                    html_lines.append(f"<p>{escaped}</p>")
+                    i += 1
             html_str = "".join(html_lines)
 
             # 恢复代码块

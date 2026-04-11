@@ -14,6 +14,7 @@ from ui.views.question_bank_view import QuestionBankView
 from ui.views.learning_view import LearningView
 from ui.views.study_status_view import StudyStatusView
 from ui.views.homework_create_view import HomeworkCreateView
+from ui.views.cloud_drive_view import CloudDriveView
 
 class MainWindow(QMainWindow):
     def __init__(self, crawler):
@@ -158,6 +159,11 @@ class MainWindow(QMainWindow):
         self.homework_create_view = HomeworkCreateView(self.crawler, parent=self)
         self.homework_create_view.status_update.connect(self._update_status)
         self.stacked_widget.addWidget(self.homework_create_view)
+
+        # Page 8: Cloud Drive View
+        self.cloud_drive_view = CloudDriveView(self.crawler, parent=self)
+        self.cloud_drive_view.status_update.connect(self._update_status)
+        self.stacked_widget.addWidget(self.cloud_drive_view)
 
         content_layout.addWidget(self.stacked_widget)
         splitter.addWidget(content_container)
@@ -333,8 +339,8 @@ class MainWindow(QMainWindow):
                 continue
             filtered_links.append(link)
         
-        # 定义菜单顺序：班级活动、题库、作业、学情、统计、管理
-        menu_order = ["活动", "题库", "作业", "学情", "统计", "管理"]
+        # 定义菜单顺序：班级活动、题库、作业、学情、统计、云盘、管理
+        menu_order = ["活动", "题库", "作业", "学情", "统计", "云盘", "管理"]
         
         for keyword in menu_order:
             if keyword == "题库":
@@ -346,6 +352,11 @@ class MainWindow(QMainWindow):
                 # 添加学情菜单项
                 item = QListWidgetItem("学情")
                 item.setData(Qt.ItemDataRole.UserRole, "learning")
+                self.nav_list.addItem(item)
+            elif keyword == "云盘":
+                # 添加云盘菜单项
+                item = QListWidgetItem("云盘")
+                item.setData(Qt.ItemDataRole.UserRole, "cloud_drive")
                 self.nav_list.addItem(item)
             else:
                 # 从 filtered_links 中查找匹配的项目
@@ -402,6 +413,11 @@ class MainWindow(QMainWindow):
             self.download_btn.hide()
             self.status_label.setText(f"已进入: {title}")
             self.homework_create_view.on_show()
+        elif "云盘" in title:
+            self.stacked_widget.setCurrentIndex(8)
+            self.download_btn.hide()
+            self.status_label.setText(f"已进入: {title}")
+            self.cloud_drive_view.on_show()
         else:
             self.stacked_widget.setCurrentIndex(0)
             self.material_tree.clear()
