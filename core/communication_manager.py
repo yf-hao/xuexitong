@@ -5,16 +5,20 @@ from pathlib import Path
 from typing import Dict
 
 
+from .config import DATA_DIR
+
 class CommunicationManager:
     """管理学生沟通状态的持久化存储。"""
     
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = None):
         """
         初始化沟通管理器。
         
         Args:
-            data_dir: 数据存储目录
+            data_dir: 数据存储目录（默认为配置中的 DATA_DIR）
         """
+        if data_dir is None:
+            data_dir = DATA_DIR
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
         self.data_file = self.data_dir / "communication_status.json"

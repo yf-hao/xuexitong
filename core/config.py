@@ -2,7 +2,7 @@ import os
 import sys
 
 # Constants and default configurations for the application
-APP_TITLE = "学习通教学资源管理系统V0.5.1"
+APP_TITLE = "学习通教学资源管理系统V0.5.2"
 
 # Default Institution ID (郑州西亚斯学院)
 DEFAULT_FID = "4311"
@@ -18,8 +18,21 @@ def get_base_dir():
         # core/config.py -> core/ -> project_root/
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+def get_user_data_dir():
+    """获取用户数据存储目录，确保在不同操作系统下都有写入权限。"""
+    if sys.platform == "darwin":
+        path = os.path.expanduser("~/Library/Application Support/XuexitongManager")
+    elif sys.platform == "win32":
+        path = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "XuexitongManager")
+    else:
+        path = os.path.expanduser("~/.xuexitongmanager")
+    
+    # 确保目录存在
+    os.makedirs(path, exist_ok=True)
+    return path
+
 BASE_DIR = get_base_dir()
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = get_user_data_dir()
 
 # Sign-in Data Storage
 SIGNIN_DATA_FILE = os.path.join(DATA_DIR, "signin_plans.json")

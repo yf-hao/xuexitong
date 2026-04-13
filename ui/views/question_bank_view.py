@@ -1264,7 +1264,8 @@ class QuestionDetailDialog(QDialog):
     """题目详情对话框 - 使用 QWebEngineView + 内置 KaTeX 渲染"""
     
     # KaTeX 资源路径
-    _KATEX_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "assets", "katex")
+    from core.config import BASE_DIR
+    _KATEX_DIR = os.path.join(BASE_DIR, "assets", "katex")
     
     def __init__(self, question_data: dict, parent=None):
         super().__init__(parent)
