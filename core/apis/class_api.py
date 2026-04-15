@@ -1,4 +1,5 @@
 import json
+import re
 from typing import List
 from bs4 import BeautifulSoup
 from core.config import DEFAULT_FID
@@ -125,6 +126,173 @@ class ClassAPI:
         except Exception as e:
             print(f"Error fetching clazz manage list: {e}")
             return []
+
+    def get_clazz_student_html(
+        self,
+        course_id: str = None,
+        clazz_id: str = None,
+        require_stu: str = "",
+        page_num: int = 1,
+        page_show_num: int = 30,
+        order_content: str = "ID",
+        order: str = "up",
+        v: str = "0",
+    ) -> str:
+        """获取班级学生列表原始 HTML，后续用于解析班级信息。"""
+        params = self.session_manager.course_params
+        course_id = course_id or params.get("courseid", "")
+        clazz_id = clazz_id or params.get("clazzid", "")
+        cpi = params.get("cpi", "")
+        enc = params.get("enc", "")
+        openc = params.get("openc", "")
+        t = params.get("t", "")
+
+        if not course_id or not clazz_id:
+            print("DEBUG get_clazz_student_html: 缺少 course_id 或 clazz_id")
+            return ""
+
+        url = "https://mooc2-gray.chaoxing.com/mooc2-ans/tcm/clazz-student"
+        req_params = {
+            "courseid": course_id,
+            "clazzid": clazz_id,
+            "requireStu": require_stu,
+            "cpi": cpi,
+            "pageNum": str(page_num),
+            "pageShowNum": str(page_show_num),
+            "orderContent": order_content,
+            "v": v,
+            "order": order,
+        }
+        headers = {
+            "Accept": "text/html, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Connection": "keep-alive",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": (
+                "https://mooc2-gray.chaoxing.com/mooc2-ans/tcm/course-manage"
+                f"?courseid={course_id}&clazzid={clazz_id}&courseId={course_id}"
+                f"&classId={clazz_id}&clazzId={clazz_id}&cpi={cpi}"
+                f"&enc={enc}&openc={openc}&t={t}&ut=t&loadContentType=0"
+            ),
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+        }
+
+        try:
+            print(
+                "DEBUG get_clazz_student_html req "
+                f"courseid={course_id}, clazzid={clazz_id}, cpi={cpi}, "
+                f"pageNum={page_num}, pageShowNum={page_show_num}"
+            )
+            resp = self.session.get(url, params=req_params, headers=headers, timeout=15)
+            print(f"DEBUG get_clazz_student_html status={resp.status_code}, url={resp.url}")
+            resp.raise_for_status()
+            html = resp.text
+            print(f"DEBUG get_clazz_student_html html_len={len(html)}")
+            return html
+        except Exception as e:
+            print(f"Error fetching clazz student html: {e}")
+            return ""
+
+    def parse_clazz_student_page(self, html: str) -> dict:
+        """解析班级学生列表单页 HTML。"""
+        result = {
+            "total": 0,
+            "page_num": 1,
+            "students": [],
+        }
+        if not html:
+            return result
+
+        soup = BeautifulSoup(html, "lxml")
+
+        total_text = soup.get_text(" ", strip=True)
+        total_match = re.search(r"共\s*(\d+)\s*人", total_text)
+        if total_match:
+            result["total"] = int(total_match.group(1))
+
+        page_num_tag = soup.find("input", id="pageNum")
+        if page_num_tag and page_num_tag.get("value", "").isdigit():
+            result["page_num"] = int(page_num_tag["value"])
+
+        table = soup.find("table", id="studentTable")
+        if not table:
+            return result
+
+        tbody = table.find("tbody")
+        if not tbody:
+            return result
+
+        for row in tbody.find_all("tr", recursive=False):
+            cols = row.find_all("td", recursive=False)
+            if len(cols) < 7:
+                continue
+
+            person_id = cols[1].get_text(strip=True)
+            name = cols[2].get_text(" ", strip=True)
+            student_number = cols[3].get_text(" ", strip=True)
+            department = cols[4].get_text(" ", strip=True)
+            major = cols[5].get_text(" ", strip=True)
+            class_name = cols[6].get_text(" ", strip=True)
+
+            if not person_id:
+                continue
+
+            result["students"].append({
+                "person_id": person_id,
+                "name": name,
+                "student_number": student_number,
+                "department": department,
+                "major": major,
+                "class_name": class_name,
+            })
+
+        return result
+
+    def get_clazz_student_map(
+        self,
+        course_id: str = None,
+        clazz_id: str = None,
+        page_show_num: int = 30,
+    ) -> dict:
+        """获取班级学生映射，返回 person_id -> 学生信息。"""
+        student_map = {}
+        page_num = 1
+
+        while True:
+            html = self.get_clazz_student_html(
+                course_id=course_id,
+                clazz_id=clazz_id,
+                page_num=page_num,
+                page_show_num=page_show_num,
+            )
+            parsed = self.parse_clazz_student_page(html)
+            students = parsed.get("students", [])
+            total = parsed.get("total", 0)
+
+            for student in students:
+                student_map[student["person_id"]] = student
+
+            if not students:
+                break
+
+            if total and len(student_map) >= total:
+                break
+
+            if len(students) < page_show_num:
+                break
+
+            page_num += 1
+
+        print(f"DEBUG get_clazz_student_map size={len(student_map)}")
+        return student_map
 
     def rename_clazz(self, clazz_id: str, new_name: str) -> tuple[bool, str]:
         params = self.session_manager.course_params

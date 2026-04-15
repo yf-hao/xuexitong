@@ -330,7 +330,7 @@ class MainWindow(QMainWindow):
             return
 
         nav_links = details.get("nav_links", [])
-        skip_keywords = ["AI工作台", "任务引擎", "课件","教案","章节","资料","通知","讨论","考试","课程图谱","AI知识库","直播课/见面课"]
+        skip_keywords = ["AI工作台", "任务引擎", "课件","教案","章节","考试","资料","通知","讨论","课程图谱","AI知识库","直播课/见面课"]
         
         # 过滤掉不需要的项目
         filtered_links = []
@@ -340,7 +340,7 @@ class MainWindow(QMainWindow):
             filtered_links.append(link)
         
         # 定义菜单顺序：班级活动、题库、作业、学情、统计、云盘、管理
-        menu_order = ["活动", "题库", "作业", "学情", "统计", "云盘", "管理"]
+        menu_order = ["活动", "题库", "作业","学情", "统计", "云盘", "管理"]
         
         for keyword in menu_order:
             if keyword == "题库":

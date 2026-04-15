@@ -8,15 +8,20 @@ APP_TITLE = "学习通教学资源管理系统V0.5.2"
 DEFAULT_FID = "4311"
 
 def get_base_dir():
-    """Get the base directory for the application.  """
+    """获取应用资源根目录，兼容源码运行和 PyInstaller 打包运行。"""
     if getattr(sys, 'frozen', False):
-        # If the application is run as a bundle (PyInstaller)
-        # sys.executable points to the executable file
+        # PyInstaller 会把打包资源解压/映射到 sys._MEIPASS
+        # macOS .app 的 datas 也位于 Resources，而不是 sys.executable 所在目录
+        meipass_dir = getattr(sys, '_MEIPASS', None)
+        if meipass_dir:
+            return meipass_dir
+
+        # 兜底：若某些环境下 _MEIPASS 不可用，则回退到可执行文件目录
         return os.path.dirname(sys.executable)
-    else:
-        # Normal python environment
-        # core/config.py -> core/ -> project_root/
-        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # Normal python environment
+    # core/config.py -> core/ -> project_root/
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def get_user_data_dir():
     """获取用户数据存储目录，确保在不同操作系统下都有写入权限。"""

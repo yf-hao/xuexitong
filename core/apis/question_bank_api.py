@@ -530,6 +530,77 @@ class QuestionBankAPI:
             print(f"删除文件夹失败: {e}")
             return False
 
+    def delete_questions(self, question_ids: list[str], dir_ids: str = "", course_id: str = None) -> tuple[bool, str]:
+        """
+        批量删除题库题目（移入回收站）
+
+        Args:
+            question_ids: 题目 ID 列表
+            dir_ids: 所属目录 ID，根目录可传空字符串
+            course_id: 课程 ID
+
+        Returns:
+            (success, msg)
+        """
+        params = self.session_manager.course_params
+
+        if not question_ids:
+            return False, "未选择题目"
+
+        if not course_id:
+            course_id = params.get("courseid", "")
+
+        clazz_id = params.get("clazzid", "")
+        cpi = params.get("cpi", "")
+
+        url = "https://mooc2-gray.chaoxing.com/mooc2-ans/qbank/batch-updatestatus"
+
+        headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": (
+                "https://mooc2-gray.chaoxing.com/mooc2-ans/qbank/questionlist"
+                f"?courseid={course_id}&clazzid={clazz_id}&courseId={course_id}"
+                f"&classId={clazz_id}&clazzId={clazz_id}&cpi={cpi}&ut=t"
+            ),
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+            "Origin": "https://mooc2-gray.chaoxing.com",
+        }
+
+        data = {
+            "courseid": course_id,
+            "cpi": cpi,
+            "questionIds": ",".join(question_ids),
+            "dirIds": dir_ids or "",
+            "status": "2",
+        }
+
+        try:
+            resp = self.session.post(url, data=data, headers=headers, timeout=15)
+            resp.raise_for_status()
+
+            try:
+                result = resp.json()
+            except Exception:
+                result = {"raw": resp.text}
+
+            print(f"DEBUG delete_questions: {result}")
+
+            if isinstance(result, dict):
+                status = result.get("status")
+                if status is True or status == "true":
+                    return True, result.get("msg", "删除成功")
+
+                msg = result.get("msg") or result.get("message") or resp.text or "删除失败"
+                return False, msg
+
+            return True, "删除成功"
+        except Exception as e:
+            print(f"批量删除题目失败: {e}")
+            return False, str(e)
+
     def create_question_folder(self, name: str, parent_id: str = "0", course_id: str = None) -> dict:
         """
         创建题库文件夹

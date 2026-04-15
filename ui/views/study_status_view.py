@@ -1,13 +1,18 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
-    QPushButton, QLabel, QFrame, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QLabel, QFrame, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
+    QFileDialog, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE
-from ui.workers import AttendanceWorker, AttendanceDetailWorker, AbsenceStatsWorker, HomeworkWorker
+from ui.workers import (
+    AttendanceWorker, AttendanceDetailWorker, AbsenceStatsWorker, HomeworkWorker,
+    HomeworkStatsExportWorker,
+)
 from models.activity import Activity
 from core.communication_manager import CommunicationManager
+from core.exporters.homework_stats_exporter import build_homework_stats_filename
 
 
 class StudyStatusView(QWidget):
@@ -21,9 +26,13 @@ class StudyStatusView(QWidget):
         self.workers = []
         self.last_sub = None
         self.current_attendance_data = None  # 保存当前考勤数据
+        self.current_homework_data = None    # 保存当前作业统计数据
         self.current_course_id = None        # 当前课程 ID
         self.current_class_id = None         # 当前班级 ID
+        self.current_class_name = ""         # 当前授课班级名
         self.communication_manager = CommunicationManager()  # 沟通状态管理器
+        self.homework_export_worker = None
+        self.btn_homework_export = None
         
         self.setup_ui()
         
@@ -109,6 +118,7 @@ class StudyStatusView(QWidget):
             if course and class_id:
                 self.current_course_id = str(course.id)
                 self.current_class_id = str(class_id)
+                self.current_class_name = main_window.clazz_box.currentText().strip()
         
         # 调用 API 获取考勤数据
         self.attendance_worker = AttendanceWorker(self.crawler)
@@ -294,7 +304,12 @@ class StudyStatusView(QWidget):
         self.status_update.emit("正在统计缺勤情况，请稍候...")
         
         # 异步统计缺勤数据
-        self.absence_worker = AbsenceStatsWorker(self.crawler, self.current_attendance_data)
+        self.absence_worker = AbsenceStatsWorker(
+            self.crawler,
+            self.current_attendance_data,
+            self.current_course_id,
+            self.current_class_id,
+        )
         self.absence_worker.stats_ready.connect(self._show_absence_stats)
         self.absence_worker.start()
     
@@ -321,6 +336,7 @@ class StudyStatusView(QWidget):
             len(self.current_attendance_data),
             self.current_course_id,
             self.current_class_id,
+            self.current_class_name,
             self
         )
         dialog.exec()
@@ -354,6 +370,7 @@ class StudyStatusView(QWidget):
         # 保存当前课程和班级 ID
         self.current_course_id = str(course.id)
         self.current_class_id = str(class_id)
+        self.current_class_name = main_window.clazz_box.currentText().strip()
         
         # 异步获取作业数据
         self.homework_worker = HomeworkWorker(self.crawler, self.current_course_id, self.current_class_id)
@@ -382,6 +399,7 @@ class StudyStatusView(QWidget):
             return
         
         # 创建表格显示学生作业统计数据
+        self.current_homework_data = result
         self.homework_table = QTableWidget()
         self.homework_table.setColumnCount(10)
         self.homework_table.setHorizontalHeaderLabels(["学号", "姓名", "作业数", "已提交", "待批", "未提交", "平均分", "最低分", "最高分", "沟通情况"])
@@ -493,6 +511,27 @@ class StudyStatusView(QWidget):
         self.homework_table.sortItems(5, Qt.SortOrder.DescendingOrder)
         
         self.content_layout.addWidget(self.homework_table)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btn_homework_export = QPushButton("导出")
+        self.btn_homework_export.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_homework_export.setStyleSheet("""
+            QPushButton {
+                background-color: #007acc;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 20px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #005c99;
+            }
+        """)
+        self.btn_homework_export.clicked.connect(self._on_homework_export_clicked)
+        btn_layout.addWidget(self.btn_homework_export)
+        self.content_layout.addLayout(btn_layout)
         self.status_update.emit(f"学生作业统计加载完成，共 {len(result)} 名学生")
     
     def _on_homework_cell_clicked(self, row: int, column: int):
@@ -538,6 +577,50 @@ class StudyStatusView(QWidget):
         
         # 其他键盘事件交给父类处理
         super().keyPressEvent(event)
+
+    def _on_homework_export_clicked(self):
+        """导出作业情况 Excel。"""
+        if not self.current_homework_data:
+            QMessageBox.warning(self, "无数据", "当前没有可导出的作业统计数据")
+            return
+
+        default_name = build_homework_stats_filename(self.current_class_name)
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出作业情况",
+            default_name,
+            "Excel Files (*.xlsx);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".xlsx"):
+            file_path = f"{file_path}.xlsx"
+
+        self.btn_homework_export.setEnabled(False)
+        self.btn_homework_export.setText("导出中...")
+        self.status_update.emit("正在导出作业情况，请稍候...")
+        self.homework_export_worker = HomeworkStatsExportWorker(
+            stats_list=self.current_homework_data,
+            save_path=file_path,
+            course_id=self.current_course_id or "",
+            class_id=self.current_class_id or "",
+        )
+        self.homework_export_worker.export_finished.connect(self._on_homework_export_finished)
+        self.homework_export_worker.start()
+
+    def _on_homework_export_finished(self, success: bool, message: str):
+        """处理作业情况导出完成。"""
+        if self.btn_homework_export:
+            self.btn_homework_export.setEnabled(True)
+            self.btn_homework_export.setText("导出")
+        if success:
+            self.status_update.emit("作业情况导出完成")
+            QMessageBox.information(self, "导出完成", f"作业情况已导出到：\n{message}")
+        else:
+            self.status_update.emit("作业情况导出失败")
+            QMessageBox.warning(self, "导出失败", message)
+        self.homework_export_worker = None
 
     def on_quiz_clicked(self):
         """测验情况"""

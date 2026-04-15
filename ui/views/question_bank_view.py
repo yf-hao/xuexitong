@@ -7,10 +7,24 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLabel, QFrame, QFileDialog, QMenu, QDialog,
-    QLineEdit, QDialogButtonBox, QMessageBox, QSplitter, QInputDialog
+    QLineEdit, QDialogButtonBox, QMessageBox, QSplitter, QInputDialog,
+    QApplication, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QEvent
+from PyQt6.QtGui import QIcon, QAction, QKeySequence, QShortcut
+from PyQt6.QtWebEngineCore import QWebEnginePage
+
+
+class QuestionDetailPage(QWebEnginePage):
+    """题目详情页：接收网页内部发出的关闭请求。"""
+
+    close_requested = pyqtSignal()
+
+    def javaScriptConsoleMessage(self, level, message, line_number, source_id):
+        if message == "__QUESTION_DETAIL_CLOSE__":
+            self.close_requested.emit()
+            return
+        super().javaScriptConsoleMessage(level, message, line_number, source_id)
 
 
 # 示例文件夹数据
@@ -291,11 +305,16 @@ class QuestionBankView(QWidget):
 
         # 题目列表占位区域（未来用于展示题目）
         self.question_list = QTreeWidget()
-        self.question_list.setHeaderLabels(["题号", "题目内容", "类型", "难度"])
-        self.question_list.setColumnWidth(0, 60)
-        self.question_list.setColumnWidth(1, 400)
-        self.question_list.setColumnWidth(2, 80)
+        self.question_list.setHeaderLabels(["", "题号", "题目内容", "类型", "难度"])
+        self.question_list.setRootIsDecorated(False)
+        self.question_list.setIndentation(0)
+        self.question_list.setAllColumnsShowFocus(True)
+        self.question_list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.question_list.setColumnWidth(0, 36)
+        self.question_list.setColumnWidth(1, 60)
+        self.question_list.setColumnWidth(2, 400)
         self.question_list.setColumnWidth(3, 80)
+        self.question_list.setColumnWidth(4, 80)
         self.question_list.setStyleSheet("""
             QTreeWidget {
                 background-color: #252526;
@@ -303,14 +322,23 @@ class QuestionBankView(QWidget):
                 border: 1px solid #3e3e42;
                 border-radius: 4px;
                 font-size: 13px;
+                outline: none;
+                show-decoration-selected: 1;
             }
             QTreeWidget::item {
                 padding: 8px;
                 border-bottom: 1px solid #3e3e42;
             }
-            QTreeWidget::item:selected {
-                background-color: #094771;
+            QTreeWidget::item:selected,
+            QTreeWidget::item:selected:active,
+            QTreeWidget::item:selected:!active {
+                background-color: #0f5d8c;
                 color: #ffffff;
+                border: none;
+            }
+            QTreeWidget::branch {
+                background: transparent;
+                border: none;
             }
             QTreeWidget::item:hover {
                 background-color: #2a2d2e;
@@ -324,8 +352,9 @@ class QuestionBankView(QWidget):
                 font-weight: bold;
             }
         """)
-        # 连接点击事件
-        self.question_list.itemClicked.connect(self._on_question_clicked)
+        # 双击打开题目详情，单击仅选中
+        self.question_list.itemDoubleClicked.connect(self._on_question_activated)
+        self._bind_question_open_shortcuts()
         layout.addWidget(self.question_list)
 
         # 提示标签
@@ -344,11 +373,11 @@ class QuestionBankView(QWidget):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        self.btn_refresh = QPushButton("🔄 刷新")
-        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_refresh.setStyleSheet("""
+        self.btn_delete = QPushButton("🗑️ 删除")
+        self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_delete.setStyleSheet("""
             QPushButton {
-                background-color: #3e3e42;
+                background-color: #6b2d2d;
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
@@ -356,20 +385,71 @@ class QuestionBankView(QWidget):
                 font-size: 13px;
             }
             QPushButton:hover {
-                background-color: #4e4e52;
+                background-color: #7e3838;
             }
         """)
-        self.btn_refresh.clicked.connect(self._on_refresh_questions)
-        btn_layout.addWidget(self.btn_refresh)
+        self.btn_delete.clicked.connect(self._on_delete_questions)
+        btn_layout.addWidget(self.btn_delete)
 
         layout.addLayout(btn_layout)
 
         return panel
 
-    def _on_refresh_questions(self):
-        """刷新题目列表（预留接口）"""
-        self.status_update.emit("刷新题目列表...")
-        # TODO: 实现题目加载逻辑
+    def _on_delete_questions(self):
+        """删除已勾选题目。"""
+        checked_items = []
+        for i in range(self.question_list.topLevelItemCount()):
+            item = self.question_list.topLevelItem(i)
+            if item and item.checkState(0) == Qt.CheckState.Checked:
+                checked_items.append(item)
+
+        checked_count = len(checked_items)
+
+        if checked_count == 0:
+            self.status_update.emit("请先勾选要删除的题目")
+            QMessageBox.information(self, "删除题目", "请先勾选要删除的题目。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "删除题目",
+            f"确定删除已勾选的 {checked_count} 道题吗？\n删除后题目会进入回收站。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        question_ids = [item.data(0, Qt.ItemDataRole.UserRole) for item in checked_items if item.data(0, Qt.ItemDataRole.UserRole)]
+        if not question_ids:
+            QMessageBox.warning(self, "删除题目", "未读取到有效的题目 ID。")
+            return
+
+        self.status_update.emit(f"正在删除 {len(question_ids)} 道题目...")
+        success, msg = self.crawler.delete_questions(question_ids, dir_ids="")
+
+        if success:
+            self.status_update.emit(f"已删除 {len(question_ids)} 道题目")
+            self.load_folders()
+            self._reload_current_questions()
+            QMessageBox.information(self, "删除题目", msg or f"已删除 {len(question_ids)} 道题目。")
+            return
+
+        self.status_update.emit(f"删除题目失败: {msg}")
+        QMessageBox.warning(self, "删除题目失败", msg or "删除题目失败。")
+
+    def _reload_current_questions(self):
+        """重新加载当前文件夹下的题目列表。"""
+        if not self.crawler or not self.current_folder_id:
+            return
+
+        folder_id = "0" if self.current_folder_id == "root" else str(self.current_folder_id)
+        result = self.crawler.get_question_subfolders(folder_id)
+        if not result:
+            return
+
+        questions = result.get("questions", [])
+        self.display_questions(questions, self.current_folder_path)
     
     def display_questions(self, questions: list, folder_path: str = ""):
         """显示题目列表"""
@@ -389,6 +469,7 @@ class QuestionBankView(QWidget):
             
             # 创建树节点
             item = QTreeWidgetItem([
+                "",  # 勾选列
                 str(i),  # 序号
                 q.get('content', '')[:100] + "..." if len(q.get('content', '')) > 100 else q.get('content', ''),
                 q.get('question_type', '未知'),  # 题型
@@ -398,6 +479,8 @@ class QuestionBankView(QWidget):
                 q.get('author', ''),  # 作者
                 q.get('create_time', '')  # 创建时间
             ])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Unchecked)
             
             # 存储题目数据
             item.setData(0, Qt.ItemDataRole.UserRole, q.get('id'))
@@ -422,6 +505,7 @@ class QuestionBankView(QWidget):
 
     def load_folders(self):
         """从服务器加载真实文件夹数据"""
+        target_folder_id = self.current_folder_id
         if not self.crawler:
             self.status_update.emit("未初始化爬虫，加载示例数据")
             self.load_sample_folders()
@@ -462,6 +546,7 @@ class QuestionBankView(QWidget):
                 self._add_folder_item_from_data(root_item, folder)
             
             root_item.setExpanded(True)
+            self._restore_folder_selection(target_folder_id)
             self.status_update.emit(f"已加载 {len(unique_folders)} 个题库文件夹")
             
         except Exception as e:
@@ -469,6 +554,23 @@ class QuestionBankView(QWidget):
             print(f"加载题库文件夹错误: {e}")
             import traceback
             traceback.print_exc()
+
+    def _restore_folder_selection(self, folder_id):
+        """刷新目录树后恢复之前选中的目录。"""
+        if not folder_id:
+            return
+
+        target_item = self._folder_items.get(folder_id)
+        if not target_item:
+            return
+
+        parent = target_item.parent()
+        while parent:
+            parent.setExpanded(True)
+            parent = parent.parent()
+
+        self.folder_tree.setCurrentItem(target_item)
+        self.folder_tree.scrollToItem(target_item)
     
     def _add_folder_item_from_data(self, parent: QTreeWidgetItem, folder_data: dict):
         """从服务器数据添加文件夹项"""
@@ -579,23 +681,21 @@ class QuestionBankView(QWidget):
         # 更新状态
         self.status_update.emit(f"已选择文件夹: {self.current_folder_path}")
 
-        # 加载子文件夹（如果尚未加载）
-        self._load_subfolders(item)
+        # 子文件夹只按需加载一次，但题目列表每次点击都要刷新
+        self._load_subfolders(item, refresh_questions=True)
 
-    def _load_subfolders(self, item: QTreeWidgetItem):
-        """加载子文件夹和题目"""
-        # 检查是否已经加载过子文件夹
-        if item.data(0, Qt.ItemDataRole.UserRole + 1):  # 使用 UserRole+1 存储加载状态
-            return
-
+    def _load_subfolders(self, item: QTreeWidgetItem, refresh_questions: bool = True):
+        """加载子文件夹，并按需刷新题目列表。"""
         folder_id = item.data(0, Qt.ItemDataRole.UserRole)
         if not folder_id or folder_id.startswith("new-"):
             # 新建的文件夹，标记为已加载
             item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
             return
 
-        # 标记为正在加载
-        item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
+        subfolders_loaded = bool(item.data(0, Qt.ItemDataRole.UserRole + 1))
+        if not subfolders_loaded:
+            # 标记为正在加载
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
 
         # 获取子文件夹和题目
         try:
@@ -603,43 +703,45 @@ class QuestionBankView(QWidget):
             # - 不需要再加载子文件夹（已由 load_folders 加载）
             # - 但需要加载根目录下的题目
             if folder_id == "root":
-                # 使用 "0" 作为根目录 ID 来获取题目
-                result = self.crawler.get_question_subfolders("0")
-                if result:
-                    questions = result.get("questions", [])
-                    self.display_questions(questions, self.current_folder_path)
+                if refresh_questions:
+                    # 使用 "0" 作为根目录 ID 来获取题目
+                    result = self.crawler.get_question_subfolders("0")
+                    if result:
+                        questions = result.get("questions", [])
+                        self.display_questions(questions, self.current_folder_path)
                 return
 
             result = self.crawler.get_question_subfolders(folder_id)
             
             if not result:
                 return
-            
-            # 处理子文件夹
-            subfolders = result.get("folders", [])
-            if subfolders:
-                # 检查是否已存在相同 ID 的文件夹
-                existing_ids = set()
-                for i in range(item.childCount()):
-                    child_item = item.child(i)
-                    existing_ids.add(child_item.data(0, Qt.ItemDataRole.UserRole))
 
-                for sf in subfolders:
-                    if sf['id'] not in existing_ids:
-                        child = QTreeWidgetItem([f"📁 {sf['name']} ({sf['count']})"])
-                        child.setData(0, Qt.ItemDataRole.UserRole, sf['id'])
-                        child.setData(0, Qt.ItemDataRole.UserRole + 1, False)  # 子文件夹未加载
-                        item.addChild(child)
+            # 子文件夹只在首次进入时写入树，题目列表可以每次刷新
+            if not subfolders_loaded:
+                subfolders = result.get("folders", [])
+                if subfolders:
+                    # 检查是否已存在相同 ID 的文件夹
+                    existing_ids = set()
+                    for i in range(item.childCount()):
+                        child_item = item.child(i)
+                        existing_ids.add(child_item.data(0, Qt.ItemDataRole.UserRole))
 
-                        # 存储映射
-                        self._folder_items[sf['id']] = child
+                    for sf in subfolders:
+                        if sf['id'] not in existing_ids:
+                            child = QTreeWidgetItem([f"📁 {sf['name']} ({sf['count']})"])
+                            child.setData(0, Qt.ItemDataRole.UserRole, sf['id'])
+                            child.setData(0, Qt.ItemDataRole.UserRole + 1, False)  # 子文件夹未加载
+                            item.addChild(child)
 
-                item.setExpanded(True)
-                self.status_update.emit(f"已加载 {len(subfolders)} 个子文件夹")
-            
-            # 处理题目列表（无论有无题目都更新显示，避免显示旧数据）
-            questions = result.get("questions", [])
-            self.display_questions(questions, self.current_folder_path)
+                            # 存储映射
+                            self._folder_items[sf['id']] = child
+
+                    item.setExpanded(True)
+                    self.status_update.emit(f"已加载 {len(subfolders)} 个子文件夹")
+
+            if refresh_questions:
+                questions = result.get("questions", [])
+                self.display_questions(questions, self.current_folder_path)
 
         except Exception as e:
             print(f"加载子文件夹和题目失败: {e}")
@@ -1225,39 +1327,91 @@ class QuestionBankView(QWidget):
             "easy": easy  # 难度等级 (0=易, 1=中, 2=难)
         }
     
-    def _on_question_clicked(self, item: QTreeWidgetItem):
-        """点击题目时的处理"""
-        # 获取题目 ID
+    def _bind_question_open_shortcuts(self):
+        """绑定题目列表的回车打开快捷键。"""
+        self._question_open_shortcuts = []
+
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            shortcut = QShortcut(QKeySequence(key), self.question_list)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+            shortcut.activated.connect(self._open_current_question_detail)
+            self._question_open_shortcuts.append(shortcut)
+
+    def _open_current_question_detail(self):
+        """打开当前选中的题目详情。"""
+        item = self.question_list.currentItem()
+        if item:
+            self._show_question_detail(item)
+
+    def _on_question_activated(self, item: QTreeWidgetItem, column: int = 0):
+        """双击题目时打开详情。"""
+        _ = column
+        self._show_question_detail(item)
+
+    def _get_question_list_items(self) -> list[QTreeWidgetItem]:
+        """获取当前题目列表中的所有题目项。"""
+        return [
+            self.question_list.topLevelItem(i)
+            for i in range(self.question_list.topLevelItemCount())
+        ]
+
+    def _fetch_question_detail(self, item: QTreeWidgetItem):
+        """加载单个题目的详情数据。"""
         question_id = item.data(0, Qt.ItemDataRole.UserRole)
-        question_data = item.data(1, Qt.ItemDataRole.UserRole)
-        
+
         if not question_id or not self.crawler:
-            return
-        
-        # 获取当前文件夹 ID
+            return None
+
         folder_id = self.current_folder_id
-        if folder_id == "root":
+        if folder_id == "root" or not folder_id:
             folder_id = "0"
-        
-        # 显示状态
-        self.status_update.emit(f"正在加载题目详情...")
-        
+
+        self.status_update.emit("正在加载题目详情...")
+
         try:
-            # 调用 API 获取题目详情
             result = self.crawler.get_question_detail(question_id, folder_id)
-            
             if result.get("success"):
-                # 显示题目详情对话框
-                dialog = QuestionDetailDialog(result, self)
-                dialog.exec()
                 self.status_update.emit("题目详情已加载")
-            else:
-                self.status_update.emit(f"加载题目详情失败: {result.get('msg', '未知错误')}")
-                QMessageBox.warning(self, "加载失败", f"无法加载题目详情:\n{result.get('msg', '未知错误')}")
-                
+                return result
+
+            msg = result.get("msg", "未知错误")
+            self.status_update.emit(f"加载题目详情失败: {msg}")
+            QMessageBox.warning(self, "加载失败", f"无法加载题目详情:\n{msg}")
         except Exception as e:
             print(f"加载题目详情错误: {e}")
             self.status_update.emit(f"加载题目详情失败: {e}")
+            QMessageBox.warning(self, "加载失败", f"无法加载题目详情:\n{e}")
+
+        return None
+
+    def _show_question_detail(self, item: QTreeWidgetItem):
+        """显示题目详情。"""
+        question_items = self._get_question_list_items()
+        try:
+            current_index = question_items.index(item)
+        except ValueError:
+            question_items = [item]
+            current_index = 0
+
+        result = self._fetch_question_detail(item)
+        if not result:
+            return
+
+        dialog = QuestionDetailDialog(
+            result,
+            question_items=question_items,
+            current_index=current_index,
+            load_question_callback=self._fetch_question_detail,
+            parent=self,
+        )
+        dialog.exec()
+
+        if question_items:
+            current_item = question_items[min(dialog.current_index, len(question_items) - 1)]
+            self.question_list.setCurrentItem(current_item)
+            self.question_list.scrollToItem(current_item)
+            self.question_list.setFocus()
+        self.status_update.emit("题目详情已关闭")
 
 
 class QuestionDetailDialog(QDialog):
@@ -1267,57 +1421,233 @@ class QuestionDetailDialog(QDialog):
     from core.config import BASE_DIR
     _KATEX_DIR = os.path.join(BASE_DIR, "assets", "katex")
     
-    def __init__(self, question_data: dict, parent=None):
+    def __init__(
+        self,
+        question_data: dict,
+        question_items: list[QTreeWidgetItem] | None = None,
+        current_index: int = 0,
+        load_question_callback=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("题目详情")
-        self.setMinimumSize(850, 650)
+        self.setMinimumHeight(560)
         self.setStyleSheet("background-color: #1e1e1e;")
-        self.setup_ui(question_data)
+        self.question_items = question_items or []
+        self.current_index = current_index
+        self.load_question_callback = load_question_callback
+        self._is_loading_question = False
+        self._close_shortcuts = []
+        self.position_label = None
+        self.prev_btn = None
+        self.next_btn = None
+        self.close_btn = None
+        self._app = QApplication.instance()
+        self._app_event_filter_installed = False
+        if self._app:
+            self._app.installEventFilter(self)
+            self._app_event_filter_installed = True
+        self.setup_ui()
+        self._resize_to_screen()
+        self._update_question_content(question_data)
     
-    def setup_ui(self, question_data: dict):
-        """设置界面"""
+    def setup_ui(self):
+        """设置界面。"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         
         self.web_view = QWebEngineView()
+        self.web_page = QuestionDetailPage(self.web_view)
+        self.web_page.close_requested.connect(self._trigger_close_button)
+        self.web_view.setPage(self.web_page)
         self.web_view.setStyleSheet("background-color: #1e1e1e; border: none;")
-        
-        # 预处理：下载远程图片转为 base64 data URL
-        processed_data = self._process_images(question_data)
-        
-        # 构建完整 HTML（包含内联 KaTeX）
-        html = self._build_html(processed_data)
-        self.web_view.setHtml(html, QUrl.fromLocalFile(self._KATEX_DIR + "/"))
-        
+        self.web_view.setMinimumHeight(550)
+        self._bind_close_shortcuts()
+        self.installEventFilter(self)
+        self.web_view.installEventFilter(self)
         layout.addWidget(self.web_view)
         
-        # 底部按钮栏
         btn_bar = QWidget()
         btn_bar.setStyleSheet("background-color: #2d2d2d; border-top: 1px solid #3e3e42;")
+        btn_bar.setFixedHeight(74)
         btn_layout = QHBoxLayout(btn_bar)
-        btn_layout.setContentsMargins(20, 8, 20, 8)
+        btn_layout.setContentsMargins(14, 10, 14, 10)
+        btn_layout.setSpacing(8)
+
+        self.position_label = QLabel("当前题目")
+        self.position_label.setStyleSheet("color: #cccccc; font-size: 13px;")
+        btn_layout.addWidget(self.position_label)
         btn_layout.addStretch()
+
+        nav_btn_style = """
+            QPushButton {
+                background-color: #3e3e42;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #4e4e52;
+            }
+            QPushButton:disabled {
+                background-color: #2f2f33;
+                color: #777777;
+            }
+        """
+
+        self.prev_btn = QPushButton("上一题")
+        self.prev_btn.setStyleSheet(nav_btn_style)
+        self.prev_btn.clicked.connect(lambda: self._navigate_question(-1))
+        btn_layout.addWidget(self.prev_btn)
+
+        self.next_btn = QPushButton("下一题")
+        self.next_btn.setStyleSheet(nav_btn_style)
+        self.next_btn.clicked.connect(lambda: self._navigate_question(1))
+        btn_layout.addWidget(self.next_btn)
         
-        close_btn = QPushButton("关闭")
-        close_btn.setStyleSheet("""
+        self.close_btn = QPushButton("关闭")
+        self.close_btn.setStyleSheet("""
             QPushButton {
                 background-color: #0e639c;
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
-                padding: 8px 24px;
-                font-size: 13px;
+                padding: 6px 18px;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #1177bb;
             }
         """)
-        close_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(close_btn)
+        self.close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.close_btn)
         
         layout.addWidget(btn_bar)
+
+    def _resize_to_screen(self):
+        """固定详情宽度，并压缩默认高度，减少短题目的底部空白。"""
+        screen = self.windowHandle().screen() if self.windowHandle() else QApplication.primaryScreen()
+        if not screen:
+            return
+
+        available = screen.availableGeometry()
+        width = min(920, max(820, available.width() - 120))
+        height = 710
+        self.setFixedWidth(width)
+        self.setFixedHeight(height)
+        self.resize(width, height)
+
+    def _update_question_content(self, question_data: dict):
+        """刷新当前弹窗中的题目内容。"""
+        processed_data = self._process_images(question_data)
+        html = self._build_html(processed_data)
+        self.web_view.setHtml(html, QUrl.fromLocalFile(self._KATEX_DIR + "/"))
+        self._update_navigation_state()
+
+    def _update_navigation_state(self):
+        """刷新上一题下一题按钮和题号显示。"""
+        total = len(self.question_items)
+        has_navigation = total > 1 and self.load_question_callback is not None and not self._is_loading_question
+
+        if self.prev_btn:
+            self.prev_btn.setEnabled(has_navigation and self.current_index > 0)
+        if self.next_btn:
+            self.next_btn.setEnabled(has_navigation and self.current_index < total - 1)
+
+        if total > 0:
+            self.setWindowTitle(f"题目详情 - 第 {self.current_index + 1} / {total} 题")
+            if self.position_label:
+                self.position_label.setText(f"第 {self.current_index + 1} / {total} 题")
+        else:
+            self.setWindowTitle("题目详情")
+            if self.position_label:
+                self.position_label.setText("当前题目")
+
+    def _navigate_question(self, offset: int):
+        """在弹窗内切换上一题或下一题。"""
+        if self._is_loading_question:
+            return
+
+        target_index = self.current_index + offset
+        self._load_question_at_index(target_index)
+
+    def _load_question_at_index(self, target_index: int):
+        """加载指定索引的题目详情。"""
+        if (
+            self.load_question_callback is None
+            or target_index < 0
+            or target_index >= len(self.question_items)
+        ):
+            return
+
+        self._is_loading_question = True
+        if self.position_label:
+            self.position_label.setText(f"正在加载第 {target_index + 1} / {len(self.question_items)} 题...")
+        if self.prev_btn:
+            self.prev_btn.setEnabled(False)
+        if self.next_btn:
+            self.next_btn.setEnabled(False)
+
+        try:
+            result = self.load_question_callback(self.question_items[target_index])
+            if result:
+                self.current_index = target_index
+                self._update_question_content(result)
+                self.web_view.setFocus()
+        finally:
+            self._is_loading_question = False
+            self._update_navigation_state()
+
+    def _trigger_close_button(self):
+        """统一走关闭按钮逻辑，确保 Esc 与点击按钮行为一致。"""
+        if self.close_btn and self.close_btn.isEnabled():
+            self.close_btn.click()
+            return
+        self.accept()
+
+    def _bind_close_shortcuts(self):
+        """绑定关闭详情窗口的快捷键。"""
+        self._close_shortcuts = []
+
+        for target in (self, self.web_view):
+            shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), target)
+            shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            shortcut.activated.connect(self._trigger_close_button)
+            self._close_shortcuts.append(shortcut)
+
+    def _cleanup_close_handlers(self):
+        """清理详情窗口关闭相关的事件绑定。"""
+        if self._app and self._app_event_filter_installed:
+            self._app.removeEventFilter(self)
+            self._app_event_filter_installed = False
+
+    def done(self, result):
+        """关闭对话框时清理事件过滤器。"""
+        self._cleanup_close_handlers()
+        super().done(result)
+
+    def keyPressEvent(self, event):
+        """兜底处理 Esc，直接触发关闭按钮。"""
+        if event.key() == Qt.Key.Key_Escape:
+            self._trigger_close_button()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):
+        """全局拦截 Esc，确保题目详情窗口可快速关闭。"""
+        if (
+            self.isVisible()
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Escape
+        ):
+            self._trigger_close_button()
+            return True
+        return super().eventFilter(watched, event)
     
     def _process_images(self, data: dict) -> dict:
         """下载 HTML 中的远程图片并转为 base64 data URL 嵌入"""
@@ -1438,47 +1768,53 @@ class QuestionDetailDialog(QDialog):
         
         # 题干
         if stem:
-            type_info_html = f'<div class="type-info">{question_type_info}</div>' if question_type_info else ''
+            type_info_html = f'<div class="type-badge">{question_type_info}</div>' if question_type_info else ''
             sections += f"""
-            <div class="section">
-                <div class="section-title">📝 题干</div>
-                <div class="stem-content">
+            <section class="section section-card">
+                <div class="stem-content content-panel">
                     {type_info_html}
                     {stem}
                 </div>
-            </div>"""
+            </section>"""
         
         # 选项
         if options:
             sections += f"""
-            <div class="section">
-                <div class="section-title">📋 选项</div>
+            <section class="section section-card">
+                <div class="section-header">
+                    <div class="section-title">选项</div>
+                </div>
                 {options_html}
-            </div>"""
+            </section>"""
         
-        # 答案
+        meta_items = ""
         if answer:
-            sections += f"""
-            <div class="section">
-                <div class="section-title">✅ 答案</div>
-                <div class="answer-box">{answer}</div>
+            meta_items += f"""
+            <div class="meta-card meta-card-answer">
+                <div class="meta-label">答案</div>
+                <div class="meta-value">{answer}</div>
             </div>"""
-        
+        if difficulty:
+            meta_items += f"""
+            <div class="meta-card">
+                <div class="meta-label">难度</div>
+                <div class="meta-value difficulty-text">{difficulty}</div>
+            </div>"""
+        if meta_items:
+            sections += f"""
+            <section class="section section-meta">
+                <div class="meta-grid">{meta_items}</div>
+            </section>"""
+
         # 解析
         if analysis:
             sections += f"""
-            <div class="section">
-                <div class="section-title">📖 答案解析</div>
-                <div class="analysis-content">{analysis}</div>
-            </div>"""
-        
-        # 难度
-        if difficulty:
-            sections += f"""
-            <div class="section">
-                <div class="section-title">📊 难度</div>
-                <div class="difficulty-text">{difficulty}</div>
-            </div>"""
+            <section class="section section-card">
+                <div class="section-header">
+                    <div class="section-title">解析</div>
+                </div>
+                <div class="analysis-content content-panel">{analysis}</div>
+            </section>"""
         
         # 构建完整 HTML（KaTeX JS/CSS 内联，字体用本地文件）
         return f"""<!DOCTYPE html>
@@ -1492,96 +1828,169 @@ class QuestionDetailDialog(QDialog):
             padding: 0;
             box-sizing: border-box;
         }}
+        html, body {{
+            min-height: 100%;
+        }}
         body {{
-            background-color: #1e1e1e;
-            color: #cccccc;
+            background:
+                radial-gradient(circle at top, rgba(86, 156, 214, 0.12), transparent 30%),
+                linear-gradient(180deg, #1c1d21 0%, #18191c 100%);
+            color: #d7dce2;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             font-size: 14px;
-            line-height: 1.8;
-            padding: 24px;
+            line-height: 1.7;
+            padding: 18px;
+        }}
+        .page {{
+            width: min(980px, 100%);
+            margin: 0 auto;
+            padding-bottom: 24px;
         }}
         .section {{
-            margin-bottom: 24px;
+            margin-bottom: 12px;
+        }}
+        .section:last-child {{
+            margin-bottom: 0;
+        }}
+        .section-card {{
+            background: rgba(37, 38, 43, 0.92);
+            border: 1px solid #343842;
+            border-radius: 12px;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+            overflow: hidden;
+        }}
+        .section-card:first-child .content-panel {{
+            padding-top: 12px;
+        }}
+        .section-header {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px 0;
         }}
         .section-title {{
-            color: #569cd6;
-            font-size: 16px;
-            font-weight: bold;
-            margin-bottom: 12px;
-            padding-bottom: 6px;
-            border-bottom: 1px solid #3e3e42;
+            color: #8fc7ff;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
         }}
-        .stem-content {{
-            background-color: #252526;
-            border: 1px solid #3e3e42;
-            border-radius: 6px;
-            padding: 16px;
+        .content-panel {{
+            padding: 10px 14px 14px;
         }}
         .stem-content p {{
-            margin: 6px 0;
+            margin: 4px 0;
         }}
         .stem-content img {{
             max-width: 100%;
+            max-height: 320px;
+            display: block;
+            object-fit: contain;
             vertical-align: middle;
         }}
-        .type-info {{
-            color: #9cdcfe;
-            font-size: 13px;
+        .type-badge {{
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: rgba(86, 156, 214, 0.14);
+            border: 1px solid rgba(86, 156, 214, 0.32);
+            color: #9fd3ff;
+            font-size: 12px;
+            font-weight: 600;
             margin-bottom: 8px;
         }}
         .option-item {{
             display: flex;
             align-items: flex-start;
-            background-color: #252526;
-            border: 1px solid #3e3e42;
-            border-radius: 6px;
-            padding: 10px 14px;
-            margin-bottom: 8px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid #31353f;
+            border-radius: 10px;
+            padding: 10px 12px;
+            margin-bottom: 6px;
+        }}
+        .option-item:last-child {{
+            margin-bottom: 0;
         }}
         .option-label {{
-            font-weight: bold;
-            color: #dcdcaa;
-            min-width: 28px;
-            margin-right: 8px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            border-radius: 999px;
+            background: rgba(220, 220, 170, 0.14);
+            color: #f0efb1;
+            font-weight: 700;
+            flex-shrink: 0;
+            margin-right: 10px;
         }}
         .option-content {{
             flex: 1;
+            padding-top: 2px;
         }}
         .option-content img {{
             max-width: 100%;
+            max-height: 260px;
+            display: block;
+            object-fit: contain;
             vertical-align: middle;
         }}
         .option-content p {{
             margin: 2px 0;
         }}
-        .answer-box {{
-            background-color: #1e4620;
-            border: 2px solid #4caf50;
-            border-radius: 6px;
-            padding: 12px 16px;
-            font-size: 16px;
-            font-weight: bold;
-            color: #4caf50;
+        .section-meta {{
+            margin-top: -2px;
         }}
-        .analysis-content {{
-            background-color: #252526;
-            border: 1px solid #3e3e42;
-            border-radius: 6px;
-            padding: 16px;
+        .meta-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 8px;
+        }}
+        .meta-card {{
+            background: rgba(37, 38, 43, 0.95);
+            border: 1px solid #343842;
+            border-radius: 12px;
+            padding: 8px 11px;
+        }}
+        .meta-card-answer {{
+            background: linear-gradient(180deg, rgba(31, 77, 36, 0.95), rgba(27, 66, 32, 0.95));
+            border-color: #4caf50;
+        }}
+        .meta-label {{
+            color: #8fc7ff;
+            font-size: 11px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }}
+        .meta-value {{
+            font-size: 15px;
+            font-weight: bold;
+        }}
+        .meta-card-answer .meta-value {{
+            color: #7fe38a;
         }}
         .analysis-content p {{
-            margin: 6px 0;
+            margin: 2px 0;
         }}
         .analysis-content img {{
             max-width: 100%;
+            max-height: 320px;
+            display: block;
+            object-fit: contain;
             vertical-align: middle;
         }}
+        .analysis-content.content-panel {{
+            padding-top: 8px;
+            padding-bottom: 10px;
+        }}
         .difficulty-text {{
-            color: #cccccc;
-            font-size: 14px;
+            color: #d7dce2;
+            font-size: 13px;
         }}
         .katex-display {{
-            margin: 10px 0;
+            margin: 8px 0;
             overflow-x: auto;
         }}
         /* KaTeX 公式在深色主题下的颜色 */
@@ -1592,11 +2001,21 @@ class QuestionDetailDialog(QDialog):
     </style>
 </head>
 <body>
-    {sections}
+    <main class="page">
+        {sections}
+    </main>
 
     <script>{katex_js}</script>
     <script>{auto_render_js}</script>
     <script>
+        window.addEventListener('keydown', function(event) {{
+            if (event.key === 'Escape') {{
+                event.preventDefault();
+                event.stopPropagation();
+                console.log('__QUESTION_DETAIL_CLOSE__');
+            }}
+        }}, true);
+
         window.onload = function() {{
             try {{
                 console.log("KaTeX: 开始渲染数学公式...");
@@ -1624,6 +2043,10 @@ class QuestionDetailDialog(QDialog):
                     console.log("KaTeX: 修复了 " + fixedCount + " 个多行 $$ 公式块");
                 }}
                 
+                if (typeof renderMathInElement !== 'function') {{
+                    throw new Error('KaTeX auto-render 插件未加载');
+                }}
+
                 var count = 0;
                 renderMathInElement(document.body, {{
                     delimiters: [

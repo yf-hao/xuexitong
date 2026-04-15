@@ -778,14 +778,31 @@ class AbsenceStatsWorker(QThread):
     
     stats_ready = pyqtSignal(object)  # dict of absence stats or error string
     
-    def __init__(self, crawler, activities):
+    def __init__(self, crawler, activities, course_id: str = "", class_id: str = ""):
         super().__init__()
         self.crawler = crawler
         self.activities = activities
+        self.course_id = course_id
+        self.class_id = class_id
     
     def run(self):
         try:
             absence_stats = {}  # {uid: {name, username, absent_count, total_count}}
+            student_map = self.crawler.get_clazz_student_map(
+                course_id=self.course_id or None,
+                clazz_id=self.class_id or None,
+            )
+            student_no_map = {}
+            student_name_map = {}
+            for student in student_map.values():
+                student_number = str(student.get("student_number", "")).strip()
+                student_name = str(student.get("name", "")).strip()
+                if student_number:
+                    student_no_map[student_number] = student
+                if student_name:
+                    student_name_map[student_name] = student
+
+            matched_count = 0
             
             for activity in self.activities:
                 # 获取每个活动的详情
@@ -801,9 +818,17 @@ class AbsenceStatsWorker(QThread):
                     
                     # 如果该学生还未在统计中，初始化
                     if uid not in absence_stats:
+                        student_info = (
+                            student_map.get(str(uid), {})
+                            or student_no_map.get(str(record.username).strip(), {})
+                            or student_name_map.get(str(record.name).strip(), {})
+                        )
+                        if student_info:
+                            matched_count += 1
                         absence_stats[uid] = {
                             'name': record.name,
                             'username': record.username,
+                            'class_name': student_info.get('class_name', ''),
                             'absent_count': 0,
                             'total_count': 0
                         }
@@ -820,11 +845,95 @@ class AbsenceStatsWorker(QThread):
                 uid: stats for uid, stats in absence_stats.items() 
                 if stats['absent_count'] > 0
             }
+            print(
+                "DEBUG AbsenceStatsWorker "
+                f"student_map={len(student_map)}, "
+                f"student_no_map={len(student_no_map)}, "
+                f"matched={matched_count}, "
+                f"absence_students={len(result)}"
+            )
             
             self.stats_ready.emit(result)
         except Exception as e:
             print(f"AbsenceStatsWorker error: {e}")
             self.stats_ready.emit(f"统计缺勤数据失败: {e}")
+
+
+class AbsenceStatsExportWorker(QThread):
+    """后台导出缺勤统计 Excel。"""
+
+    export_finished = pyqtSignal(bool, str)
+
+    def __init__(
+        self,
+        absence_stats: dict,
+        total_activities: int,
+        save_path: str,
+        course_id: str = "",
+        class_id: str = "",
+    ):
+        super().__init__()
+        self.absence_stats = absence_stats
+        self.total_activities = total_activities
+        self.save_path = save_path
+        self.course_id = course_id
+        self.class_id = class_id
+
+    def run(self):
+        try:
+            from core.communication_manager import CommunicationManager
+            from core.exporters.absence_stats_exporter import export_absence_stats_to_excel
+
+            communication_manager = CommunicationManager()
+            export_absence_stats_to_excel(
+                absence_stats=self.absence_stats,
+                total_activities=self.total_activities,
+                save_path=self.save_path,
+                course_id=self.course_id,
+                class_id=self.class_id,
+                communication_status_getter=communication_manager.get_status,
+            )
+            self.export_finished.emit(True, self.save_path)
+        except Exception as e:
+            print(f"AbsenceStatsExportWorker error: {e}")
+            self.export_finished.emit(False, f"导出缺勤统计失败: {e}")
+
+
+class HomeworkStatsExportWorker(QThread):
+    """后台导出作业情况 Excel。"""
+
+    export_finished = pyqtSignal(bool, str)
+
+    def __init__(
+        self,
+        stats_list: list,
+        save_path: str,
+        course_id: str = "",
+        class_id: str = "",
+    ):
+        super().__init__()
+        self.stats_list = stats_list
+        self.save_path = save_path
+        self.course_id = course_id
+        self.class_id = class_id
+
+    def run(self):
+        try:
+            from core.communication_manager import CommunicationManager
+            from core.exporters.homework_stats_exporter import export_homework_stats_to_excel
+
+            communication_manager = CommunicationManager()
+            export_homework_stats_to_excel(
+                stats_list=self.stats_list,
+                save_path=self.save_path,
+                course_id=self.course_id,
+                class_id=self.class_id,
+                communication_status_getter=communication_manager.get_status,
+            )
+            self.export_finished.emit(True, self.save_path)
+        except Exception as e:
+            print(f"HomeworkStatsExportWorker error: {e}")
+            self.export_finished.emit(False, f"导出作业情况失败: {e}")
 
 
 class HomeworkWorker(QThread):
