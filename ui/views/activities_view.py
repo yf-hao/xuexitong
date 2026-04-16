@@ -1,12 +1,13 @@
 import json
 import os
 import random
+import copy
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
     QPushButton, QLabel, QFrame, QScrollArea, QComboBox, 
     QSpinBox, QDateEdit, QGroupBox, QInputDialog, QMessageBox,
-    QListView
+    QListView, QCheckBox, QDialog
 )
 from PyQt6.QtCore import Qt, QDate, QTimer
 from ui.workers import (
@@ -14,7 +15,7 @@ from ui.workers import (
     PublishSigninWorker, DeleteSigninWorker
 )
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE
-from core.config import SIGNIN_DATA_FILE
+from core.config import SIGNIN_DATA_FILE, LOCATION_DATA_FILE, DEFAULT_COMMON_LOCATIONS
 
 class ActivitiesView(QWidget):
     def __init__(self, crawler, status_callback, get_course_callback, get_class_name_callback, get_class_id_callback, parent=None):
@@ -98,6 +99,9 @@ class ActivitiesView(QWidget):
         config_box = self._setup_signin_config_ui()
         self.activities_scroll_layout.addWidget(config_box)
         
+        # 1.5. Load locations to combo
+        self._load_locations_to_combo()
+        
         # 2. Results Container
         self.signin_results_widget = QWidget()
         self.signin_results_layout = QVBoxLayout(self.signin_results_widget)
@@ -146,14 +150,11 @@ class ActivitiesView(QWidget):
             worker.start()
 
     def _setup_signin_config_ui(self):
-        config_box = QGroupBox("批量签到计划生成")
+        config_box = QGroupBox("")
         config_box.setStyleSheet("""
             QGroupBox {
-                color: #007acc;
-                font-weight: bold;
                 border: 2px solid #333333;
                 border-radius: 10px;
-                margin-top: 20px;
                 padding-top: 15px;
             }
         """)
@@ -237,6 +238,105 @@ class ActivitiesView(QWidget):
         self.even_times.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px;")
         config_layout.addWidget(self.even_times, 1, 5)
 
+        # === 位置签到配置 ===
+        self.chk_enable_location = QCheckBox("启用位置签到")
+        self.chk_enable_location.setStyleSheet("""
+            QCheckBox {
+                font-size: 13px;
+                color: #ffffff;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666;
+                border-radius: 3px;
+                background: #252526;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #007acc;
+                background: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background: #007acc;
+                border: 2px solid #007acc;
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
+            }
+        """)
+        config_layout.addWidget(self.chk_enable_location, 2, 0)
+        
+        # 位置下拉框
+        self.combo_location = QComboBox()
+        self.combo_location.setMinimumHeight(35)
+        self.combo_location.setMinimumWidth(180)
+        self.combo_location.setStyleSheet("""
+            QComboBox {
+                background: #252526; 
+                color: white; 
+                border: 1px solid #444; 
+                border-radius: 4px;
+                padding-left: 5px;
+            }
+            QComboBox:disabled {
+                background: #1a1a1a;
+                color: #666666;
+                border: 1px solid #333;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #ffffff;
+                border: 1px solid #444444;
+                selection-background-color: #007acc;
+                outline: none;
+            }
+            QListView::item {
+                min-height: 35px;
+                padding-left: 10px;
+            }
+            QListView::item:hover {
+                background-color: #007acc;
+                color: #ffffff;
+            }
+        """)
+        self.combo_location.addItem("暂无位置数据", None)
+        config_layout.addWidget(self.combo_location, 2, 1)
+        
+        # 位置配置按钮
+        self.btn_config_location = QPushButton("位置模板")
+        self.btn_config_location.setFixedHeight(35)
+        self.btn_config_location.setMinimumWidth(70)
+        self.btn_config_location.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_config_location.setStyleSheet("""
+            QPushButton { 
+                background-color: #0078d4; 
+                color: #ffffff; 
+                border: none;
+                border-radius: 4px; 
+                font-size: 13px;
+                font-weight: bold;
+                padding: 0 10px;
+            }
+            QPushButton:hover { 
+                background-color: #1e90ff; 
+            }
+            QPushButton:pressed { 
+                background-color: #0066b8; 
+            }
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #888888;
+            }
+        """)
+        config_layout.addWidget(self.btn_config_location, 2, 2)
+        
+        # 连接信号
+        self.chk_enable_location.stateChanged.connect(self._on_location_enable_changed)
+        self.combo_location.currentIndexChanged.connect(self._on_location_combo_changed)
+        self.btn_config_location.clicked.connect(self._on_config_location_clicked)
+        
+        # 初始状态
+        self._update_location_ui_state()
+
         button_layout = QHBoxLayout()
         button_layout.setSpacing(15)
         
@@ -260,7 +360,7 @@ class ActivitiesView(QWidget):
         button_layout.addWidget(self.btn_generate)
         button_layout.addWidget(self.btn_batch_publish)
         
-        config_layout.addLayout(button_layout, 2, 0, 1, 6)
+        config_layout.addLayout(button_layout, 5, 0, 1, 6)
         
         return config_box
 
@@ -361,7 +461,8 @@ class ActivitiesView(QWidget):
                     "signcode": sc,
                     "otherId": 2,
                     "ifNeedVCode": 1,
-                    "openCheckWeChatFlag": 0,
+                    "openCheckWeChatFlag": 1,
+                    "openCheckFaceFlag": 1,
                     "ifrefreshewm": 1,
                     "ewmRefreshTime": 10,
                     "now": 0
@@ -465,6 +566,27 @@ class ActivitiesView(QWidget):
         if not items_to_publish:
             QMessageBox.information(self, "提示", "所有签到计划均已发布。")
             return
+        
+        # 检查位置签到配置
+        if hasattr(self, 'chk_enable_location') and self.chk_enable_location.isChecked():
+            selected_data = self.combo_location.currentData()
+            
+            # 判断是否有有效位置
+            has_location = False
+            if selected_data is None:
+                has_location = False
+            elif isinstance(selected_data, dict) and selected_data.get("template"):
+                # 选择了位置模板，检查是否有配置
+                # 只检查第一个待发布任务的位置配置
+                first_item = items_to_publish[0]
+                location = self._get_location_from_template(first_item.get('name', ''))
+                has_location = location is not None
+            else:
+                has_location = True
+            
+            if not has_location:
+                QMessageBox.warning(self, "提示", "已启用位置签到，但未选择位置。\n\n请在下拉框中选择位置或启用位置模板。")
+                return
             
         reply = QMessageBox.question(
             self, "确认一键发布", 
@@ -479,15 +601,8 @@ class ActivitiesView(QWidget):
             self.btn_batch_publish.setEnabled(False)
             self._publish_next_in_batch()
 
-    def _publish_next_in_batch(self):
-        if not hasattr(self, 'batch_queue') or not self.batch_queue:
-            self.btn_batch_publish.setEnabled(True)
-            self.status_callback("一键发布完成")
-            return
-            
-        item = self.batch_queue.pop(0)
-        self.status_callback(f"正在一键发布: {item.get('name')} ... ({len(self.batch_queue)} 剩余)")
-        
+    def _build_publish_params(self, item: dict) -> dict:
+        """统一构建发布参数 - DRY原则"""
         params = {
             "title": item.get('name'),
             "courseId": item.get('courseId'),
@@ -497,10 +612,137 @@ class ActivitiesView(QWidget):
             "otherId": item.get('otherId', 2),
             "ifNeedVCode": item.get('ifNeedVCode', 1),
             "openCheckWeChatFlag": item.get('openCheckWeChatFlag', 1),
+            "openCheckFaceFlag": item.get('openCheckFaceFlag', 0),
             "ifrefreshewm": item.get('ifrefreshewm', 1),
             "ewmRefreshTime": item.get('ewmRefreshTime', 10),
             "now": item.get('now', 0)
         }
+        
+        # 添加位置签到参数
+        if hasattr(self, 'chk_enable_location') and self.chk_enable_location.isChecked():
+            selected_data = self.combo_location.currentData()
+            selected_location = None
+            
+            # 判断选择类型
+            if selected_data is None:
+                # "-- 手动选择位置 --" 或未选择，不使用位置
+                pass
+            elif isinstance(selected_data, dict) and selected_data.get("template"):
+                # 选择了"启用位置模板"，从模板获取位置
+                selected_location = self._get_location_from_template(item.get('name', ''))
+            else:
+                # 选择了具体位置
+                selected_location = selected_data
+            
+            if selected_location:
+                location_name = selected_location.get("name", "")
+                params["ifopenAddress"] = "1"  # 开启位置签到
+                params["locationText"] = f"郑州市新郑市 {location_name}"
+                params["locationLatitude"] = str(selected_location.get("latitude"))
+                params["locationLongitude"] = str(selected_location.get("longitude"))
+                params["locationRange"] = str(selected_location.get("range", 500))
+            else:
+                params["ifopenAddress"] = "0"  # 未选择位置
+        else:
+            params["ifopenAddress"] = "0"  # 未启用位置签到
+        
+        return params
+    
+    def _get_location_from_template(self, item_name: str) -> dict:
+        """根据签到名称从位置模板获取自动位置
+        
+        Args:
+            item_name: 签到名称，格式如 "16-1" 表示第16周第1次课
+            
+        Returns:
+            位置字典，如果未配置则返回None
+        """
+        import json
+        import os
+        from core.config import LOCATION_DATA_FILE, DEFAULT_LOCATION_TEMPLATE, DEFAULT_COMMON_LOCATIONS
+        
+        # 解析周次和课次
+        try:
+            parts = item_name.split('-')
+            if len(parts) != 2:
+                return None
+            week = int(parts[0])
+            slot_index = int(parts[1]) - 1  # 转为0-based索引
+        except (ValueError, IndexError):
+            return None
+        
+        # 加载位置模板配置
+        template = None
+        if os.path.exists(LOCATION_DATA_FILE):
+            try:
+                with open(LOCATION_DATA_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    template = data.get("locationTemplate", {})
+            except:
+                pass
+        
+        if not template:
+            template = DEFAULT_LOCATION_TEMPLATE.copy()
+        
+        # 检查模板是否启用
+        if not template.get("enabled", False):
+            return None
+        
+        # 获取常用位置列表（用于查找位置详情）
+        # 合并内置位置和用户自定义位置
+        user_locations = []
+        if os.path.exists(LOCATION_DATA_FILE):
+            try:
+                with open(LOCATION_DATA_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    user_locations = data.get("customLocations", [])
+            except:
+                pass
+        
+        built_in_names = {loc.get("name") for loc in DEFAULT_COMMON_LOCATIONS}
+        common_locations = list(DEFAULT_COMMON_LOCATIONS) + [
+            loc for loc in user_locations 
+            if loc.get("name") not in built_in_names
+        ]
+        
+        # 根据模式选择位置
+        mode = template.get("mode", "weekly")
+        
+        if mode == "weekly":
+            # 每周重复模式
+            slots = template.get("weeklySlots", [])
+        else:
+            # 单双周不同模式
+            if week % 2 == 1:  # 单周
+                slots = template.get("oddSlots", [])
+            else:  # 双周
+                slots = template.get("evenSlots", [])
+        
+        # 获取对应课次的位置
+        if slot_index < len(slots):
+            slot_data = slots[slot_index]
+            if slot_data:
+                # slot_data 可能是完整位置对象或位置名称
+                if isinstance(slot_data, dict):
+                    return slot_data
+                elif isinstance(slot_data, str):
+                    # 按名称查找位置
+                    for loc in common_locations:
+                        if loc.get("name") == slot_data:
+                            return loc
+        
+        return None
+
+    def _publish_next_in_batch(self):
+        if not hasattr(self, 'batch_queue') or not self.batch_queue:
+            self.btn_batch_publish.setEnabled(True)
+            self.status_callback("一键发布完成")
+            return
+            
+        item = self.batch_queue.pop(0)
+        self.status_callback(f"正在一键发布: {item.get('name')} ... ({len(self.batch_queue)} 剩余)")
+        
+        params = self._build_publish_params(item)
         
         worker = PublishSigninWorker(self.crawler, params)
         self.workers.append(worker)
@@ -538,19 +780,29 @@ class ActivitiesView(QWidget):
             self.status_callback(f"错误: 未找到任务 {item_name} 的配置信息")
             return
 
-        # Prepare parameters for the API
-        # Note: mapping 'signcode' (local) to 'signCode' (API)
-        params = {
-            "courseId": target_item.get("courseId"),
-            "classId": target_item.get("classId"),
-            "planId": target_item.get("planId"),
-            "signCode": target_item.get("signcode"),
-            "title": target_item.get("name"),
-            "otherId": target_item.get("otherId", 2),
-            "ifNeedVCode": target_item.get("ifNeedVCode", 1),
-            "openCheckWeChatFlag": target_item.get("openCheckWeChatFlag", 1),
-            # disposable_publishtime is handled in the crawler key if not provided
-        }
+        # 检查位置签到配置
+        if hasattr(self, 'chk_enable_location') and self.chk_enable_location.isChecked():
+            selected_data = self.combo_location.currentData()
+            
+            # 判断是否有有效位置
+            has_location = False
+            if selected_data is None:
+                # "-- 手动选择位置 --" 或未选择
+                has_location = False
+            elif isinstance(selected_data, dict) and selected_data.get("template"):
+                # 选择了"启用位置模板"，检查模板是否有配置
+                location = self._get_location_from_template(item_name)
+                has_location = location is not None
+            else:
+                # 选择了具体位置
+                has_location = True
+            
+            if not has_location:
+                QMessageBox.warning(self, "提示", "已启用位置签到，但未选择位置。\n\n请在下拉框中选择位置或启用位置模板。")
+                return
+
+        # Prepare parameters for the API (使用统一方法)
+        params = self._build_publish_params(target_item)
         
         self.status_callback(f"正在发布签到: {item_name} ...")
         
@@ -877,6 +1129,114 @@ class ActivitiesView(QWidget):
         }
         if sub_type in mapping:
             mapping[sub_type]()
+
+    def _on_location_enable_changed(self, state):
+        """启用/禁用位置签到时的处理"""
+        self._update_location_ui_state()
+    
+    def _on_location_combo_changed(self, index):
+        """位置下拉框选择变化时的处理"""
+        self._update_location_ui_state()
+    
+    def _update_location_ui_state(self):
+        """更新位置配置UI的启用状态"""
+        enabled = self.chk_enable_location.isChecked()
+        
+        # 启用/禁用位置下拉框
+        self.combo_location.setEnabled(enabled)
+        
+        # 未启用时，显示提示文字
+        if not enabled:
+            self.combo_location.blockSignals(True)
+            current_index = self.combo_location.currentIndex()
+            self.combo_location.setItemText(0, "未启用位置签到")
+            self.combo_location.setCurrentIndex(0)
+            self.combo_location.blockSignals(False)
+        else:
+            # 启用时，恢复正常文字
+            self.combo_location.blockSignals(True)
+            self.combo_location.setItemText(0, "-- 手动选择位置 --")
+            self.combo_location.blockSignals(False)
+        
+        # 根据下拉框选择决定是否启用"位置模板"按钮
+        # 只有选择"启用位置模板"时才启用按钮
+        if enabled:
+            current_text = self.combo_location.currentText()
+            is_template_mode = "启用位置模板" in current_text
+            self.btn_config_location.setEnabled(is_template_mode)
+        else:
+            self.btn_config_location.setEnabled(False)
+    
+    def _on_config_location_clicked(self):
+        """点击配置按钮时打开位置配置对话框"""
+        from ui.dialogs.location_dialog import LocationConfigDialog
+        
+        # 传入主界面的课次配置
+        weekly_count = 2  # 每周重复模式默认值
+        odd_count = self.odd_times.value()  # 单周次数
+        even_count = self.even_times.value()  # 双周次数
+        
+        dialog = LocationConfigDialog(self, weekly_count, odd_count, even_count)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # 重新加载位置数据到下拉框，并选中"启用位置模板"
+            self._load_locations_to_combo(select_template=True)
+    
+    def _load_locations_to_combo(self, select_template=False):
+        """加载位置数据到下拉框
+        
+        Args:
+            select_template: 是否选中"启用位置模板"选项
+        """
+        self.combo_location.clear()
+        
+        # 加载用户自定义位置
+        user_locations = []
+        template_configured = False
+        try:
+            if os.path.exists(LOCATION_DATA_FILE):
+                with open(LOCATION_DATA_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    user_locations = data.get("customLocations", [])
+                    # 检查位置模板是否已配置（有课次配置）
+                    template = data.get("locationTemplate", {})
+                    slots = template.get("weeklySlots", []) or template.get("oddSlots", []) or template.get("evenSlots", [])
+                    template_configured = len(slots) > 0 and any(s is not None for s in slots)
+        except Exception as e:
+            print(f"加载位置数据失败: {e}")
+        
+        # 合并内置位置和用户自定义位置
+        built_in_locations = copy.deepcopy(DEFAULT_COMMON_LOCATIONS)
+        built_in_names = {loc.get("name") for loc in built_in_locations}
+        
+        # 合并：内置位置 + 用户自定义位置（排除与内置位置同名的）
+        locations = built_in_locations + [
+            loc for loc in user_locations 
+            if loc.get("name") not in built_in_names
+        ]
+        
+        if locations:
+            self.combo_location.clear()
+            
+            # 第一项：手动选择位置（默认）
+            self.combo_location.addItem("-- 手动选择位置 --", None)
+            
+            # 第二项：启用位置模板
+            template_text = "📋 启用位置模板" if template_configured else "📋 启用位置模板（未配置）"
+            self.combo_location.addItem(template_text, {"template": True})
+            
+            # 具体位置选项
+            for loc in locations:
+                name = loc.get("name", "")
+                self.combo_location.addItem(f"📍 {name}", loc)
+            
+            # 根据参数决定选中哪一项
+            if select_template and template_configured:
+                self.combo_location.setCurrentIndex(1)  # 选中"启用位置模板"
+            else:
+                self.combo_location.setCurrentIndex(0)  # 默认选中第一项
+            
+            # 更新按钮状态
+            self._update_location_ui_state()
 
     def on_show(self):
         self.clear_activities_list()
