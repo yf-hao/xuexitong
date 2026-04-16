@@ -53,11 +53,11 @@ class ActivitiesView(QWidget):
             
         self.btn_questionnaire.setEnabled(False)
         self.btn_questionnaire.setCursor(Qt.CursorShape.ArrowCursor)
-        self.btn_questionnaire.setText("📝 问卷 (敬请期待)")
+        self.btn_questionnaire.setText("📝 问卷")
         
         self.btn_practice.setEnabled(False)
         self.btn_practice.setCursor(Qt.CursorShape.ArrowCursor)
-        self.btn_practice.setText("✏️ 随堂练习 (敬请期待)")
+        self.btn_practice.setText("✏️ 随堂练习")
 
         self.layout.addWidget(self.btn_signin, 0, 0)
         self.layout.addWidget(self.btn_questionnaire, 0, 1)

@@ -290,13 +290,12 @@ class QuestionBankView(QWidget):
         """)
         layout.addWidget(self.question_title)
 
-        # 开发中提示
-        self.dev_hint = QLabel("🚧 开发中...")
+        # 初始提示
+        self.dev_hint = QLabel("💡 请在左侧选择文件夹查看题目")
         self.dev_hint.setStyleSheet("""
             QLabel {
-                color: #ff9800;
-                font-size: 24px;
-                font-weight: bold;
+                color: #888888;
+                font-size: 16px;
                 padding: 50px;
             }
         """)

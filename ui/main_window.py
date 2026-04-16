@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import Qt, QSettings, QCoreApplication
 from ui.workers import (CourseWorker, DetailsWorker, ClassWorker, MaterialWorker, DownloadWorker)
 from ui.styles import MAIN_STYLE
-from core.config import SIGNIN_DATA_FILE
+from core.config import SIGNIN_DATA_FILE, APP_TITLE
 from ui.views.stats_view import StatsView
 from ui.views.management_view import ManagementView
 from ui.views.activities_view import ActivitiesView
@@ -20,7 +20,7 @@ class MainWindow(QMainWindow):
     def __init__(self, crawler):
         super().__init__()
         self.crawler = crawler
-        self.setWindowTitle("学习通资料下载器")
+        self.setWindowTitle(APP_TITLE)
         self.resize(1200, 900)
         self.worker = None 
         self.details_worker = None
@@ -108,9 +108,6 @@ class MainWindow(QMainWindow):
         content_container = QWidget()
         content_layout = QVBoxLayout(content_container)
         content_layout.setContentsMargins(5, 0, 0, 0)
-        self.content_title = QLabel("资料列表")
-        self.content_title.setStyleSheet("font-size: 16px; color: #007acc; margin-bottom: 5px;")
-        content_layout.addWidget(self.content_title)
         
         # Stacked Widget for different views
         self.stacked_widget = QStackedWidget()
@@ -174,7 +171,7 @@ class MainWindow(QMainWindow):
         
         # Bottom Bar
         self.bottom_widget = QFrame()
-        self.bottom_widget.setFixedHeight(60)
+        self.bottom_widget.setFixedHeight(30)
         self.bottom_widget.setStyleSheet("background: transparent; border-top: 1px solid #252526;")
         bottom_bar = QHBoxLayout(self.bottom_widget)
         
@@ -369,15 +366,12 @@ class MainWindow(QMainWindow):
             
         self.status_label.setText(f"目录同步完成: {course.name}")
         self.nav_list.clearSelection()
-        self.content_title.setText("请选择课程菜单")
         self.download_btn.hide()
 
     def on_nav_selected(self, item):
         title = item.text()
         self.last_nav_title = title
         course = self.course_box.currentData()
-        
-        self.content_title.setText(title)
         
         if "资料" in title:
             self.stacked_widget.setCurrentIndex(0)

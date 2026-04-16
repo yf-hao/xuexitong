@@ -112,6 +112,9 @@ STAT_BUTTON_STYLE = """
         border: 1px solid #007acc;
         color: #007acc;
     }
+    QPushButton:disabled {
+        color: #666666;
+    }
 """
 
 STAT_CARD_CONTAINER_STYLE = """
