@@ -57,12 +57,19 @@ class LocationConfigDialog(QDialog):
         # 内置位置始终使用最新配置（如 range 从 300 改为 500）
         built_in_locations = copy.deepcopy(DEFAULT_COMMON_LOCATIONS)
         user_locations = user_data.get("customLocations", [])  # 用户自定义位置
+        hidden_built_in = user_data.get("hiddenBuiltInLocations", [])  # 被隐藏的内置位置
         
         # 获取内置位置名称列表，用于去重
         built_in_names = {loc.get("name") for loc in built_in_locations}
         
-        # 合并：内置位置 + 用户自定义位置（排除与内置位置同名的）
-        all_locations = built_in_locations + [
+        # 过滤掉被隐藏的内置位置
+        visible_built_in = [
+            loc for loc in built_in_locations
+            if loc.get("name") not in hidden_built_in
+        ]
+        
+        # 合并：可见的内置位置 + 用户自定义位置（排除与内置位置同名的）
+        all_locations = visible_built_in + [
             loc for loc in user_locations 
             if loc.get("name") not in built_in_names
         ]
@@ -70,7 +77,8 @@ class LocationConfigDialog(QDialog):
         return {
             "commonLocations": all_locations,  # 用于界面显示
             "customLocations": user_locations,  # 用户自定义位置（保存时使用）
-            "locationTemplate": user_data.get("locationTemplate", copy.deepcopy(DEFAULT_LOCATION_TEMPLATE))
+            "locationTemplate": user_data.get("locationTemplate", copy.deepcopy(DEFAULT_LOCATION_TEMPLATE)),
+            "hiddenBuiltInLocations": user_data.get("hiddenBuiltInLocations", [])  # 被隐藏的内置位置
         }
     
     def _save_location_data(self):
@@ -78,10 +86,11 @@ class LocationConfigDialog(QDialog):
         try:
             os.makedirs(os.path.dirname(LOCATION_DATA_FILE), exist_ok=True)
             
-            # 只保存用户自定义位置和位置模板，不保存内置位置
+            # 只保存用户自定义位置、被隐藏的内置位置和位置模板
             save_data = {
                 "customLocations": self.location_data.get("customLocations", []),
-                "locationTemplate": self.location_data.get("locationTemplate", {})
+                "locationTemplate": self.location_data.get("locationTemplate", {}),
+                "hiddenBuiltInLocations": self.location_data.get("hiddenBuiltInLocations", [])
             }
             
             with open(LOCATION_DATA_FILE, 'w', encoding='utf-8') as f:
@@ -120,6 +129,9 @@ class LocationConfigDialog(QDialog):
         # Tab 2: 常用位置管理
         tab_common = self._create_common_locations_tab()
         self.tab_widget.addTab(tab_common, "常用位置")
+        
+        # 监听Tab切换，切换到常用位置Tab时取消选中
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
         
         layout.addWidget(self.tab_widget)
         
@@ -514,13 +526,13 @@ class LocationConfigDialog(QDialog):
         # 经纬度
         edit_layout.addWidget(QLabel("纬度:"), 1, 0)
         self.edit_lat = QLineEdit()
-        self.edit_lat.setPlaceholderText("如: 34.723456")
+        self.edit_lat.setPlaceholderText("34.4034")
         self.edit_lat.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 3px; padding: 5px;")
         edit_layout.addWidget(self.edit_lat, 1, 1)
         
         edit_layout.addWidget(QLabel("经度:"), 1, 2)
         self.edit_lng = QLineEdit()
-        self.edit_lng.setPlaceholderText("如: 113.654321")
+        self.edit_lng.setPlaceholderText("113.7713")
         self.edit_lng.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 3px; padding: 5px;")
         edit_layout.addWidget(self.edit_lng, 1, 3)
         
@@ -528,9 +540,42 @@ class LocationConfigDialog(QDialog):
         edit_layout.addWidget(QLabel("范围(米):"), 2, 0)
         self.edit_range = QSpinBox()
         self.edit_range.setRange(10, 5000)
-        self.edit_range.setValue(100)
+        self.edit_range.setValue(300)
         self.edit_range.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 3px; padding: 3px;")
         edit_layout.addWidget(self.edit_range, 2, 1)
+        
+        # 导入导出按钮（放在范围后面）
+        btn_import = QPushButton("📥 导入")
+        btn_import.setStyleSheet("""
+            QPushButton {
+                background: #4a4a4a;
+                color: white;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #5a5a5a;
+            }
+        """)
+        btn_import.clicked.connect(self._on_import)
+        edit_layout.addWidget(btn_import, 2, 2)
+        
+        btn_export = QPushButton("📤 导出")
+        btn_export.setStyleSheet("""
+            QPushButton {
+                background: #4a4a4a;
+                color: white;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #5a5a5a;
+            }
+        """)
+        btn_export.clicked.connect(self._on_export)
+        edit_layout.addWidget(btn_export, 2, 3)
         
         layout.addWidget(edit_group)
         
@@ -560,13 +605,42 @@ class LocationConfigDialog(QDialog):
         
         return widget
     
+    def _on_tab_changed(self, index):
+        """Tab切换时处理"""
+        # 切换到常用位置Tab时，取消选中并清空编辑框
+        if index == 1:  # 常用位置Tab的索引
+            self.location_list.blockSignals(True)
+            self.location_list.setCurrentRow(-1)
+            self.location_list.blockSignals(False)
+            
+            # 清空编辑框
+            self.edit_name.clear()
+            self.edit_lat.clear()
+            self.edit_lng.clear()
+            self.edit_range.setValue(300)
+    
     def load_data_to_ui(self):
         """加载数据到UI"""
+        # 暂时断开信号，避免添加item时自动触发选中
+        self.location_list.blockSignals(True)
+        
         # 加载常用位置
         for loc in self.location_data.get("commonLocations", []):
             item = QListWidgetItem(loc.get("name", ""))
             item.setData(Qt.ItemDataRole.UserRole, loc)
             self.location_list.addItem(item)
+        
+        # 不默认选中任何位置
+        self.location_list.setCurrentRow(-1)
+        
+        # 恢复信号
+        self.location_list.blockSignals(False)
+        
+        # 清空编辑框
+        self.edit_name.clear()
+        self.edit_lat.clear()
+        self.edit_lng.clear()
+        self.edit_range.setValue(300)
         
         # 加载模板配置
         template = self.location_data.get("locationTemplate", {})
@@ -655,7 +729,7 @@ class LocationConfigDialog(QDialog):
         self.edit_name.setText(loc_data.get("name", ""))
         self.edit_lat.setText(str(loc_data.get("latitude", "")))
         self.edit_lng.setText(str(loc_data.get("longitude", "")))
-        self.edit_range.setValue(loc_data.get("range", 100))
+        self.edit_range.setValue(loc_data.get("range", 300))
     
     def _on_add_location(self):
         """新增位置"""
@@ -686,8 +760,8 @@ class LocationConfigDialog(QDialog):
         self.edit_name.clear()
         self.edit_lat.clear()
         self.edit_lng.clear()
-        self.edit_range.setValue(100)
-        
+        self.edit_range.setValue(300)
+
         # 更新位置模板下拉框
         self._refresh_template_combos()
     
@@ -731,13 +805,36 @@ class LocationConfigDialog(QDialog):
             QMessageBox.warning(self, "错误", "请先选择要删除的位置")
             return
         
-        reply = QMessageBox.question(
-            self, "确认删除",
-            "确定要删除这个位置吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
+        # 获取要删除的位置数据
+        item = self.location_list.item(row)
+        loc_data = item.data(Qt.ItemDataRole.UserRole)
+        loc_name = loc_data.get("name", "")
+        
+        # 判断是否为内置位置
+        built_in_names = {loc.get("name") for loc in DEFAULT_COMMON_LOCATIONS}
+        is_built_in = loc_name in built_in_names
+        
+        if is_built_in:
+            reply = QMessageBox.question(
+                self, "确认删除",
+                f"'{loc_name}' 是系统内置位置。\n\n删除后该位置将不再显示在列表中，但可以通过重置功能恢复。\n\n是否确定删除？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+        else:
+            reply = QMessageBox.question(
+                self, "确认删除",
+                "确定要删除这个位置吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
         
         if reply == QMessageBox.StandardButton.Yes:
+            # 如果是内置位置，添加到隐藏列表
+            if is_built_in:
+                hidden_list = self.location_data.get("hiddenBuiltInLocations", [])
+                if loc_name not in hidden_list:
+                    hidden_list.append(loc_name)
+                    self.location_data["hiddenBuiltInLocations"] = hidden_list
+            
             self.location_list.takeItem(row)
             # 更新位置模板下拉框
             self._refresh_template_combos()
@@ -835,3 +932,97 @@ class LocationConfigDialog(QDialog):
             self.accept()
         else:
             QMessageBox.warning(self, "错误", "保存失败")
+
+    def _on_export(self):
+        """导出用户自定义位置"""
+        from PyQt6.QtWidgets import QFileDialog
+        
+        # 获取用户自定义位置
+        custom_locations = self.location_data.get("customLocations", [])
+        
+        if not custom_locations:
+            QMessageBox.information(self, "提示", "暂无用户自定义位置可导出")
+            return
+        
+        # 选择保存路径
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出位置", "自定义位置.txt", "文本文件 (*.txt)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                for loc in custom_locations:
+                    name = loc.get("name", "")
+                    lat = loc.get("latitude", "")
+                    lng = loc.get("longitude", "")
+                    f.write(f"{name},{lat},{lng}\n")
+            
+            QMessageBox.information(self, "成功", f"已导出 {len(custom_locations)} 个位置")
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"导出失败: {e}")
+
+    def _on_import(self):
+        """导入位置"""
+        from PyQt6.QtWidgets import QFileDialog
+        
+        # 选择文件
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "导入位置", "", "文本文件 (*.txt)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            imported_count = 0
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    parts = line.split(',')
+                    if len(parts) < 3:
+                        continue
+                    
+                    name = parts[0].strip()
+                    try:
+                        lat = float(parts[1].strip())
+                        lng = float(parts[2].strip())
+                    except ValueError:
+                        continue
+                    
+                    # 检查是否已存在
+                    existing_names = {loc.get("name") for loc in self.location_data.get("customLocations", [])}
+                    if name in existing_names:
+                        continue
+                    
+                    # 添加新位置
+                    loc_data = {
+                        "name": name,
+                        "latitude": lat,
+                        "longitude": lng,
+                        "range": 500
+                    }
+                    self.location_data["customLocations"].append(loc_data)
+                    
+                    # 添加到列表
+                    item = QListWidgetItem(name)
+                    item.setData(Qt.ItemDataRole.UserRole, loc_data)
+                    self.location_list.addItem(item)
+                    
+                    imported_count += 1
+            
+            if imported_count > 0:
+                # 刷新模板下拉框
+                self._refresh_template_combos()
+                QMessageBox.information(self, "成功", f"成功导入 {imported_count} 个位置")
+            else:
+                QMessageBox.information(self, "提示", "没有新的位置被导入")
+        
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"导入失败: {e}")
+
