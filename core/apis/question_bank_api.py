@@ -25,7 +25,7 @@ class QuestionBankAPI:
                 tmp_path = tmp.name
             
             # 调用 upload_cover_image（来自 CourseManageAPI）
-            upload_result = self.upload_cover_image(tmp_path)
+            upload_result = self.upload_cover_image(tmp_path, upload_variant="question")
             
             if upload_result.get("success"):
                 url = upload_result.get("url", "")
@@ -745,6 +745,20 @@ class QuestionBankAPI:
         Returns:
             {"success": bool, "msg": str, "question_id": str}
         """
+        import os
+        from core.config import DATA_DIR
+
+        qbank_log_path = os.path.join(DATA_DIR, "qbank_submit_debug.log")
+
+        def log_submit(message: str):
+            line = f"[QBANK_SUBMIT] {message}"
+            print(line)
+            try:
+                with open(qbank_log_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except Exception:
+                pass
+
         params = self.session_manager.course_params
         
         if not course_id:
@@ -1344,7 +1358,7 @@ class QuestionBankAPI:
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                     tmp.write(png_bytes)
                     tmp_path = tmp.name
-                upload_result = self.upload_cover_image(tmp_path)
+                upload_result = self.upload_cover_image(tmp_path, upload_variant="question")
                 if upload_result.get("success"):
                     return upload_result.get("url", ""), img_w, img_h, None
                 else:
@@ -1403,13 +1417,14 @@ class QuestionBankAPI:
                     # 图片模式：替换为图片标签（优先使用图片）
                     placeholder = f"__MATH_IMG_{len(replacements)}__"
                     # 根据实际高度计算行数，每行高度 24px
+                    safe_alt = "math"
                     if h > 0:
                         import math
                         lines = math.ceil(h / 24)  # 向上取整得到行数
                         img_h = lines * 24  # 最终高度 = 行数 * 24
-                        img_html = f'<img src="{url}" alt="{expr}" style="vertical-align:middle; height:{img_h}px;"  />'
+                        img_html = f'<img src="{url}" alt="{safe_alt}" style="vertical-align:middle; height:{img_h}px;"  />'
                     else:
-                        img_html = f'<img src="{url}" alt="{expr}" style="vertical-align:middle; height:24px;"  />'
+                        img_html = f'<img src="{url}" alt="{safe_alt}" style="vertical-align:middle; height:24px;"  />'
                     
                     replacements[placeholder] = img_html
                     new_text = new_text.replace(m.group(0), placeholder, 1)
@@ -1500,6 +1515,8 @@ class QuestionBankAPI:
                         img_bytes = f.read()
                     
                     print(f"DEBUG: 读取图片成功，大小={len(img_bytes)} bytes")
+                    display_width_px = None
+                    display_height_px = None
                     
                     # 如果有缩放比例，实际缩放图片
                     if scale_percent is not None and scale_percent < 100:
@@ -1514,6 +1531,8 @@ class QuestionBankAPI:
                         scale_factor = scale_percent / 100.0
                         new_w = int(original_w * scale_factor)
                         new_h = int(original_h * scale_factor)
+                        display_width_px = new_w
+                        display_height_px = new_h
                         
                         print(f"DEBUG: 原始尺寸: {original_w}x{original_h}, 缩放比例: {scale_percent}%, 新尺寸: {new_w}x{new_h}")
                         
@@ -1540,9 +1559,12 @@ class QuestionBankAPI:
                         # 替换为超星URL
                         placeholder = f"__LOCAL_IMG_{len(replacements)}__"
                         
-                        # 图片已实际缩放，显示为100%宽度
+                        # 图片已实际缩放，按实际像素尺寸显示，避免被页面样式拉伸到整行
                         if scale_percent is not None:
-                            img_html = f'<img src="{upload_url}" alt="{alt_text_clean}" style="width:100%; height:auto;" />'
+                            if display_width_px and display_height_px:
+                                img_html = f'<img src="{upload_url}" alt="{alt_text_clean}" style="width:{display_width_px}px; height:{display_height_px}px;" />'
+                            else:
+                                img_html = f'<img src="{upload_url}" alt="{alt_text_clean}" style="width:auto; height:auto; max-width:100%;" />'
                         elif target_height_px is not None:
                             img_html = f'<img src="{upload_url}" alt="{alt_text_clean}" style="height:{target_height_px}px; width:auto; max-width:100%;" />'
                         else:
@@ -1878,6 +1900,15 @@ class QuestionBankAPI:
             "schoolTopicIds": "",
             "labelIdArr": ""
         }
+
+        if len(data["content"]) > 20000:
+            overflow_path = os.path.join(DATA_DIR, "qbank_content_overflow.html")
+            try:
+                with open(overflow_path, "w", encoding="utf-8") as f:
+                    f.write(data["content"])
+                log_submit(f"题干过长，已写入 {overflow_path}")
+            except Exception as write_error:
+                log_submit(f"题干过长，写入调试文件失败: {write_error}")
         
         # 添加选项 (A, B, C, D, E, F...)
         option_keys = ["A", "B", "C", "D", "E", "F", "G", "H"]
@@ -1893,10 +1924,20 @@ class QuestionBankAPI:
             data["defAnswer"] = "A" if answer in ["正确", "对", "T", "True", "A"] else "B"
         
         try:
+            option_snapshot = {k: data[k][:120] for k in option_keys if k in data}
+            log_submit(
+                "提交题目 "
+                f"url={url}, courseid={course_id}, clazzid={clazzid}, cpi={cpi}, "
+                f"folder_id={folder_id}, qType={q_type}, originType={data.get('originType')}, "
+                f"content_len={len(data.get('content', ''))}, analysis_len={len(data.get('answerAnalysis', ''))}, "
+                f"defAnswer={data.get('defAnswer', '')}, options={list(option_snapshot.keys())}"
+            )
+            log_submit(f"选项预览={option_snapshot}")
             resp = self.session.post(url, data=data, headers=headers, timeout=30)
             resp.raise_for_status()
             
             result = resp.json()
+            log_submit(f"响应 status_code={resp.status_code}, body={result}")
             print(f"DEBUG add_question: {result}")
             
             if isinstance(result, dict):
@@ -1908,14 +1949,17 @@ class QuestionBankAPI:
                         "question_id": str(result.get("id", ""))
                     }
                 else:
+                    log_submit(f"提交失败 msg={result.get('msg', '添加失败')}")
                     return {
                         "success": False,
                         "msg": result.get("msg", "添加失败")
                     }
             
+            log_submit("提交失败 未知错误")
             return {"success": False, "msg": "未知错误"}
             
         except Exception as e:
+            log_submit(f"提交异常 error={e}")
             print(f"添加题目失败: {e}")
             return {"success": False, "msg": str(e)}
     

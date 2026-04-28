@@ -2293,7 +2293,7 @@ class ManagementView(QWidget):
         self.status_callback(f"正在上传图片: {file_path}")
 
         # 同步上传图片（可以使用worker改为异步）
-        result = self.crawler.upload_cover_image(file_path)
+        result = self.crawler.upload_cover_image(file_path, course_id=course_id, cpi=cpi)
 
         if result.get("success"):
             image_url = result.get("url", "")

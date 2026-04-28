@@ -270,104 +270,254 @@ class CourseManageAPI:
             traceback.print_exc()
             return {"success": False, "error": f"获取学期列表失败: {e}"}
 
-    def upload_cover_image(self, image_path: str) -> dict:
+    def upload_cover_image(
+        self,
+        image_path: str,
+        course_id: str = "",
+        cpi: str = "",
+        upload_variant: str = "cover",
+    ) -> dict:
         """上传图片到超星服务器，返回图片URL"""
         try:
-            import base64
+            import html
             import time
-
-            print(f"DEBUG 访问课程创建页面获取uid和enc2...")
-            boxtip_url = "https://mooc2-gray.chaoxing.com/mooc2-ans/visit/course/boxtip"
-            params = {
-                "type": "5",
-                "isFirefly": "0"
-            }
-            headers = {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Connection": "keep-alive",
-                "Referer": "https://mooc2-gray.chaoxing.com/visit/interaction",
-                "Sec-Fetch-Dest": "iframe",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
-            }
-
-            response = self.session.get(boxtip_url, params=params, headers=headers, timeout=10)
-            print(f"DEBUG 课程创建页面状态: {response.status_code}")
-
-            uid = ""
-            enc2 = ""
-            upload_timestamp = None
-            html_text = response.text
             import re
+            import os
+            import requests
+            from core.config import DATA_DIR
 
-            pattern = r'uploadBase64\?uid=(\d+)&enc2=([a-f0-9]+)&t=(\d+)'
-            match = re.search(pattern, html_text)
+            log_tag = "QUESTION_UPLOAD" if upload_variant == "question" else "COVER_UPLOAD"
+            log_filename = "question_upload_debug.log" if upload_variant == "question" else "cover_upload_debug.log"
+            log_path = os.path.join(DATA_DIR, log_filename)
 
-            if match:
-                uid = match.group(1)
-                enc2 = match.group(2)
-                upload_timestamp = match.group(3)
-                print(f"DEBUG 从HTML解析: uid={uid}, enc2={enc2}, t={upload_timestamp}")
-            else:
-                print(f"DEBUG 未能从HTML中解析enc2，尝试备用方法...")
+            def log(message: str):
+                line = f"[{log_tag}] {message}"
+                print(line)
                 try:
-                    cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
-                    uid = cookies_dict.get("UID", "")
-                    enc2 = cookies_dict.get("xxtenc", "")
-                    print(f"DEBUG 从cookies获取: UID={uid}, xxtenc={enc2}")
-                    upload_timestamp = str(int(time.time() * 1000))
-                except Exception as e:
-                    print(f"DEBUG 获取cookies时出错: {e}")
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(line + "\n")
+                except Exception:
+                    pass
 
+            def parse_upload_url(html_text: str, source: str) -> str:
+                if not html_text:
+                    return ""
+                full_upload_match = re.search(
+                    r'((?:https:)?//mooc1\.chaoxing\.com/upload-ans/edit/uploadBase64\?[^"\'\s>]+|/upload-ans/edit/uploadBase64\?[^"\'\s>]+)',
+                    html_text,
+                )
+                if not full_upload_match:
+                    return ""
+                found_url = html.unescape(full_upload_match.group(1)).replace("\\/", "/")
+                if found_url.startswith("//"):
+                    found_url = f"https:{found_url}"
+                elif found_url.startswith("/"):
+                    found_url = f"https://mooc1.chaoxing.com{found_url}"
+                url_match = re.search(r"[?&]uid=([^&]+).*?[?&]enc2=([^&]+).*?[?&]t=([^&]+)", found_url)
+                if url_match:
+                    nonlocal_uid[0] = nonlocal_uid[0] or url_match.group(1)
+                    nonlocal_enc2[0] = url_match.group(2)
+                    nonlocal_upload_timestamp[0] = url_match.group(3)
+                log(f"从{source}解析完整上传URL={found_url}")
+                return found_url
+
+            params = getattr(self.session_manager, "course_params", {}) or {}
+            course_id = course_id or params.get("courseid", "") or params.get("courseId", "")
+            cpi = cpi or params.get("cpi", "")
+            clazz_id = params.get("clazzid", "") or params.get("classId", "") or params.get("clazzId", "")
+            enc = params.get("enc", "")
+            openc = params.get("openc", "")
+            manage_t = params.get("t", "")
+            uid = params.get("uid", "") or params.get("_uid", "")
             if not uid:
-                uid = self.session_manager.course_params.get('uid', '')
+                uid = next((cookie.value for cookie in self.session.cookies if cookie.name in {"UID", "_uid"}), "")
+            log(
+                "上下文 "
+                f"variant={upload_variant}, "
+                f"course_id={course_id}, clazz_id={clazz_id}, cpi={cpi}, "
+                f"enc={enc}, openc={openc}, t={manage_t}, uid={uid}"
+            )
+
+            upload_timestamp = str(int(time.time() * 1000))
+            upload_url = ""
+            enc2 = ""
+            nonlocal_uid = [uid]
+            nonlocal_enc2 = [enc2]
+            nonlocal_upload_timestamp = [upload_timestamp]
+
+            if upload_variant == "cover" and course_id and cpi:
+                manage_url = (
+                    "https://mooc2-gray.chaoxing.com/mooc2-ans/tcm/course-manage"
+                    f"?courseid={course_id}&clazzid={clazz_id}&courseId={course_id}"
+                    f"&classId={clazz_id}&clazzId={clazz_id}&cpi={cpi}"
+                    f"&enc={enc}&openc={openc}&t={manage_t or upload_timestamp}&ut=t&loadContentType=0"
+                )
+                manage_headers = {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Pragma": "no-cache",
+                    "Referer": "https://mooc2-gray.chaoxing.com/",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                    "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"macOS"',
+                }
+                manage_response = self.session.get(manage_url, headers=manage_headers, timeout=10)
+                log(f"课程管理页 status={manage_response.status_code} url={manage_url}")
+                if manage_response.status_code == 200:
+                    upload_url = parse_upload_url(manage_response.text, "课程管理页") or upload_url
+
+                log("访问课程设置页面获取 uploadEnc")
+                setting_url = "https://mooc2-gray.chaoxing.com/mooc2-ans/tcm/getcoursesetting"
+                setting_params = {
+                    "courseId": course_id,
+                    "cpi": cpi,
+                    "v": "0",
+                    "leftNavigation": "0",
+                }
+                setting_headers = {
+                    "Accept": "text/html, */*; q=0.01",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Pragma": "no-cache",
+                    "Referer": manage_url,
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "same-origin",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"macOS"',
+                }
+                setting_response = self.session.get(setting_url, params=setting_params, headers=setting_headers, timeout=10)
+                log(f"课程设置页 status={setting_response.status_code} url={setting_response.url}")
+                if setting_response.status_code == 200:
+                    setting_html = setting_response.text
+                    upload_url = parse_upload_url(setting_html, "课程设置页") or upload_url
+                    hidden_fields = re.findall(
+                        r'<input[^>]*type=["\']hidden["\'][^>]*id=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']',
+                        setting_html,
+                        flags=re.IGNORECASE,
+                    )
+                    if hidden_fields:
+                        log(f"课程设置页 hidden_fields={hidden_fields[:20]}")
+
+                    current_time_match = re.search(
+                        r'id=["\']currentTime["\'][^>]*value=["\']([^"\']+)["\']',
+                        setting_html,
+                    )
+                    if current_time_match:
+                        nonlocal_upload_timestamp[0] = current_time_match.group(1)
+                        log(f"课程设置页 hidden currentTime={nonlocal_upload_timestamp[0]}")
+                    else:
+                        upload_timestamp_match = re.search(
+                            r'id=["\']uploadTimeStamp["\'][^>]*value=["\']([^"\']+)["\']',
+                            setting_html,
+                        )
+                        if upload_timestamp_match:
+                            nonlocal_upload_timestamp[0] = upload_timestamp_match.group(1)
+                            log(f"课程设置页 hidden uploadTimeStamp={nonlocal_upload_timestamp[0]}")
+
+                    upload_enc_match = re.search(r'id=["\']uploadEnc["\'][^>]*value=["\']([a-fA-F0-9]+)["\']', setting_html)
+                    if upload_enc_match:
+                        enc2 = upload_enc_match.group(1)
+                        nonlocal_enc2[0] = enc2
+                        log(f"课程设置页 hidden uploadEnc={enc2}，已作为封面上传 enc2")
+                    else:
+                        log("课程设置页未找到 uploadEnc")
+
+            uid = nonlocal_uid[0]
+            enc2 = nonlocal_enc2[0]
+            upload_timestamp = nonlocal_upload_timestamp[0]
+
+            should_use_boxtip = not (upload_variant == "cover" and enc2)
+            if should_use_boxtip:
+                log("访问课程创建页面获取 uid/enc2")
+                boxtip_url = "https://mooc2-gray.chaoxing.com/mooc2-ans/visit/course/boxtip"
+                params = {
+                    "type": "5",
+                    "isFirefly": "0"
+                }
+                headers = {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Connection": "keep-alive",
+                    "Referer": "https://mooc2-gray.chaoxing.com/visit/interaction",
+                    "Sec-Fetch-Dest": "iframe",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+                }
+
+                response = self.session.get(boxtip_url, params=params, headers=headers, timeout=10)
+                log(f"课程创建页 status={response.status_code}")
+
+                html_text = response.text
+                if not upload_url:
+                    upload_url = parse_upload_url(html_text, "boxtip页面") or upload_url
+
+                pattern = r'uploadBase64\?uid=(\d+)&enc2=([a-f0-9]+)&t=(\d+)'
+                match = re.search(pattern, html_text)
+
+                if match:
+                    uid = uid or match.group(1)
+                    enc2 = enc2 or match.group(2)
+                    upload_timestamp = match.group(3)
+                    log(f"从 boxtip 解析 uid={uid}, enc2={enc2}, t={upload_timestamp}")
+                elif not enc2:
+                    log("未能从 boxtip 解析 enc2，尝试 cookies")
+                    try:
+                        cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
+                        uid = uid or cookies_dict.get("UID", "") or cookies_dict.get("_uid", "")
+                        enc2 = cookies_dict.get("xxtenc", "")
+                        log(f"从 cookies 获取 uid={uid}, xxtenc={enc2}")
+                        upload_timestamp = str(int(time.time() * 1000))
+                    except Exception as e:
+                        log(f"获取 cookies 失败: {e}")
+            else:
+                log("cover 场景已从课程设置页拿到 enc2，跳过 boxtip")
+
             if not enc2:
                 enc2 = self.session_manager.course_params.get('enc2', '')
 
-            print(f"DEBUG 最终获取: uid={uid}, enc2={enc2}")
+            log(f"最终使用 uid={uid}, enc2={enc2}, variant={upload_variant}")
 
-            if upload_timestamp:
-                upload_url = f"https://mooc-upload-ans.chaoxing.com/edit/uploadBase64?uid={uid}&enc2={enc2}&t={upload_timestamp}"
-            else:
-                timestamp = int(time.time() * 1000)
-                upload_url = f"https://mooc-upload-ans.chaoxing.com/edit/uploadBase64?uid={uid}&enc2={enc2}&t={timestamp}"
+            if not upload_url:
+                timestamp = upload_timestamp or str(int(time.time() * 1000))
+                upload_url = f"https://mooc1.chaoxing.com/upload-ans/edit/uploadBase64?uid={uid}&enc2={enc2}&t={timestamp}"
 
             referer_url = "https://mooc2-gray.chaoxing.com/"
 
-            import os
             headers = {
                 'Accept': 'application/json, text/javascript, */*; q=0.01',
                 'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5',
+                'Cache-Control': 'no-cache',
                 'Connection': 'keep-alive',
                 'Origin': 'https://mooc2-gray.chaoxing.com',
+                'Pragma': 'no-cache',
                 'Referer': referer_url,
                 'Sec-Fetch-Dest': 'empty',
                 'Sec-Fetch-Mode': 'cors',
                 'Sec-Fetch-Site': 'same-site',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-                'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+                'sec-ch-ua': '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"macOS"'
             }
-
-            print(f"DEBUG 正在获取上传所需的cookies...")
-            upload_domain = "https://mooc-upload-ans.chaoxing.com/"
-            try:
-                self.session.get(upload_domain, timeout=10)
-                upload_cookies = [c for c in self.session.cookies if 'upload' in c.domain or c.name in ['jroseupload', 'k8s-upload', 'route']]
-                print(f"DEBUG 获取到的上传cookies数量: {len(upload_cookies)}")
-                for cookie in upload_cookies:
-                    print(f"DEBUG   - {cookie.name}: {cookie.value[:30]}...")
-            except Exception as e:
-                print(f"DEBUG 访问上传域名时出错（继续尝试）: {e}")
-
-            print(f"DEBUG 上传URL: {upload_url}")
-            print(f"DEBUG 文件路径: {image_path}")
-            print(f"DEBUG 原始文件名: {os.path.basename(image_path)}")
+            log(f"上传请求头={headers}")
+            log(f"上传URL={upload_url}")
+            log(f"文件路径={image_path}, 原始文件名={os.path.basename(image_path)}")
 
             ext = os.path.splitext(image_path)[1].lower()
             mime_type_map = {
@@ -378,34 +528,47 @@ class CourseManageAPI:
                 '.bmp': 'image/bmp'
             }
             mime_type = mime_type_map.get(ext, 'image/png')
-            file_type = ext[1:] if ext else 'png'
+            from datetime import datetime, timezone
+            utc_now = datetime.now(timezone.utc)
+            filename_timestamp = utc_now.strftime("%Y-%m-%dT%H-%M-%S-") + f"{int(utc_now.microsecond / 1000):03d}Z"
+            filename_ext = ext if ext in mime_type_map else ".png"
+            filename = f"course-{filename_timestamp}{filename_ext}"
 
-            from datetime import datetime
-            timestamp = datetime.now().isoformat().replace(':', '-').replace('.', '-')
-            filename = f"course-{timestamp}.png"
-
-            print(f"DEBUG MIME类型: {mime_type}")
-            print(f"DEBUG 文件类型字段: {file_type}")
-            print(f"DEBUG 生成的文件名: {filename}")
+            log(f"MIME类型={mime_type}, 生成文件名={filename}")
 
             with open(image_path, 'rb') as f:
-                files = {
-                    'filePart': (filename, f, mime_type)
-                }
-                data = {
-                    'fileType': file_type,
-                    'name': filename
-                }
+                import secrets
 
-                print(f"DEBUG 上传multipart/form-data: filePart={filename}, fileType={file_type}, name={filename}")
+                file_bytes = f.read()
+                boundary = f"----WebKitFormBoundary{secrets.token_hex(8)}"
+                body = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="filePart"; filename="{filename}"\r\n'
+                    f"Content-Type: {mime_type}\r\n\r\n"
+                ).encode("utf-8") + file_bytes + (
+                    f"\r\n--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="fileType"\r\n\r\n'
+                    f"{filename_ext.lstrip('.')}\r\n"
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="name"\r\n\r\n'
+                    f"{filename}\r\n"
+                    f"--{boundary}--\r\n"
+                ).encode("utf-8")
+                log(
+                    "上传 multipart: "
+                    f"filePart={filename}, fileType={filename_ext.lstrip('.')}, name={filename}, "
+                    f"boundary={boundary}, bytes={len(body)}, cookies=none"
+                )
                 upload_headers = headers.copy()
-                upload_headers.pop('Content-Type', None)
-                response = self.session.post(upload_url, files=files, data=data, headers=upload_headers, timeout=30)
+                upload_headers['Content-Type'] = f'multipart/form-data; boundary={boundary}'
+                upload_headers['Content-Length'] = str(len(body))
+                log(f"最终上传请求头={upload_headers}")
+                response = requests.post(upload_url, data=body, headers=upload_headers, timeout=30)
 
             response.encoding = 'utf-8'
 
-            print(f"DEBUG upload_cover_image status: {response.status_code}")
-            print(f"DEBUG upload_cover_image response: {response.text[:500]}")
+            log(f"上传响应 status={response.status_code}")
+            log(f"上传响应 body={response.text[:500]}")
 
             if response.status_code != 200:
                 return {"success": False, "error": f"上传失败: HTTP {response.status_code}"}
@@ -424,7 +587,10 @@ class CourseManageAPI:
                 return {"success": False, "error": f"上传失败: {error_msg}"}
 
         except Exception as e:
-            print(f"DEBUG upload_cover_image error: {e}")
+            try:
+                log(f"异常: {e}")
+            except Exception:
+                print(f"DEBUG upload_cover_image error: {e}")
             import traceback
             traceback.print_exc()
             return {"success": False, "error": f"上传失败: {e}"}

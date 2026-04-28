@@ -56,6 +56,7 @@ LATEX_TO_UNICODE_MAP = [
     (r'\subseteq', '⊆'),         # 子集或等于
     (r'\supseteq', '⊇'),         # 超集或等于
     (r'\emptyset', '∅'),         # 空集
+    (r'\varnothing', '∅'),       # 空集（变体）
     
     # 基本符号
     (r'\subset', '⊂'),           # 真子集
@@ -77,6 +78,8 @@ LATEX_TO_UNICODE_MAP = [
     (r'\geq', '≥'),              # 大于等于
     (r'\neq', '≠'),              # 不等于
     (r'\in', '∈'),               # 属于
+    (r'\bigcup', '⋃'),          # 大并集
+    (r'\bigcap', '⋂'),          # 大交集
     (r'\cup', '∪'),              # 并集
     (r'\cap', '∩'),              # 交集
     (r'\circ', '∘'),             # 函数复合
@@ -94,6 +97,7 @@ LATEX_TO_UNICODE_MAP = [
     (r'\empty', '∅'),            # 空集
     (r'\wedge', '∧'),            # 逻辑与
     (r'\vee', '∨'),              # 逻辑或
+    (r'\sim', '∼'),              # 相似/等价关系
     (r'\ldots', '…'),            # 省略号
     (r'\lrarr', '↔'),            # 双向箭头
 ]
@@ -102,7 +106,7 @@ LATEX_TO_UNICODE_MAP = [
 # 包含：基本字符 + 数学符号 + Unicode 下标 + Unicode 上标
 SIMPLE_UNICODE_PATTERN = (
     r'^[a-zA-Z0-9\s\(\)\[\]\{\}|+\-=,.\'\';:\!'
-    r'¬∀∃∧∨→↔⇒⟺∈⊂⊃⊆⊇∪∩∅≤≥≠≈≡±×÷∞…⊈⊉⊄⊅⟨⟩∘·•∗⋆⊕⊗⊙≼≽≺≻'
+    r'¬∀∃∧∨→↔⇒⟺∈⊂⊃⊆⊇∪∩∅≤≥≠≈≡±×÷∞…⊈⊉⊄⊅⟨⟩∘·•∗⋆⊕⊗⊙≼≽≺≻∼'
     r'₀₁₂₃₄₅₆₇₈₉ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀᴛᴜᴠᴡʏᴢ₊₋₌₍₎'
     r'⁰¹²³⁴⁵⁶⁷⁸⁹ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ⁺⁻⁼⁽⁾'
     r']+$'
@@ -195,7 +199,8 @@ def latex_to_unicode(latex_expr):
         return m.group(0)
     
     # 匹配 R_1、[x]_R 或 R_{12} 格式（支持 [] 包裹的变量，支持负号）
-    result = re.sub(r'([a-zA-Z0-9\[\]]+)_\{?([a-zA-Z0-9\-]+)\}?', replace_subscript, result)
+    # 使用 (?<![a-zA-Z0-9\[\]\\]) 确保前面不是同类字符或反斜杠，避免匹配 LaTeX 命令中的下标（如 \bigcup_{x}）
+    result = re.sub(r'(?<![a-zA-Z0-9\[\]\\])([a-zA-Z0-9\[\]]+)_\{?([a-zA-Z0-9\-]+)\}?', replace_subscript, result)
     
     # 2. 处理上标: x^2 → x², x^{10} → x¹⁰, R^{-1} → R⁻¹
     def replace_superscript(m):
@@ -209,7 +214,8 @@ def latex_to_unicode(latex_expr):
         return m.group(0)
     
     # 匹配 x^2、[x]^2 或 x^{10} 格式（支持 [] 包裹的变量，支持负号和加号）
-    result = re.sub(r'([a-zA-Z0-9\[\]]+)\^\{?([a-zA-Z0-9\-\+]+)\}?', replace_superscript, result)
+    # 使用 (?<![a-zA-Z0-9\[\]\\]) 避免匹配 LaTeX 命令中的上标
+    result = re.sub(r'(?<![a-zA-Z0-9\[\]\\])([a-zA-Z0-9\[\]]+)\^\{?([a-zA-Z0-9\-\+]+)\}?', replace_superscript, result)
     
     # 3. 尖括号转换: < → ⟨, > → ⟩
     # 注意：先处理 LaTeX 命令 \langle 和 \rangle
@@ -287,7 +293,7 @@ def apply_latex_unicode_map(text):
     Examples:
         >>> apply_latex_unicode_map(r"R_1 \\circ R_2")
         'R₁ ∘ R₂'
-        >>> apply_latex_unicode_map(r"a \land b")
+        >>> apply_latex_unicode_map(r"a \\land b")
         'a ∧ b'
     """
     result = text
