@@ -30,11 +30,8 @@ a = Analysis(
     ],
     excludes=[
         'tkinter',
-        'matplotlib',
-        'numpy',
         'pandas',
         'scipy',
-        'PIL',
     ],
     noarchive=False,
 )

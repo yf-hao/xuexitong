@@ -36,11 +36,8 @@ a = Analysis(
         'Crypto.Cipher.AES',
     ],
     excludes=[
-        'matplotlib',
-        'numpy',
         'pandas',
         'scipy',
-        'PIL',
         'tkinter',
     ],
     noarchive=False,

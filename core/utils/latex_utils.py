@@ -13,6 +13,11 @@ SUBSCRIPT_MAP = {
     'k': 'ₖ', 'l': 'ₗ', 'm': 'ₘ', 'n': 'ₙ', 'o': 'ₒ',
     'p': 'ₚ', 'r': 'ᵣ', 's': 'ₛ', 't': 'ₜ', 'u': 'ᵤ',
     'v': 'ᵥ', 'x': 'ₓ',
+    'A': 'ᴀ', 'B': 'ʙ', 'C': 'ᴄ', 'D': 'ᴅ', 'E': 'ᴇ',
+    'F': 'ꜰ', 'G': 'ɢ', 'H': 'ʜ', 'I': 'ɪ', 'J': 'ᴊ',
+    'K': 'ᴋ', 'L': 'ʟ', 'M': 'ᴍ', 'N': 'ɴ', 'O': 'ᴏ',
+    'P': 'ᴘ', 'R': 'ʀ', 'T': 'ᴛ', 'U': 'ᴜ', 'V': 'ᴠ',
+    'W': 'ᴡ', 'Y': 'ʏ', 'Z': 'ᴢ',
     '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎'
 }
 
@@ -62,6 +67,12 @@ LATEX_TO_UNICODE_MAP = [
     (r'\forall', '∀'),           # 全称量词
     (r'\exists', '∃'),           # 存在量词
     (r'\to', '→'),               # 箭头
+    (r'\preceq', '≼'),          # 偏序小于等于
+    (r'\succeq', '≽'),          # 偏序大于等于
+    (r'\preccurlyeq', '≼'),      # 偏序小于等于（变体）
+    (r'\succcurlyeq', '≽'),      # 偏序大于等于（变体）
+    (r'\prec', '≺'),             # 偏序小于
+    (r'\succ', '≻'),             # 偏序大于
     (r'\leq', '≤'),              # 小于等于
     (r'\geq', '≥'),              # 大于等于
     (r'\neq', '≠'),              # 不等于
@@ -91,8 +102,8 @@ LATEX_TO_UNICODE_MAP = [
 # 包含：基本字符 + 数学符号 + Unicode 下标 + Unicode 上标
 SIMPLE_UNICODE_PATTERN = (
     r'^[a-zA-Z0-9\s\(\)\[\]\{\}|+\-=,.\'\';:\!'
-    r'¬∀∃∧∨→↔⇒⟺∈⊂⊃⊆⊇∪∩∅≤≥≠≈≡±×÷∞…⊈⊉⊄⊅⟨⟩∘·•∗⋆⊕⊗⊙'
-    r'₀₁₂₃₄₅₆₇₈₉ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ₊₋₌₍₎'
+    r'¬∀∃∧∨→↔⇒⟺∈⊂⊃⊆⊇∪∩∅≤≥≠≈≡±×÷∞…⊈⊉⊄⊅⟨⟩∘·•∗⋆⊕⊗⊙≼≽≺≻'
+    r'₀₁₂₃₄₅₆₇₈₉ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀᴛᴜᴠᴡʏᴢ₊₋₌₍₎'
     r'⁰¹²³⁴⁵⁶⁷⁸⁹ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ⁺⁻⁼⁽⁾'
     r']+$'
 )
@@ -178,9 +189,10 @@ def latex_to_unicode(latex_expr):
         sub = m.group(2)  # 下标内容（如 1, {12}）
         # 移除花括号（如果有）
         sub = sub.replace('{', '').replace('}', '')
-        # 转换下标为 Unicode
-        sub_unicode = convert_subscript(sub)
-        return var + sub_unicode
+        # 仅当下标所有字符都在映射表中时才转换，否则保留原样以便渲染为图片
+        if all(c in SUBSCRIPT_MAP for c in sub):
+            return var + convert_subscript(sub)
+        return m.group(0)
     
     # 匹配 R_1 或 R_{12} 或 10_2 格式（支持负号，支持数字开头的变量）
     result = re.sub(r'([a-zA-Z0-9]+)_\{?([a-zA-Z0-9\-]+)\}?', replace_subscript, result)
@@ -191,9 +203,10 @@ def latex_to_unicode(latex_expr):
         sup = m.group(2)  # 上标内容
         # 移除花括号
         sup = sup.replace('{', '').replace('}', '')
-        # 转换上标为 Unicode
-        sup_unicode = convert_superscript(sup)
-        return var + sup_unicode
+        # 仅当上标所有字符都在映射表中时才转换，否则保留原样以便渲染为图片
+        if all(c in SUPERSCRIPT_MAP for c in sup):
+            return var + convert_superscript(sup)
+        return m.group(0)
     
     # 匹配 x^2 或 x^{10} 或 R^{-1} 或 10^{-3} 格式（支持负号和加号，支持数字开头的变量）
     result = re.sub(r'([a-zA-Z0-9]+)\^\{?([a-zA-Z0-9\-\+]+)\}?', replace_superscript, result)
