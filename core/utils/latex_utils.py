@@ -194,8 +194,8 @@ def latex_to_unicode(latex_expr):
             return var + convert_subscript(sub)
         return m.group(0)
     
-    # 匹配 R_1 或 R_{12} 或 10_2 格式（支持负号，支持数字开头的变量）
-    result = re.sub(r'([a-zA-Z0-9]+)_\{?([a-zA-Z0-9\-]+)\}?', replace_subscript, result)
+    # 匹配 R_1、[x]_R 或 R_{12} 格式（支持 [] 包裹的变量，支持负号）
+    result = re.sub(r'([a-zA-Z0-9\[\]]+)_\{?([a-zA-Z0-9\-]+)\}?', replace_subscript, result)
     
     # 2. 处理上标: x^2 → x², x^{10} → x¹⁰, R^{-1} → R⁻¹
     def replace_superscript(m):
@@ -208,8 +208,8 @@ def latex_to_unicode(latex_expr):
             return var + convert_superscript(sup)
         return m.group(0)
     
-    # 匹配 x^2 或 x^{10} 或 R^{-1} 或 10^{-3} 格式（支持负号和加号，支持数字开头的变量）
-    result = re.sub(r'([a-zA-Z0-9]+)\^\{?([a-zA-Z0-9\-\+]+)\}?', replace_superscript, result)
+    # 匹配 x^2、[x]^2 或 x^{10} 格式（支持 [] 包裹的变量，支持负号和加号）
+    result = re.sub(r'([a-zA-Z0-9\[\]]+)\^\{?([a-zA-Z0-9\-\+]+)\}?', replace_superscript, result)
     
     # 3. 尖括号转换: < → ⟨, > → ⟩
     # 注意：先处理 LaTeX 命令 \langle 和 \rangle
@@ -285,7 +285,7 @@ def apply_latex_unicode_map(text):
         转换后的 Unicode 文本
     
     Examples:
-        >>> apply_latex_unicode_map(r"R_1 \circ R_2")
+        >>> apply_latex_unicode_map(r"R_1 \\circ R_2")
         'R₁ ∘ R₂'
         >>> apply_latex_unicode_map(r"a \land b")
         'a ∧ b'
