@@ -197,6 +197,13 @@ class KaTeXSnapshotRenderer:
         return cls._render_to_png_in_gui_thread(expr, display_mode)
 
     @classmethod
+    def warmup(cls):
+        """Pre-initialize the rendering engine in the background."""
+        # Just render an empty string to trigger singleton initialization
+        # We don't care about the result.
+        cls.render_to_png("")
+
+    @classmethod
     def _render_to_png_in_gui_thread(cls, expr: str, display_mode: bool = False) -> tuple[bytes, int, int] | None:
         try:
             from PyQt6.QtCore import QBuffer, QByteArray, QEventLoop, QIODevice, QTimer, Qt, QUrl
