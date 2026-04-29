@@ -809,8 +809,53 @@ class QuestionBankAPI:
 
                 expr_render = expr.strip()
                 print(f"DEBUG render_math_expr: 表达式前100字符: {expr_render[:100]}")
-                
-                # 检查是否包含中文字符，如果包含则跳过渲染（matplotlib 不支持中文）
+
+                def normalize_formula_png(
+                    png_bytes: bytes,
+                    expr_for_scale: str,
+                    actual_line_count: int = 1,
+                    pixel_density: float = 1.0,
+                ):
+                    from PIL import Image
+
+                    im = Image.open(BytesIO(png_bytes))
+                    original_w, original_h = im.width, im.height
+                    target_height = max(actual_line_count, 1) * 24 * pixel_density
+                    has_integral_symbols = bool(re2.search(r'\\int|\\iint|\\iiint|\\oint', expr_for_scale))
+                    has_tall_symbols = bool(re2.search(r'\\int|\\sum|\\prod|\\sqrt|\\frac|\^|\_', expr_for_scale))
+                    tall_symbol_max_height = (48 if has_integral_symbols else 36) * pixel_density
+
+                    if has_tall_symbols:
+                        if im.height > tall_symbol_max_height:
+                            scale = tall_symbol_max_height / im.height
+                            new_w = max(int(im.width * scale), 1)
+                            im = im.resize((new_w, tall_symbol_max_height), Image.LANCZOS)
+                            print(
+                                f"DEBUG render_math_expr: 高公式缩放从 {original_w}x{original_h} 到 {new_w}x{tall_symbol_max_height}"
+                            )
+                        else:
+                            print(f"DEBUG render_math_expr: 高公式保持原尺寸 {original_w}x{original_h}")
+                    elif im.height > target_height:
+                        scale = target_height / im.height
+                        new_w = max(int(im.width * scale), 1)
+                        im = im.resize((new_w, target_height), Image.LANCZOS)
+                        print(
+                            f"DEBUG render_math_expr: 缩放图片从 {original_w}x{original_h} 到 {new_w}x{target_height}"
+                        )
+
+                    max_w = 800
+                    if im.width > max_w:
+                        new_h = max(int(im.height * max_w / im.width), 1)
+                        im = im.resize((max_w, new_h), Image.LANCZOS)
+
+                    final_w, final_h = im.width, im.height
+                    print(f"DEBUG render_math_expr: 最终尺寸={final_w}x{final_h}")
+
+                    buf = BytesIO()
+                    im.save(buf, format="PNG", optimize=True)
+                    return buf.getvalue(), final_w, final_h
+                 
+                 # 检查是否包含中文字符，如果包含则跳过渲染（matplotlib 不支持中文）
                 has_chinese = bool(re2.search(r'[\u4e00-\u9fff]', expr_render))
                 if has_chinese:
                     print(f"DEBUG render_math_expr: 包含中文字符，跳过渲染，返回文本")
@@ -829,6 +874,38 @@ class QuestionBankAPI:
                     r'\\int|\\sum|\\prod|\\Big|\\bigg|\\Bigg|\\big|\\oint|\\iint|\\iiint|\\lim|\\sup|\\inf|\\max|\\min',
                     expr_render
                 ))
+
+                def try_katex_render(latex_expr):
+                    """优先使用本地 KaTeX 渲染复杂公式，保持题库上传逻辑与 UI 详情页解耦。"""
+                    try:
+                        from core.rendering.katex_snapshot import KaTeXSnapshotRenderer
+
+                        display_mode = bool(
+                            has_matrix
+                            or re2.search(r'\\begin\{|\\\\|\\frac|\\dfrac|\\tfrac|\\sqrt|\\sum|\\int', latex_expr)
+                        )
+                        print(f"DEBUG render_math_expr: 尝试本地 KaTeX 渲染，display_mode={display_mode}")
+                        rendered = KaTeXSnapshotRenderer.render_to_png(latex_expr, display_mode=display_mode)
+                        if not rendered:
+                            print("DEBUG render_math_expr: KaTeX 渲染失败，切换下一级")
+                            return None
+ 
+                        png_bytes, local_w, local_h = rendered
+                        png_bytes, _, _ = normalize_formula_png(
+                            png_bytes,
+                            latex_expr,
+                            pixel_density=KaTeXSnapshotRenderer._CAPTURE_SCALE,
+                        )
+                        upload_url = self.upload_image_bytes(png_bytes, f"katex_{hash(latex_expr)}.png")
+                        if not upload_url:
+                            print("DEBUG render_math_expr: KaTeX 图片上传失败，切换下一级")
+                            return None
+ 
+                        print(f"DEBUG render_math_expr: KaTeX 渲染成功，尺寸={local_w}x{local_h}")
+                        return upload_url, local_w, local_h, latex_expr.strip()
+                    except Exception as e:
+                        print(f"DEBUG render_math_expr: KaTeX 渲染异常: {e}")
+                        return None
                 
                 def try_codecogs_api(latex_expr):
                     """使用 CodeCogs 在线 API 渲染 LaTeX，超时5秒"""
@@ -872,14 +949,10 @@ class QuestionBankAPI:
                         img_data = response.read()
                         
                         print(f"DEBUG render_math_expr: CodeCogs API 成功，图片大小={len(img_data)} bytes")
-                        
+                         
                         if img_data and len(img_data) > 100:  # 确保下载了有效图片
-                            # 获取图片尺寸
-                            from PIL import Image
-                            import io
-                            img = Image.open(io.BytesIO(img_data))
-                            img_w, img_h = img.size
-                            
+                            img_data, img_w, img_h = normalize_formula_png(img_data, latex_expr)
+                             
                             # 上传图片
                             upload_url = self.upload_image_bytes(img_data, f"codecogs_{hash(latex_expr)}.png")
                             if upload_url:
@@ -900,14 +973,18 @@ class QuestionBankAPI:
                         print(f"DEBUG render_math_expr: CodeCogs API 超时或失败: {str(e)}，切换到 matplotlib")
                         return None
                 
-                # 对于复杂命令，优先尝试 CodeCogs API
+                # 对于复杂命令，优先尝试 KaTeX，本地失败后再回退 CodeCogs
                 if has_matrix or has_complex_commands:
                     if has_matrix:
-                        print(f"DEBUG render_math_expr: 包含矩阵环境，优先使用 CodeCogs API")
+                        print(f"DEBUG render_math_expr: 包含矩阵环境，优先使用 KaTeX")
                     else:
-                        print(f"DEBUG render_math_expr: 包含复杂命令（积分/求和/大括号等），优先使用 CodeCogs API")
-                    
-                    # 尝试 CodeCogs API
+                        print(f"DEBUG render_math_expr: 包含复杂命令（积分/求和/大括号等），优先使用 KaTeX")
+
+                    result = try_katex_render(expr_render)
+                    if result:
+                        return result
+
+                    print("DEBUG render_math_expr: KaTeX 失败，尝试 CodeCogs API")
                     result = try_codecogs_api(expr_render)
                     if result:
                         return result
@@ -1133,7 +1210,11 @@ class QuestionBankAPI:
                 if is_simple:
                     print(f"DEBUG render_math_expr: 转换后只包含简单Unicode符号，返回文本: {expr_text}")
                     return None, 0, 0, expr_text
-                
+
+                katex_result = try_katex_render(expr_render)
+                if katex_result:
+                    return katex_result
+                 
                 # 预处理：替换不支持的命令为 matplotlib 支持的命令（用于渲染）
                 
                 # Unicode 符号转换为 LaTeX 命令（后面加空格避免粘连）
@@ -1305,47 +1386,7 @@ class QuestionBankAPI:
                     im = Image.open(BytesIO(png_bytes))
                     img_w, img_h = im.width, im.height
 
-                # 缩放：限制最大宽度，并缩放到合适的高度
-                from PIL import Image
-                im = Image.open(BytesIO(png_bytes))
-                
-                # 计算目标高度：使用实际行数
-                base_height_per_line = 24  # 每行基础高度
-                target_height = actual_line_count * base_height_per_line
-                
-                # 检测是否包含高符号（积分、求和、根号、分数等）
-                has_tall_symbols = bool(re2.search(r'\\int|\\sum|\\prod|\\sqrt|\\frac|\^|\_', expr_render))
-                
-                if has_tall_symbols:
-                    # 如果包含高符号，不强制缩放高度，保持原始高度
-                    # 但如果太高（超过36px），则适当缩放
-                    if im.height > 36:
-                        scale = 36 / im.height
-                        new_w = int(im.width * scale)
-                        im = im.resize((new_w, 36), Image.LANCZOS)
-                        print(f"DEBUG render_math_expr: 高公式缩放从 {img_w}x{img_h} 到 {new_w}x36")
-                    else:
-                        print(f"DEBUG render_math_expr: 高公式保持原尺寸 {img_w}x{img_h}")
-                else:
-                    # 普通公式：缩放到目标高度
-                    if im.height > target_height:
-                        scale = target_height / im.height
-                        new_w = int(im.width * scale)
-                        im = im.resize((new_w, target_height), Image.LANCZOS)
-                        print(f"DEBUG render_math_expr: 缩放图片从 {img_w}x{img_h} 到 {new_w}x{target_height}")
-                
-                # 限制最大宽度
-                max_w = 800
-                if im.width > max_w:
-                    new_h = int(im.height * max_w / im.width)
-                    im = im.resize((max_w, new_h), Image.LANCZOS)
-                    
-                img_w, img_h = im.width, im.height
-                print(f"DEBUG render_math_expr: 最终尺寸={img_w}x{img_h}")
-                
-                buf2 = BytesIO()
-                im.save(buf2, format="PNG", optimize=True)
-                png_bytes = buf2.getvalue()
+                png_bytes, img_w, img_h = normalize_formula_png(png_bytes, expr_render, actual_line_count)
             except Exception as e:
                 print(f"DEBUG 渲染公式失败 {expr}: {e}")
                 import traceback
@@ -1416,15 +1457,20 @@ class QuestionBankAPI:
                 if url:
                     # 图片模式：替换为图片标签（优先使用图片）
                     placeholder = f"__MATH_IMG_{len(replacements)}__"
-                    # 根据实际高度计算行数，每行高度 24px
                     safe_alt = "math"
                     if h > 0:
                         import math
-                        lines = math.ceil(h / 24)  # 向上取整得到行数
-                        img_h = lines * 24  # 最终高度 = 行数 * 24
-                        img_html = f'<img src="{url}" alt="{safe_alt}" style="vertical-align:middle; height:{img_h}px;"  />'
+                        lines = math.ceil(h / 24)
+                        display_h = max(lines * 24, 24)
+                        img_html = (
+                            f'<img src="{url}" alt="{safe_alt}" '
+                            f'style="vertical-align:middle; height:{display_h}px; width:auto; max-width:100%;" />'
+                        )
                     else:
-                        img_html = f'<img src="{url}" alt="{safe_alt}" style="vertical-align:middle; height:24px;"  />'
+                        img_html = (
+                            f'<img src="{url}" alt="{safe_alt}" '
+                            f'style="vertical-align:middle; height:24px; width:auto; max-width:100%;" />'
+                        )
                     
                     replacements[placeholder] = img_html
                     new_text = new_text.replace(m.group(0), placeholder, 1)

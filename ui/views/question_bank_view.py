@@ -879,7 +879,12 @@ class QuestionBankView(QWidget):
             # 刷新根目录
             self.load_folders()
             return
-        
+
+        parent_folder_id = parent_item.data(0, Qt.ItemDataRole.UserRole)
+        if parent_folder_id == "root":
+            self.load_folders()
+            return
+         
         # 重置加载状态，下次点击时会重新加载
         parent_item.setData(0, Qt.ItemDataRole.UserRole + 1, False)
         
