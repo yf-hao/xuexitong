@@ -132,11 +132,17 @@ class KaTeXSnapshotRenderer:
     <div id="formula"></div>
     <script src="file://{katex_dir_url}/katex.min.js"></script>
     <script>
+        window.checkReady = () => {{
+            return typeof katex !== "undefined";
+        }};
         window.renderFormula = (expr, displayMode) => {{
             const root = document.getElementById("formula");
             root.innerHTML = "";
             window.__renderError = "";
             try {{
+                if (typeof katex === "undefined") {{
+                    throw new Error("KaTeX not loaded");
+                }}
                 katex.render(expr, root, {{
                     displayMode: displayMode,
                     throwOnError: true,
@@ -219,23 +225,23 @@ class KaTeXSnapshotRenderer:
             cls._is_initializing = True
 
             # Load base environment
-            import tempfile
             base_html = cls._build_base_html()
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as tmp:
-                tmp.write(base_html)
-                tmp_path = tmp.name
             
             loop = QEventLoop()
             cls._shared_view.loadFinished.connect(lambda: loop.quit())
-            cls._shared_view.load(QUrl.fromLocalFile(tmp_path))
-            QTimer.singleShot(8000, loop.quit)
+            # Use setHtml with baseUrl for better reliability in CI
+            cls._shared_view.setHtml(base_html, QUrl.fromLocalFile(cls._KATEX_DIR + os.sep))
+            QTimer.singleShot(10000, loop.quit)
             loop.exec()
             
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
+            # Additional check for JS readiness
+            for _ in range(50):
+                if run_js_async("window.checkReady && window.checkReady()"):
+                    break
+                loop = QEventLoop()
+                QTimer.singleShot(200, loop.quit)
+                loop.exec()
+            
             cls._is_initializing = False
 
         view = cls._shared_view
