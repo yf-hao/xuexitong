@@ -132,7 +132,7 @@ class KaTeXSnapshotRenderer:
     <div id="formula"></div>
     <script src="file://{katex_dir_url}/katex.min.js"></script>
     <script>
-        window.renderFormula = async (expr, displayMode) => {{
+        window.renderFormula = (expr, displayMode) => {{
             const root = document.getElementById("formula");
             root.innerHTML = "";
             window.__renderError = "";
@@ -144,18 +144,14 @@ class KaTeXSnapshotRenderer:
                     trust: false
                 }});
                 
-                // Wait for fonts to be ready
-                if (document.fonts && document.fonts.ready) {{
-                    await document.fonts.ready;
-                }}
-                
                 const rect = root.getBoundingClientRect();
                 return {{
                     width: rect.width,
                     height: rect.height,
                     scrollWidth: root.scrollWidth,
                     scrollHeight: root.scrollHeight,
-                    ok: true
+                    ok: true,
+                    fontsReady: !document.fonts || document.fonts.status === 'loaded'
                 }};
             }} catch (error) {{
                 window.__renderError = error.message || String(error);
@@ -260,9 +256,18 @@ class KaTeXSnapshotRenderer:
         display_json = "true" if display_mode else "false"
         render_script = f"window.renderFormula({expr_json}, {display_json})"
         
-        # Execute render and get dimensions
-        info = run_js_async(render_script)
-        
+        # Execute render and get dimensions with polling for fonts
+        info = None
+        for _ in range(50):
+            info = run_js_async(render_script)
+            if isinstance(info, dict) and info.get("ok") and info.get("fontsReady"):
+                break
+            # Wait a bit for fonts
+            loop = QEventLoop()
+            QTimer.singleShot(100, loop.quit)
+            loop.exec()
+            app.processEvents()
+
         if not isinstance(info, dict) or not info.get("ok"):
             return None
 
