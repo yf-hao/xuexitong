@@ -1,9 +1,6 @@
 name: Build and Release
 
 on:
-  push:
-    branches:
-      - main  # 当你推送到 main 分支时自动触发检查
   workflow_dispatch:
 
 jobs:
