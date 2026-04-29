@@ -215,39 +215,91 @@ class KaTeXSnapshotRenderer:
             app = QApplication(argv)
             app.setQuitOnLastWindowClosed(False)
 
-        # 1. Ensure Shared View and Environment
-        if cls._shared_view is None:
-            cls._shared_view = QWebEngineView()
-            cls._shared_view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-            cls._shared_view.setZoomFactor(cls._CAPTURE_SCALE)
-            cls._shared_view.page().setBackgroundColor(QColor(255, 255, 255, 255))
-            cls._shared_view.show()
-            cls._is_initializing = True
+        # 1. Try Shared View (Singleton)
+        try:
+            if cls._shared_view is None:
+                cls._shared_view = QWebEngineView()
+                cls._shared_view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+                cls._shared_view.setZoomFactor(cls._CAPTURE_SCALE)
+                cls._shared_view.page().setBackgroundColor(QColor(255, 255, 255, 255))
+                cls._shared_view.show()
+                cls._is_initializing = True
 
-            # Load base environment
-            base_html = cls._build_base_html()
+                # Load base environment
+                base_html = cls._build_base_html()
+                
+                loop = QEventLoop()
+                cls._shared_view.loadFinished.connect(lambda: loop.quit())
+                # Use setHtml with baseUrl
+                cls._shared_view.setHtml(base_html, QUrl.fromLocalFile(cls._KATEX_DIR + os.sep))
+                QTimer.singleShot(10000, loop.quit)
+                loop.exec()
+                
+                # Additional check for JS readiness
+                for _ in range(50):
+                    if cls._perform_js_check(cls._shared_view, "window.checkReady && window.checkReady()"):
+                        break
+                    loop = QEventLoop()
+                    QTimer.singleShot(200, loop.quit)
+                    loop.exec()
+                
+                cls._is_initializing = False
+
+            # Try rendering with shared view
+            result = cls._perform_render(cls._shared_view, expr, display_mode)
+            if result:
+                return result
+        except Exception as e:
+            print(f"Shared renderer failed: {e}")
+
+        # 2. Fallback to One-off View (More robust for CI)
+        try:
+            temp_view = QWebEngineView()
+            temp_view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            temp_view.setZoomFactor(cls._CAPTURE_SCALE)
+            temp_view.page().setBackgroundColor(QColor(255, 255, 255, 255))
+            temp_view.show()
             
+            base_html = cls._build_base_html()
             loop = QEventLoop()
-            cls._shared_view.loadFinished.connect(lambda: loop.quit())
-            # Use setHtml with baseUrl for better reliability in CI
-            cls._shared_view.setHtml(base_html, QUrl.fromLocalFile(cls._KATEX_DIR + os.sep))
+            temp_view.loadFinished.connect(lambda: loop.quit())
+            temp_view.setHtml(base_html, QUrl.fromLocalFile(cls._KATEX_DIR + os.sep))
             QTimer.singleShot(10000, loop.quit)
             loop.exec()
             
-            # Additional check for JS readiness
-            for _ in range(50):
-                if run_js_async("window.checkReady && window.checkReady()"):
-                    break
-                loop = QEventLoop()
-                QTimer.singleShot(200, loop.quit)
-                loop.exec()
-            
-            cls._is_initializing = False
+            result = cls._perform_render(temp_view, expr, display_mode)
+            temp_view.deleteLater()
+            return result
+        except Exception as e:
+            print(f"Fallback renderer failed: {e}")
+            return None
 
-        view = cls._shared_view
+    @classmethod
+    def _perform_js_check(cls, view, script):
+        loop = QEventLoop()
+        res = {"v": None}
+        def on_res(v):
+            res["v"] = v
+            loop.quit()
+        view.page().runJavaScript(script, on_res)
+        QTimer.singleShot(5000, loop.quit)
+        loop.exec()
+        return res.get("v")
 
-        # 2. Dynamic Update (Lightning Fast)
-        def run_js_async(script: str, timeout_ms: int = 5000):
+    @classmethod
+    def _perform_render(cls, view, expr: str, display_mode: bool = False) -> tuple[bytes, int, int] | None:
+        try:
+            from PyQt6.QtCore import QBuffer, QByteArray, QEventLoop, QTimer, Qt
+            from PyQt6.QtWidgets import QApplication
+        except Exception:
+            return None
+
+        app = QApplication.instance()
+        expr_json = json.dumps(expr)
+        display_json = "true" if display_mode else "false"
+        render_script = f"window.renderFormula({expr_json}, {display_json})"
+        
+        def run_js_sync(script: str, timeout_ms: int = 5000):
             loop = QEventLoop()
             res = {}
             def on_res(v):
@@ -258,14 +310,10 @@ class KaTeXSnapshotRenderer:
             loop.exec()
             return res.get("v")
 
-        expr_json = json.dumps(expr)
-        display_json = "true" if display_mode else "false"
-        render_script = f"window.renderFormula({expr_json}, {display_json})"
-        
         # Execute render and get dimensions with polling for fonts
         info = None
         for _ in range(50):
-            info = run_js_async(render_script)
+            info = run_js_sync(render_script)
             if isinstance(info, dict) and info.get("ok") and info.get("fontsReady"):
                 break
             # Wait a bit for fonts
@@ -275,6 +323,8 @@ class KaTeXSnapshotRenderer:
             app.processEvents()
 
         if not isinstance(info, dict) or not info.get("ok"):
+            if isinstance(info, dict) and "error" in info:
+                print(f"KaTeX Render Error: {info['error']}")
             return None
 
         # 3. Snapshot and Capture
