@@ -97,23 +97,12 @@ class KaTeXSnapshotRenderer:
         )
 
     @classmethod
-    def _build_html(cls, expr: str, display_mode: bool) -> str:
-        """Build a minimal HTML that references KaTeX files via file:// links.
-
-        IMPORTANT: We must NOT inline katex.min.css (1.4 MB) or katex.min.js
-        (271 KB) into the HTML string.  Qt's setHtml() truncates content larger
-        than ~2 MB, which silently breaks KaTeX rendering.  Instead we write a
-        thin HTML that uses <link> / <script src> tags pointing to the actual
-        files on disk so the browser can stream them without size limits.
-        """
-        expr_json = json.dumps(expr)
-        display_json = "true" if display_mode else "false"
-        # Use POSIX-style path so QUrl.fromLocalFile can parse it correctly on
-        # all platforms (Windows included via Qt's own normalisation).
+    def _build_base_html(cls) -> str:
+        """Build the skeleton HTML that loads KaTeX once."""
         katex_dir_url = cls._KATEX_DIR.replace("\\", "/")
         if not katex_dir_url.startswith("/"):
-            # Windows absolute path like C:/... → needs a leading slash for file URL
             katex_dir_url = "/" + katex_dir_url
+        
         return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -133,6 +122,8 @@ class KaTeXSnapshotRenderer:
             display: inline-block;
             padding: 1px 4px 3px 4px;
             background: #ffffff;
+            min-width: 1px;
+            min-height: 1px;
         }}
     </style>
     <link rel="stylesheet" href="file://{katex_dir_url}/katex.min.css">
@@ -141,21 +132,36 @@ class KaTeXSnapshotRenderer:
     <div id="formula"></div>
     <script src="file://{katex_dir_url}/katex.min.js"></script>
     <script>
-        (() => {{
+        window.renderFormula = async (expr, displayMode) => {{
             const root = document.getElementById("formula");
+            root.innerHTML = "";
             window.__renderError = "";
             try {{
-                katex.render({expr_json}, root, {{
-                    displayMode: {display_json},
+                katex.render(expr, root, {{
+                    displayMode: displayMode,
                     throwOnError: true,
                     strict: "ignore",
                     trust: false
                 }});
+                
+                // Wait for fonts to be ready
+                if (document.fonts && document.fonts.ready) {{
+                    await document.fonts.ready;
+                }}
+                
+                const rect = root.getBoundingClientRect();
+                return {{
+                    width: rect.width,
+                    height: rect.height,
+                    scrollWidth: root.scrollWidth,
+                    scrollHeight: root.scrollHeight,
+                    ok: true
+                }};
             }} catch (error) {{
-                window.__renderError = error && error.message ? error.message : String(error);
-                root.textContent = "";
+                window.__renderError = error.message || String(error);
+                return {{ ok: false, error: window.__renderError }};
             }}
-        }})();
+        }};
     </script>
 </body>
 </html>"""
@@ -206,7 +212,7 @@ class KaTeXSnapshotRenderer:
             app = QApplication(argv)
             app.setQuitOnLastWindowClosed(False)
 
-        # Singleton view to avoid Chromium re-init overhead
+        # 1. Ensure Shared View and Environment
         if cls._shared_view is None:
             cls._shared_view = QWebEngineView()
             cls._shared_view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
@@ -215,124 +221,90 @@ class KaTeXSnapshotRenderer:
             cls._shared_view.show()
             cls._is_initializing = True
 
-        view = cls._shared_view
-        html = cls._build_html(expr, display_mode)
-
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".html", delete=False, encoding="utf-8"
-        )
-        tmp_path = tmp.name
-        try:
-            tmp.write(html)
-        finally:
-            tmp.close()
-
-        load_loop = QEventLoop()
-        load_state = {"ok": False}
-
-        def on_load_finished(ok: bool):
-            load_state["ok"] = ok
-            load_loop.quit()
-
-        view.loadFinished.connect(on_load_finished)
-        view.load(QUrl.fromLocalFile(tmp_path))
-        
-        # Longer timeout for first load, shorter for subsequent
-        timeout = 8000 if cls._is_initializing else 3000
-        QTimer.singleShot(timeout, load_loop.quit)
-        load_loop.exec()
-        
-        try:
-            view.loadFinished.disconnect(on_load_finished)
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
-        
-        cls._is_initializing = False
-
-        if not load_state["ok"]:
-            return None
-
-        def run_js(script: str, timeout_ms: int = 4000):
+            # Load base environment
+            import tempfile
+            base_html = cls._build_base_html()
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as tmp:
+                tmp.write(base_html)
+                tmp_path = tmp.name
+            
             loop = QEventLoop()
-            result_holder = {}
-            def on_result(result):
-                result_holder["value"] = result
+            cls._shared_view.loadFinished.connect(lambda: loop.quit())
+            cls._shared_view.load(QUrl.fromLocalFile(tmp_path))
+            QTimer.singleShot(8000, loop.quit)
+            loop.exec()
+            
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            cls._is_initializing = False
+
+        view = cls._shared_view
+
+        # 2. Dynamic Update (Lightning Fast)
+        def run_js_async(script: str, timeout_ms: int = 5000):
+            loop = QEventLoop()
+            res = {}
+            def on_res(v):
+                res["v"] = v
                 loop.quit()
-            view.page().runJavaScript(script, on_result)
+            view.page().runJavaScript(script, on_res)
             QTimer.singleShot(timeout_ms, loop.quit)
             loop.exec()
-            return result_holder.get("value")
+            return res.get("v")
 
-        # Probe for readiness and dimensions
-        js_probe = f"""
-            (async () => {{
-                const scale = {cls._CAPTURE_SCALE};
-                const root = document.getElementById('formula');
-                if (!root) return {{ error: 'missing formula root' }};
-
-                // Wait for KaTeX and fonts
-                let retries = 50;
-                while (retries-- > 0) {{
-                    const katexNode = root.querySelector('.katex');
-                    const fontsReady = !document.fonts || document.fonts.status === 'loaded';
-                    if (katexNode && fontsReady) break;
-                    await new Promise(r => setTimeout(r, 50));
-                }}
-
-                const rect = root.getBoundingClientRect();
-                const rawWidth = Math.max(rect.width, root.scrollWidth);
-                const rawHeight = Math.max(rect.height, root.scrollHeight);
-                const extraPadding = 4;
-                
-                return {{
-                    width: Math.ceil((rawWidth + extraPadding) * scale),
-                    height: Math.ceil((rawHeight + extraPadding) * scale),
-                    logicalWidth: Math.ceil(rawWidth + extraPadding),
-                    logicalHeight: Math.ceil(rawHeight + extraPadding),
-                    hasKatex: !!root.querySelector('.katex'),
-                    error: window.__renderError || ''
-                }};
-            }})();
-        """
-
-        result = run_js(js_probe)
-        if not isinstance(result, dict) or result.get("error") or not result.get("hasKatex"):
+        expr_json = json.dumps(expr)
+        display_json = "true" if display_mode else "false"
+        render_script = f"window.renderFormula({expr_json}, {display_json})"
+        
+        # Execute render and get dimensions
+        info = run_js_async(render_script)
+        
+        if not isinstance(info, dict) or not info.get("ok"):
             return None
 
-        capture_width = max(int(result.get("width") or 0), 1)
-        capture_height = max(int(result.get("height") or 0), 1)
-        logical_width = max(int(result.get("logicalWidth") or 0), 1)
-        logical_height = max(int(result.get("logicalHeight") or 0), 1)
+        # 3. Snapshot and Capture
+        scale = cls._CAPTURE_SCALE
+        raw_w = info.get("width") or info.get("scrollWidth") or 1
+        raw_h = info.get("height") or info.get("scrollHeight") or 1
+        padding = 4
         
-        view.resize(capture_width, capture_height)
+        # Use simple Math helper since we don't have math import here easily
+        def ceil(x): return int(x) + (1 if x > int(x) else 0)
+        
+        capture_w = ceil((raw_w + padding) * scale)
+        capture_h = ceil((raw_h + padding) * scale)
+        logical_w = ceil(raw_w + padding)
+        logical_h = ceil(raw_h + padding)
+
+        view.resize(capture_w, capture_h)
         app.processEvents()
 
-        # Final capture grab
+        # Brief wait for resize and paint stability
         grab_loop = QEventLoop()
-        pixmap_holder = {}
+        pix_holder = {}
         def do_grab():
-            pixmap_holder["pixmap"] = view.grab()
+            pix_holder["pix"] = view.grab()
             grab_loop.quit()
         
-        QTimer.singleShot(100, do_grab)
-        QTimer.singleShot(2000, grab_loop.quit)
+        QTimer.singleShot(50, do_grab)
+        QTimer.singleShot(1500, grab_loop.quit)
         grab_loop.exec()
 
-        pixmap = pixmap_holder.get("pixmap")
-        if pixmap is None or pixmap.isNull():
+        pix = pix_holder.get("pix")
+        if pix is None or pix.isNull():
             return None
 
-        image = pixmap.toImage()
+        image = pix.toImage()
         if cls._looks_blank(image):
             return None
 
-        byte_array = QByteArray()
-        buffer = QBuffer(byte_array)
-        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        image.save(buffer, "PNG")
-        buffer.close()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buf, "PNG")
+        buf.close()
         
-        return bytes(byte_array), logical_width, logical_height
+        return bytes(ba), logical_w, logical_h
