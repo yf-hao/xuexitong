@@ -107,14 +107,11 @@ class KaTeXSnapshotRenderer:
     @classmethod
     def _build_base_html(cls) -> str:
         """Build the skeleton HTML that loads KaTeX once."""
-        katex_dir_url = cls._KATEX_DIR.replace("\\", "/")
-        if not katex_dir_url.startswith("/"):
-            katex_dir_url = "/" + katex_dir_url
-        
         return f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
+    <link rel="stylesheet" href="katex.min.css">
     <style>
         html, body {{
             margin: 0;
@@ -134,11 +131,10 @@ class KaTeXSnapshotRenderer:
             min-height: 1px;
         }}
     </style>
-    <link rel="stylesheet" href="file://{katex_dir_url}/katex.min.css">
 </head>
 <body>
     <div id="formula"></div>
-    <script src="file://{katex_dir_url}/katex.min.js"></script>
+    <script src="katex.min.js"></script>
     <script>
         window.checkReady = () => {{
             return typeof katex !== "undefined";
