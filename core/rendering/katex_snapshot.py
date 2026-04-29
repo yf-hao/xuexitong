@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from functools import lru_cache
 
 from core.config import BASE_DIR
@@ -91,7 +92,10 @@ class KaTeXSnapshotRenderer:
         app = QApplication.instance()
         created_app = False
         if app is None:
-            app = QApplication([])
+            # QWebEngine (Chromium) requires argv[0] to be the program name;
+            # passing an empty list causes "Argument list is empty" crash.
+            argv = sys.argv if sys.argv else ["katex_snapshot"]
+            app = QApplication(argv)
             created_app = True
             app.setQuitOnLastWindowClosed(False)
 
