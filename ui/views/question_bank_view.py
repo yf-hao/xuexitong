@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLabel, QFrame, QFileDialog, QMenu, QDialog,
     QLineEdit, QDialogButtonBox, QMessageBox, QSplitter, QInputDialog,
-    QApplication, QAbstractItemView
+    QApplication, QAbstractItemView, QProgressDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QEvent, QThread
 from PyQt6.QtGui import QIcon, QAction, QKeySequence, QShortcut
@@ -153,6 +153,7 @@ class CreateFolderDialog(QDialog):
 
 class QuestionUploadWorker(QThread):
     progress = pyqtSignal(str)
+    step = pyqtSignal(int, int)  # current, total
     finished = pyqtSignal(dict)
 
     def __init__(self, crawler, folder_id: str, questions: list, base_dir: str | None = None):
@@ -171,6 +172,7 @@ class QuestionUploadWorker(QThread):
         try:
             for index, question in enumerate(self.questions, start=1):
                 self.progress.emit(f"正在上传第 {index}/{total} 道题目...")
+                self.step.emit(index, total)
                 result = self.crawler.add_question(self.folder_id, question, base_dir=self.base_dir)
 
                 if result.get("success"):
@@ -1078,9 +1080,26 @@ class QuestionBankView(QWidget):
             base_dir = os.path.dirname(self.selected_file) if hasattr(self, 'selected_file') and self.selected_file else None
             self._upload_refresh_parent_item = item.parent()
             self._upload_worker = QuestionUploadWorker(self.crawler, folder_id, questions, base_dir=base_dir)
+            
+            # 创建并配置进度对话框
+            progress_dialog = QProgressDialog("正在准备上传...", "取消", 0, len(questions), self)
+            progress_dialog.setWindowTitle("上传题目")
+            progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setAutoClose(True)
+            
+            # 连接信号
+            self._upload_worker.progress.connect(progress_dialog.setLabelText)
+            self._upload_worker.step.connect(lambda cur, total: progress_dialog.setValue(cur))
             self._upload_worker.progress.connect(self.status_update.emit)
+            
+            self._upload_worker.finished.connect(lambda _: progress_dialog.close())
             self._upload_worker.finished.connect(self._handle_upload_finished)
             self._upload_worker.finished.connect(self._upload_worker.deleteLater)
+            
+            # 处理取消上传
+            progress_dialog.canceled.connect(self._upload_worker.terminate) # 简单暴力
+            
             self._upload_worker.start()
             
         except Exception as e:
