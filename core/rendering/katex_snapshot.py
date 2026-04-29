@@ -58,6 +58,29 @@ class KaTeXSnapshotRenderer:
     _CAPTURE_SCALE = 2
 
     @classmethod
+    def _looks_blank(cls, image) -> bool:
+        width = image.width()
+        height = image.height()
+        if width <= 0 or height <= 0:
+            return True
+
+        step_x = max(width // 120, 1)
+        step_y = max(height // 120, 1)
+        non_white_samples = 0
+        total_samples = 0
+
+        for y in range(0, height, step_y):
+            for x in range(0, width, step_x):
+                color = image.pixelColor(x, y)
+                total_samples += 1
+                if color.alpha() < 245 or color.red() < 245 or color.green() < 245 or color.blue() < 245:
+                    non_white_samples += 1
+                    if non_white_samples >= 8:
+                        return False
+
+        return non_white_samples == 0 or (total_samples > 0 and non_white_samples / total_samples < 0.003)
+
+    @classmethod
     @lru_cache(maxsize=1)
     def _load_assets(cls) -> tuple[str, str, str]:
         def read_asset(name: str) -> str:
@@ -84,7 +107,7 @@ class KaTeXSnapshotRenderer:
         html, body {{
             margin: 0;
             padding: 0;
-            background: #ffffff;
+            background: transparent;
             overflow: visible;
         }}
         body {{
@@ -94,7 +117,7 @@ class KaTeXSnapshotRenderer:
         #formula {{
             display: inline-block;
             padding: 1px 4px 3px 4px;
-            background: #ffffff;
+            background: transparent;
         }}
     </style>
     <style>{katex_css}</style>
@@ -177,7 +200,7 @@ class KaTeXSnapshotRenderer:
         view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         view.resize(32, 32)
         view.setZoomFactor(cls._CAPTURE_SCALE)
-        view.page().setBackgroundColor(QColor(255, 255, 255, 255))
+        view.page().setBackgroundColor(QColor(0, 0, 0, 0))
         view.show()
 
         load_loop = QEventLoop()
@@ -302,6 +325,11 @@ class KaTeXSnapshotRenderer:
             return None
 
         image = pixmap.toImage()
+        if cls._looks_blank(image):
+            view.close()
+            if created_app:
+                app.processEvents()
+            return None
         byte_array = QByteArray()
         buffer = QBuffer(byte_array)
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
