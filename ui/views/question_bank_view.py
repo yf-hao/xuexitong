@@ -648,13 +648,6 @@ class QuestionBankView(QWidget):
     def on_show(self):
         """视图显示时调用"""
         self.load_folders()
-        
-        # 在进入题库时预热 KaTeX 渲染引擎
-        try:
-            from core.rendering.katex_snapshot import KaTeXSnapshotRenderer
-            KaTeXSnapshotRenderer.warmup()
-        except Exception as e:
-            print(f"KaTeX warmup failed: {e}")
 
     def _add_folder_item(self, parent: QTreeWidgetItem, folder_data: dict):
         """递归添加文件夹项"""
