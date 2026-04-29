@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QDialogButtonBox, QMessageBox, QSplitter, QInputDialog,
     QApplication, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QEvent, QThread
 from PyQt6.QtGui import QIcon, QAction, QKeySequence, QShortcut
 from PyQt6.QtWebEngineCore import QWebEnginePage
 
@@ -151,6 +151,56 @@ class CreateFolderDialog(QDialog):
         return self.name_input.text().strip()
 
 
+class QuestionUploadWorker(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+
+    def __init__(self, crawler, folder_id: str, questions: list, base_dir: str | None = None):
+        super().__init__()
+        self.crawler = crawler
+        self.folder_id = folder_id
+        self.questions = questions
+        self.base_dir = base_dir
+
+    def run(self):
+        success_count = 0
+        duplicate_count = 0
+        fail_count = 0
+        total = len(self.questions)
+
+        try:
+            for index, question in enumerate(self.questions, start=1):
+                self.progress.emit(f"正在上传第 {index}/{total} 道题目...")
+                result = self.crawler.add_question(self.folder_id, question, base_dir=self.base_dir)
+
+                if result.get("success"):
+                    success_count += 1
+                    continue
+
+                result_msg = result.get("msg", "")
+                if "已存在相同题目" in result_msg or "重复添加" in result_msg:
+                    duplicate_count += 1
+                else:
+                    fail_count += 1
+
+            self.finished.emit({
+                "success": True,
+                "total": total,
+                "success_count": success_count,
+                "duplicate_count": duplicate_count,
+                "fail_count": fail_count,
+            })
+        except Exception as exc:
+            self.finished.emit({
+                "success": False,
+                "msg": str(exc),
+                "total": total,
+                "success_count": success_count,
+                "duplicate_count": duplicate_count,
+                "fail_count": fail_count,
+            })
+
+
 class QuestionBankView(QWidget):
     """题库管理视图"""
     
@@ -165,6 +215,8 @@ class QuestionBankView(QWidget):
         self.current_folder_path = ""
         self._folder_items = {}  # 存储 id -> QTreeWidgetItem 的映射
         self._folder_data = {}   # 存储完整的文件夹数据
+        self._upload_worker = None
+        self._upload_refresh_parent_item = None
         self.setup_ui()
         # 不自动加载示例数据，等待 on_show 调用
     
@@ -1019,51 +1071,51 @@ class QuestionBankView(QWidget):
                 QMessageBox.warning(self, "提示", "未初始化爬虫")
                 return
             
-            success_count = 0
-            duplicate_count = 0
-            fail_count = 0
-            total = len(questions)
-            
-            # 获取文件所在目录作为图片基准目录
-            import os
+            if self._upload_worker and self._upload_worker.isRunning():
+                QMessageBox.information(self, "提示", "已有上传任务正在进行，请稍后。")
+                return
+
             base_dir = os.path.dirname(self.selected_file) if hasattr(self, 'selected_file') and self.selected_file else None
-            
-            for i, q in enumerate(questions):
-                self.status_update.emit(f"正在上传第 {i+1}/{total} 道题目...")
-                
-                # 更新 UI（避免卡死）
-                from PyQt6.QtWidgets import QApplication
-                QApplication.processEvents()
-                
-                result = self.crawler.add_question(folder_id, q, base_dir=base_dir)
-                
-                if result.get("success"):
-                    success_count += 1
-                    print(f"题目 {i+1} 上传成功")
-                else:
-                    # 检查是否是"题目已存在"
-                    result_msg = result.get("msg", "")
-                    if "已存在相同题目" in result_msg or "重复添加" in result_msg:
-                        duplicate_count += 1
-                        print(f"题目 {i+1} 已存在，跳过")
-                    else:
-                        fail_count += 1
-                        print(f"题目 {i+1} 上传失败: {result_msg}")
-            
-            # 显示结果
-            msg = f"上传完成！\n总共: {total} 道\n成功添加: {success_count} 道\n重复: {duplicate_count} 道\n失败: {fail_count} 道"
-            self.status_update.emit(msg)
-            QMessageBox.information(self, "上传完成", msg)
-            
-            # 刷新文件夹（更新题目数量）
-            if success_count > 0:
-                parent_item = item.parent()
-                self._refresh_current_level(parent_item)
+            self._upload_refresh_parent_item = item.parent()
+            self._upload_worker = QuestionUploadWorker(self.crawler, folder_id, questions, base_dir=base_dir)
+            self._upload_worker.progress.connect(self.status_update.emit)
+            self._upload_worker.finished.connect(self._handle_upload_finished)
+            self._upload_worker.finished.connect(self._upload_worker.deleteLater)
+            self._upload_worker.start()
             
         except Exception as e:
             QMessageBox.warning(self, "上传失败", f"上传过程中出错: {e}")
             import traceback
             traceback.print_exc()
+
+    def _handle_upload_finished(self, result: dict):
+        success_count = result.get("success_count", 0)
+        duplicate_count = result.get("duplicate_count", 0)
+        fail_count = result.get("fail_count", 0)
+        total = result.get("total", 0)
+
+        if not result.get("success", False):
+            msg = (
+                f"上传过程中出错: {result.get('msg', '未知错误')}\n"
+                f"当前进度：总共 {total} 道，成功 {success_count} 道，重复 {duplicate_count} 道，失败 {fail_count} 道"
+            )
+            self.status_update.emit(msg)
+            QMessageBox.warning(self, "上传失败", msg)
+            self._upload_worker = None
+            return
+
+        msg = (
+            f"上传完成！\n总共: {total} 道\n成功添加: {success_count} 道\n"
+            f"重复: {duplicate_count} 道\n失败: {fail_count} 道"
+        )
+        self.status_update.emit(msg)
+        QMessageBox.information(self, "上传完成", msg)
+
+        if success_count > 0:
+            self._refresh_current_level(self._upload_refresh_parent_item)
+
+        self._upload_refresh_parent_item = None
+        self._upload_worker = None
 
     def filter_folders(self, text: str):
         """过滤文件夹"""
