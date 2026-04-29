@@ -6,6 +6,14 @@ import sys
 import threading
 from functools import lru_cache
 
+try:
+    from PyQt6.QtCore import QBuffer, QByteArray, QEventLoop, QIODevice, QObject, QTimer, Qt, QUrl, pyqtSignal, pyqtSlot, QThread
+    from PyQt6.QtGui import QColor, QImage, QPainter
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWidgets import QApplication
+except ImportError:
+    pass
+
 from core.config import BASE_DIR
 
 
@@ -201,14 +209,6 @@ class KaTeXSnapshotRenderer:
 
     @classmethod
     def _render_to_png_in_gui_thread(cls, expr: str, display_mode: bool = False) -> tuple[bytes, int, int] | None:
-        try:
-            from PyQt6.QtCore import QBuffer, QByteArray, QEventLoop, QIODevice, QTimer, Qt, QUrl
-            from PyQt6.QtGui import QColor
-            from PyQt6.QtWebEngineWidgets import QWebEngineView
-            from PyQt6.QtWidgets import QApplication
-        except Exception:
-            return None
-
         app = QApplication.instance()
         if app is None:
             argv = sys.argv if sys.argv else ["katex_snapshot"]
@@ -288,12 +288,6 @@ class KaTeXSnapshotRenderer:
 
     @classmethod
     def _perform_render(cls, view, expr: str, display_mode: bool = False) -> tuple[bytes, int, int] | None:
-        try:
-            from PyQt6.QtCore import QBuffer, QByteArray, QEventLoop, QTimer, Qt
-            from PyQt6.QtWidgets import QApplication
-        except Exception:
-            return None
-
         app = QApplication.instance()
         expr_json = json.dumps(expr)
         display_json = "true" if display_mode else "false"
