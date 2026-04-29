@@ -120,7 +120,7 @@ class KaTeXSnapshotRenderer:
         html, body {{
             margin: 0;
             padding: 0;
-            background: transparent;
+            background: #ffffff;
             overflow: visible;
         }}
         body {{
@@ -130,7 +130,7 @@ class KaTeXSnapshotRenderer:
         #formula {{
             display: inline-block;
             padding: 1px 4px 3px 4px;
-            background: transparent;
+            background: #ffffff;
         }}
     </style>
     <link rel="stylesheet" href="file://{katex_dir_url}/katex.min.css">
@@ -213,7 +213,7 @@ class KaTeXSnapshotRenderer:
         view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         view.resize(32, 32)
         view.setZoomFactor(cls._CAPTURE_SCALE)
-        view.page().setBackgroundColor(QColor(0, 0, 0, 0))
+        view.page().setBackgroundColor(QColor(255, 255, 255, 255))
         view.show()
 
         load_loop = QEventLoop()
