@@ -34,6 +34,7 @@ a = Analysis(
         'Crypto',
         'Crypto.Cipher',
         'Crypto.Cipher.AES',
+        'core.rendering.katex_snapshot',
     ],
     excludes=[
         'tkinter',
