@@ -96,9 +96,22 @@ class KaTeXSnapshotRenderer:
 
     @classmethod
     def _build_html(cls, expr: str, display_mode: bool) -> str:
-        katex_css, katex_js, _auto_render_js = cls._load_assets()
+        """Build a minimal HTML that references KaTeX files via file:// links.
+
+        IMPORTANT: We must NOT inline katex.min.css (1.4 MB) or katex.min.js
+        (271 KB) into the HTML string.  Qt's setHtml() truncates content larger
+        than ~2 MB, which silently breaks KaTeX rendering.  Instead we write a
+        thin HTML that uses <link> / <script src> tags pointing to the actual
+        files on disk so the browser can stream them without size limits.
+        """
         expr_json = json.dumps(expr)
         display_json = "true" if display_mode else "false"
+        # Use POSIX-style path so QUrl.fromLocalFile can parse it correctly on
+        # all platforms (Windows included via Qt's own normalisation).
+        katex_dir_url = cls._KATEX_DIR.replace("\\", "/")
+        if not katex_dir_url.startswith("/"):
+            # Windows absolute path like C:/... → needs a leading slash for file URL
+            katex_dir_url = "/" + katex_dir_url
         return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -120,11 +133,11 @@ class KaTeXSnapshotRenderer:
             background: transparent;
         }}
     </style>
-    <style>{katex_css}</style>
+    <link rel="stylesheet" href="file://{katex_dir_url}/katex.min.css">
 </head>
 <body>
     <div id="formula"></div>
-    <script>{katex_js}</script>
+    <script src="file://{katex_dir_url}/katex.min.js"></script>
     <script>
         (() => {{
             const root = document.getElementById("formula");
@@ -211,7 +224,19 @@ class KaTeXSnapshotRenderer:
             load_loop.quit()
 
         view.loadFinished.connect(on_load_finished)
-        view.setHtml(html, QUrl.fromLocalFile(cls._KATEX_DIR + os.sep))
+        # Write HTML to a temp file and load via file:// URL.
+        # We MUST NOT use setHtml() with embedded CSS/JS because Qt truncates
+        # HTML content larger than ~2 MB, silently breaking KaTeX rendering.
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        )
+        try:
+            tmp.write(html)
+            tmp_path = tmp.name
+        finally:
+            tmp.close()
+        view.load(QUrl.fromLocalFile(tmp_path))
         QTimer.singleShot(5000, load_loop.quit)
         load_loop.exec()
         try:
