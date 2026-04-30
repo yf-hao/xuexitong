@@ -1604,14 +1604,17 @@ class QuestionDetailDialog(QDialog):
         layout.addWidget(btn_bar)
 
     def _resize_to_screen(self):
-        """固定详情宽度，并压缩默认高度，减少短题目的底部空白。"""
+        """根据屏幕比例动态调整详情窗口尺寸。"""
         screen = self.windowHandle().screen() if self.windowHandle() else QApplication.primaryScreen()
         if not screen:
             return
 
         available = screen.availableGeometry()
+        # 宽度保持在 820 到 920 之间
         width = min(920, max(820, available.width() - 120))
-        height = 710
+        # 高度取屏幕可用高度的 85%，但限制在 600 到 900 像素之间
+        height = min(900, max(600, int(available.height() * 0.85)))
+        
         self.setFixedWidth(width)
         self.setFixedHeight(height)
         self.resize(width, height)
