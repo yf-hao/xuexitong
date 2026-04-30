@@ -129,6 +129,7 @@ class KaTeXSnapshotRenderer:
             background: #ffffff;
             min-width: 1px;
             min-height: 1px;
+            white-space: nowrap; /* 强制公式不换行 */
         }}
     </style>
 </head>

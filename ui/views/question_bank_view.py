@@ -358,7 +358,9 @@ class QuestionBankView(QWidget):
 
         # 题目列表占位区域（未来用于展示题目）
         self.question_list = QTreeWidget()
-        self.question_list.setHeaderLabels(["", "题号", "题目内容", "类型", "难度"])
+        self.question_list.setHeaderLabels(["☐", "题号", "题目内容", "类型", "难度"])
+        self.question_list.header().setSectionsClickable(True)
+        self.question_list.header().sectionClicked.connect(self._on_header_section_clicked)
         self.question_list.setRootIsDecorated(False)
         self.question_list.setIndentation(0)
         self.question_list.setAllColumnsShowFocus(True)
@@ -422,7 +424,7 @@ class QuestionBankView(QWidget):
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.hint_label)
 
-        # 操作按钮区域（预留）
+        # 操作按钮区域
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
@@ -447,6 +449,27 @@ class QuestionBankView(QWidget):
         layout.addLayout(btn_layout)
 
         return panel
+
+    def _on_header_section_clicked(self, index):
+        """处理表头点击事件，如果是第一列则全选/取消全选。"""
+        if index != 0:
+            return
+        
+        # 检查当前状态
+        header_text = self.question_list.headerItem().text(0)
+        is_all_checked = "☑" in header_text
+        
+        # 切换状态
+        new_state = Qt.CheckState.Unchecked if is_all_checked else Qt.CheckState.Checked
+        new_header_text = "☐" if is_all_checked else "☑"
+        
+        # 更新表头文字
+        self.question_list.headerItem().setText(0, new_header_text)
+        
+        # 遍历更新所有题目
+        for i in range(self.question_list.topLevelItemCount()):
+            item = self.question_list.topLevelItem(i)
+            item.setCheckState(0, new_state)
 
     def _on_delete_questions(self):
         """删除已勾选题目。"""
@@ -507,6 +530,8 @@ class QuestionBankView(QWidget):
     def display_questions(self, questions: list, folder_path: str = ""):
         """显示题目列表"""
         self.question_list.clear()
+        # 切换目录时，重置表头的全选框状态
+        self.question_list.headerItem().setText(0, "☐")
         
         # 更新标题
         self.question_title.setText(f"📝 题目列表 - {folder_path}")
@@ -1131,9 +1156,11 @@ class QuestionBankView(QWidget):
         QMessageBox.information(self, "上传完成", msg)
 
         if success_count > 0:
-            self._refresh_current_level(self._upload_refresh_parent_item)
+            # 刷新左侧文件夹树（更新数量）
+            self.load_folders()
+            # 刷新右侧题目列表
+            self._reload_current_questions()
 
-        self._upload_refresh_parent_item = None
         self._upload_worker = None
 
     def filter_folders(self, text: str):
@@ -1604,19 +1631,20 @@ class QuestionDetailDialog(QDialog):
         layout.addWidget(btn_bar)
 
     def _resize_to_screen(self):
-        """根据屏幕比例动态调整详情窗口尺寸。"""
+        """根据屏幕比例设置初始尺寸，并允许用户手动调整。"""
         screen = self.windowHandle().screen() if self.windowHandle() else QApplication.primaryScreen()
         if not screen:
             return
 
         available = screen.availableGeometry()
-        # 宽度保持在 820 到 920 之间
+        # 初始宽度 820 到 920 之间
         width = min(920, max(820, available.width() - 120))
-        # 高度取屏幕可用高度的 85%，但限制在 600 到 900 像素之间
+        # 初始高度取屏幕可用高度的 85%
         height = min(900, max(600, int(available.height() * 0.85)))
         
-        self.setFixedWidth(width)
-        self.setFixedHeight(height)
+        # 设置最小尺寸以保证内容可读
+        self.setMinimumSize(800, 500)
+        # 设置初始大小
         self.resize(width, height)
 
     def _update_question_content(self, question_data: dict):
