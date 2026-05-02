@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QDate, QTimer
 from ui.workers import (
     GroupWorker, AddGroupWorker, RenameWorker, DeleteGroupWorker, 
-    PublishSigninWorker, DeleteSigninWorker
+    PublishSigninWorker, DeleteSigninWorker, StartActiveWorker, EndActiveWorker, DeleteActiveWorker
 )
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE
 from core.config import SIGNIN_DATA_FILE, LOCATION_DATA_FILE, DEFAULT_COMMON_LOCATIONS
@@ -37,32 +37,29 @@ class ActivitiesView(QWidget):
         self.layout.setSpacing(25)
         
         # Buttons
-        self.btn_signin = QPushButton("📍 签到")
-        self.btn_questionnaire = QPushButton("📝 问卷")
-        self.btn_practice = QPushButton("✏️ 随堂练习")
+        self.btn_signin = QPushButton("📍 创建签到")
+        self.btn_questionnaire = QPushButton("📢 发布签到")
         self.btn_group_manage = QPushButton("👥 活动分组")
         
         self.buttons = [
             self.btn_signin, self.btn_questionnaire, 
-            self.btn_practice, self.btn_group_manage
+            self.btn_group_manage
         ]
         
         for btn in self.buttons:
+
             btn.setStyleSheet(STAT_BUTTON_STYLE)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
-        self.btn_questionnaire.setEnabled(False)
-        self.btn_questionnaire.setCursor(Qt.CursorShape.ArrowCursor)
-        self.btn_questionnaire.setText("📝 问卷")
+        self.btn_questionnaire.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_questionnaire.setText("📢 发布签到")
         
-        self.btn_practice.setEnabled(False)
-        self.btn_practice.setCursor(Qt.CursorShape.ArrowCursor)
-        self.btn_practice.setText("✏️ 随堂练习")
-
         self.layout.addWidget(self.btn_signin, 0, 0)
         self.layout.addWidget(self.btn_questionnaire, 0, 1)
-        self.layout.addWidget(self.btn_practice, 0, 2)
-        self.layout.addWidget(self.btn_group_manage, 0, 3)
+        self.layout.addWidget(self.btn_group_manage, 0, 2)
+        self.layout.setColumnStretch(0, 1)
+        self.layout.setColumnStretch(1, 1)
+        self.layout.setColumnStretch(2, 1)
         
         # Result area
         self.activities_scroll = QFrame()
@@ -76,12 +73,11 @@ class ActivitiesView(QWidget):
         self.activities_scroll_area.setWidget(self.activities_scroll)
         self.activities_scroll_area.setStyleSheet("border: none; background: transparent;")
         
-        self.layout.addWidget(self.activities_scroll_area, 1, 0, 1, 4)
+        self.layout.addWidget(self.activities_scroll_area, 1, 0, 1, 3)
         
         # Connect signals
         self.btn_signin.clicked.connect(self.on_signin_clicked)
         self.btn_questionnaire.clicked.connect(self.on_questionnaire_clicked)
-        self.btn_practice.clicked.connect(self.on_practice_clicked)
         self.btn_group_manage.clicked.connect(self.on_group_manage_clicked)
 
     def clear_activities_list(self):
@@ -328,6 +324,29 @@ class ActivitiesView(QWidget):
             }
         """)
         config_layout.addWidget(self.btn_config_location, 2, 2)
+        
+        # 验证码勾选框
+        self.chk_need_vcode = QCheckBox("需要验证码")
+        self.chk_need_vcode.setChecked(False)
+        self.chk_need_vcode.setStyleSheet("""
+            QCheckBox {
+                font-size: 13px;
+                color: #ffffff;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border-color: #0078d4;
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
+            }
+        """)
+        config_layout.addWidget(self.chk_need_vcode, 2, 3)
         
         # 连接信号
         self.chk_enable_location.stateChanged.connect(self._on_location_enable_changed)
@@ -610,7 +629,7 @@ class ActivitiesView(QWidget):
             "planId": item.get('planId'),
             "signCode": item.get('signcode'),
             "otherId": item.get('otherId', 2),
-            "ifNeedVCode": item.get('ifNeedVCode', 1),
+            "ifNeedVCode": 1 if self.chk_need_vcode.isChecked() else 0,
             "openCheckWeChatFlag": item.get('openCheckWeChatFlag', 1),
             "openCheckFaceFlag": item.get('openCheckFaceFlag', 0),
             "ifrefreshewm": item.get('ifrefreshewm', 1),
@@ -928,7 +947,232 @@ class ActivitiesView(QWidget):
     def on_questionnaire_clicked(self):
         self.last_activity_sub = "questionnaire"
         self.clear_activities_list()
-        self.status_callback("正在加载问卷活动...")
+        self.status_callback("正在加载已发布的签到活动...")
+        
+        from ui.workers import AttendanceWorker
+        worker = AttendanceWorker(self.crawler)
+        self.workers.append(worker)
+        worker.attendance_ready.connect(self._on_attendance_loaded)
+        worker.attendance_ready.connect(lambda: self.workers.remove(worker) if worker in self.workers else None)
+        worker.start()
+
+    def _on_attendance_loaded(self, result):
+        from models.activity import ActivityList
+        if isinstance(result, str):
+            self.status_callback(f"加载失败: {result}")
+            self.activities_scroll_layout.addWidget(QLabel(f"❌ 加载失败: {result}"))
+            return
+        
+        if isinstance(result, ActivityList):
+            activities = result.filter_by_type(2)  # 只显示签到类型
+        else:
+            activities = []
+        
+        if not activities:
+            self.activities_scroll_layout.addWidget(QLabel("📭 暂无已发布的签到活动"))
+            self.status_callback("暂无已发布的签到活动")
+            return
+        
+        # 按 groupName 分组
+        groups = {}
+        for act in activities:
+            name = act.group_name or "未分组"
+            groups.setdefault(name, []).append(act)
+        
+        for group_name, group_acts in groups.items():
+            # 分组内排序：进行中 > 未开始 > 已结束
+            status_order = {"1": 0, "0": 1, "2": 2}
+            group_acts.sort(key=lambda a: status_order.get(a.status, 9))
+            # 分组标题
+            group_header = QLabel(f"👥 {group_name} ({len(group_acts)})")
+            group_header.setStyleSheet("""
+                font-size: 14px;
+                font-weight: bold;
+                color: #007acc;
+                padding: 8px 5px 4px 5px;
+                border-bottom: 1px solid #333;
+                margin-top: 6px;
+            """)
+            self.activities_scroll_layout.addWidget(group_header)
+            
+            for act in group_acts:
+                card = QFrame()
+                card.setObjectName("activity_card")
+                status_color = "#4ec9b0" if act.is_active else ("#888" if act.is_ended else "#d4a72c")
+                card.setStyleSheet(f"""
+                    QFrame#activity_card {{
+                        background-color: #1e1e1e;
+                        border: 1px solid #333;
+                        border-radius: 8px;
+                        padding: 10px;
+                        margin-left: 15px;
+                    }}
+                    QFrame#activity_card:hover {{ border: 1px solid #007acc; }}
+                """)
+                card_layout = QHBoxLayout(card)
+                
+                title_lbl = QLabel(f"📍 {act.title}")
+                title_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #ffffff;")
+                card_layout.addWidget(title_lbl)
+                
+                card_layout.addStretch()
+                
+                if act.is_pending:
+                    start_btn = QPushButton("开始")
+                    start_btn.setFixedWidth(60)
+                    start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    start_btn.setStyleSheet("""
+                        QPushButton { background-color: #007acc; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
+                        QPushButton:hover { background-color: #1a8ad4; }
+                    """)
+                    start_btn.clicked.connect(lambda checked, a=act: self._handle_start_active(a))
+                    card_layout.addWidget(start_btn)
+                    del_btn = QPushButton("删除")
+                    del_btn.setFixedWidth(60)
+                    del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    del_btn.setStyleSheet("""
+                        QPushButton { background-color: #555; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
+                        QPushButton:hover { background-color: #444; }
+                    """)
+                    del_btn.clicked.connect(lambda checked, a=act: self._handle_delete_active(a))
+                    card_layout.addWidget(del_btn)
+                elif act.is_active:
+                    status_lbl = QLabel("进行中")
+                    status_lbl.setStyleSheet(f"font-size: 12px; color: {status_color}; margin-right: 10px;")
+                    card_layout.addWidget(status_lbl)
+                    time_lbl = QLabel(act.time_range)
+                    time_lbl.setStyleSheet("font-size: 11px; color: #888;")
+                    card_layout.addWidget(time_lbl)
+                    end_btn = QPushButton("结束")
+                    end_btn.setFixedWidth(60)
+                    end_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    end_btn.setStyleSheet("""
+                        QPushButton { background-color: #d9534f; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
+                        QPushButton:hover { background-color: #c9302c; }
+                    """)
+                    end_btn.clicked.connect(lambda checked, a=act: self._handle_end_active(a))
+                    card_layout.addWidget(end_btn)
+                    # 双击进行中的签到显示二维码
+                    card.setCursor(Qt.CursorShape.PointingHandCursor)
+                    card.mouseDoubleClickEvent = lambda event, a=act: self._show_qrcode(a)
+                else:
+                    status_lbl = QLabel(act.status_name)
+                    status_lbl.setStyleSheet(f"font-size: 12px; color: {status_color}; margin-right: 10px;")
+                    card_layout.addWidget(status_lbl)
+                    time_lbl = QLabel(act.time_range)
+                    time_lbl.setStyleSheet("font-size: 11px; color: #888;")
+                    card_layout.addWidget(time_lbl)
+                    del_btn = QPushButton("删除")
+                    del_btn.setFixedWidth(60)
+                    del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    del_btn.setStyleSheet("""
+                        QPushButton { background-color: #555; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
+                        QPushButton:hover { background-color: #444; }
+                    """)
+                    del_btn.clicked.connect(lambda checked, a=act: self._handle_delete_active(a))
+                    card_layout.addWidget(del_btn)
+                
+                self.activities_scroll_layout.addWidget(card)
+        
+        self.status_callback(f"已加载 {len(activities)} 个签到活动（{len(groups)} 个分组）")
+    
+    def _handle_start_active(self, act):
+        """处理点击开始按钮启动签到活动"""
+        course = self.get_course_callback()
+        class_id = self.get_class_id_callback()
+        if not course:
+            QMessageBox.warning(self, "错误", "未能获取当前课程信息")
+            return
+        
+        self._last_start_title = act.title
+        self.status_callback(f"正在启动签到: {act.title} ...")
+        
+        worker = StartActiveWorker(
+            self.crawler, act.active_id, str(course.id), str(class_id), act.activity_type
+        )
+        self.workers.append(worker)
+        worker.start_finished.connect(self._on_start_active_finished)
+        worker.start_finished.connect(lambda: self.workers.remove(worker) if worker in self.workers else None)
+        worker.start()
+
+    def _show_qrcode(self, act):
+        """双击进行中的签到时弹出二维码窗口"""
+        from ui.dialogs.qrcode_dialog import QRCodeDialog
+        
+        # 计算结束时间（毫秒时间戳）
+        end_time_ms = 0
+        if act.end_time:
+            try:
+                from datetime import datetime
+                # 尝试解析 end_time 字符串
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                    try:
+                        dt = datetime.strptime(act.end_time, fmt)
+                        end_time_ms = int(dt.timestamp() * 1000)
+                        break
+                    except ValueError:
+                        continue
+            except Exception:
+                pass
+        
+        dialog = QRCodeDialog(self.crawler, act.active_id, act.title, end_time_ms, self)
+        dialog.exec()
+
+    def _on_start_active_finished(self, success, message, active_id, data):
+        if success:
+            self.status_callback(f"启动成功: {message}")
+            # 刷新列表
+            self.on_questionnaire_clicked()
+            # 自动弹出二维码弹窗
+            if data and data.get("startTime") and data.get("timeLong"):
+                end_time_ms = data["startTime"] + data["timeLong"]
+                # 用启动返回的 title 或默认标题
+                title = getattr(self, '_last_start_title', "签到二维码")
+                from ui.dialogs.qrcode_dialog import QRCodeDialog
+                dialog = QRCodeDialog(self.crawler, str(active_id), title, end_time_ms, self)
+                dialog.exec()
+        else:
+            QMessageBox.warning(self, "启动失败", message)
+            self.status_callback(f"启动失败: {message}")
+
+    def _handle_end_active(self, act):
+        """处理点击结束按钮结束签到活动"""
+        worker = EndActiveWorker(self.crawler, act.active_id, act.activity_type)
+        self.workers.append(worker)
+        worker.end_finished.connect(self._on_end_active_finished)
+        worker.end_finished.connect(lambda: self.workers.remove(worker) if worker in self.workers else None)
+        worker.start()
+
+    def _on_end_active_finished(self, success, message, active_id):
+        if success:
+            self.status_callback(f"签到已结束: {message}")
+            self.on_questionnaire_clicked()
+        else:
+            QMessageBox.warning(self, "结束失败", message)
+            self.status_callback(f"结束失败: {message}")
+
+    def _handle_delete_active(self, act):
+        """处理点击删除按钮删除签到活动"""
+        reply = QMessageBox.question(
+            self, "确认删除", f"确定要删除签到「{act.title}」吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        worker = DeleteActiveWorker(self.crawler, act.active_id)
+        self.workers.append(worker)
+        worker.delete_finished.connect(self._on_delete_active_finished)
+        worker.delete_finished.connect(lambda: self.workers.remove(worker) if worker in self.workers else None)
+        worker.start()
+
+    def _on_delete_active_finished(self, success, message, active_id):
+        if success:
+            self.status_callback(f"删除成功: {message}")
+            self.on_questionnaire_clicked()
+        else:
+            QMessageBox.warning(self, "删除失败", message)
+            self.status_callback(f"删除失败: {message}")
 
     def on_practice_clicked(self):
         self.last_activity_sub = "practice"

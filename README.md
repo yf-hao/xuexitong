@@ -1,4 +1,4 @@
-# 学习通教学资源管理系统 (XuexitongManager)
+# 学习通教学辅助系统 (XuexitongManager)
 
 基于 PyQt6 开发的学习通教师端辅助工具。
 

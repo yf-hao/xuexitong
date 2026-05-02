@@ -12,3 +12,4 @@ jsonpath-ng>=1.5.0
 pycryptodome>=3.18.0
 xlrd==1.2.0
 openpyxl>=3.1.0
+qrcode[pil]>=7.4

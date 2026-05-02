@@ -754,6 +754,88 @@ class AttendanceWorker(QThread):
             self.attendance_ready.emit(f"获取考勤活动失败: {e}")
 
 
+class StartActiveWorker(QThread):
+    """Worker thread to start a pending activity."""
+    
+    start_finished = pyqtSignal(bool, str, str, dict)  # success, message, active_id, data
+    
+    def __init__(self, crawler, active_id: str, course_id: str, class_id: str, active_type: int = 2):
+        super().__init__()
+        self.crawler = crawler
+        self.active_id = active_id
+        self.course_id = course_id
+        self.class_id = class_id
+        self.active_type = active_type
+    
+    def run(self):
+        try:
+            success, message, data = self.crawler.start_active(
+                self.active_id, self.course_id, self.class_id, self.active_type
+            )
+            self.start_finished.emit(success, message, self.active_id, data)
+        except Exception as e:
+            self.start_finished.emit(False, f"启动异常: {e}", self.active_id, {})
+
+
+class RefreshQRCodeWorker(QThread):
+    """Worker thread to refresh QR code enc string."""
+
+    qrcode_ready = pyqtSignal(bool, str, str)  # success, message, enc
+
+    def __init__(self, crawler, active_id: str):
+        super().__init__()
+        self.crawler = crawler
+        self.active_id = active_id
+
+    def run(self):
+        try:
+            success, message, enc = self.crawler.refresh_qrcode(self.active_id)
+            # 确保 enc 是字符串，避免 pyqtSignal 类型错误
+            enc = str(enc) if enc is not None else ""
+            self.qrcode_ready.emit(bool(success), str(message), enc)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.qrcode_ready.emit(False, f"获取二维码失败: {e}\n{tb}", "")
+
+
+class EndActiveWorker(QThread):
+    """Worker thread to end an active activity."""
+
+    end_finished = pyqtSignal(bool, str, str)  # success, message, active_id
+
+    def __init__(self, crawler, active_id: str, active_type: int = 2):
+        super().__init__()
+        self.crawler = crawler
+        self.active_id = active_id
+        self.active_type = active_type
+
+    def run(self):
+        try:
+            success, message = self.crawler.end_active(self.active_id, self.active_type)
+            self.end_finished.emit(success, message, self.active_id)
+        except Exception as e:
+            self.end_finished.emit(False, f"结束异常: {e}", self.active_id)
+
+
+class DeleteActiveWorker(QThread):
+    """Worker thread to delete an activity."""
+
+    delete_finished = pyqtSignal(bool, str, str)  # success, message, active_id
+
+    def __init__(self, crawler, active_id: str):
+        super().__init__()
+        self.crawler = crawler
+        self.active_id = active_id
+
+    def run(self):
+        try:
+            success, message = self.crawler.delete_active(self.active_id)
+            self.delete_finished.emit(success, message, self.active_id)
+        except Exception as e:
+            self.delete_finished.emit(False, f"删除异常: {e}", self.active_id)
+
+
 class AttendanceDetailWorker(QThread):
     """Worker thread to fetch attendance detail (签到详情)."""
     

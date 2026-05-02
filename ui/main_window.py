@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
                 continue
             filtered_links.append(link)
         
-        # 定义菜单顺序：班级活动、题库、作业、学情、统计、云盘、管理
+        # 定义菜单顺序：签到、题库、作业、学情、统计、云盘、管理
         menu_order = ["活动", "题库", "作业","学情", "统计", "云盘", "管理"]
         
         for keyword in menu_order:
@@ -359,7 +359,8 @@ class MainWindow(QMainWindow):
                 # 从 filtered_links 中查找匹配的项目
                 for link in filtered_links:
                     if keyword in link['title']:
-                        item = QListWidgetItem(link['title'])
+                        display_title = "签到" if keyword == "活动" else link['title']
+                        item = QListWidgetItem(display_title)
                         item.setData(Qt.ItemDataRole.UserRole, link['url'])
                         self.nav_list.addItem(item)
                         break
@@ -387,7 +388,7 @@ class MainWindow(QMainWindow):
             self.download_btn.hide()
             self.status_label.setText(f"已进入: {title}")
             self.management_view.on_show()
-        elif "活动" in title:
+        elif "活动" in title or "签到" in title:
             self.stacked_widget.setCurrentIndex(3)
             self.download_btn.hide()
             self.status_label.setText(f"已进入: {title}")
