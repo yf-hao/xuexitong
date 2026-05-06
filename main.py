@@ -18,7 +18,7 @@ def _setup_early_logging():
         sys.stderr = f
         print("=== APP EARLY LOG START ===")
         print(f"Executable: {sys.executable}")
-        print(f"Version: 0.5.2")
+        print(f"Version: 0.5.8")
     except:
         pass
 
