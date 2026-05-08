@@ -337,7 +337,7 @@ class MainWindow(QMainWindow):
             filtered_links.append(link)
         
         # 定义菜单顺序：签到、题库、作业、学情、统计、云盘、管理
-        menu_order = ["活动", "题库", "作业","学情", "统计", "云盘", "管理"]
+        menu_order = ["活动", "题库", "作业","学情", "统计", "云盘", "聊天", "管理"]
         
         for keyword in menu_order:
             if keyword == "题库":
@@ -354,6 +354,11 @@ class MainWindow(QMainWindow):
                 # 添加云盘菜单项
                 item = QListWidgetItem("云盘")
                 item.setData(Qt.ItemDataRole.UserRole, "cloud_drive")
+                self.nav_list.addItem(item)
+            elif keyword == "聊天":
+                # 添加聊天菜单项
+                item = QListWidgetItem("聊天")
+                item.setData(Qt.ItemDataRole.UserRole, "chat")
                 self.nav_list.addItem(item)
             else:
                 # 从 filtered_links 中查找匹配的项目
