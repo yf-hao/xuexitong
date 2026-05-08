@@ -15,6 +15,7 @@ from ui.views.learning_view import LearningView
 from ui.views.study_status_view import StudyStatusView
 from ui.views.homework_create_view import HomeworkCreateView
 from ui.views.cloud_drive_view import CloudDriveView
+from ui.views.chat_view import ChatView
 
 class MainWindow(QMainWindow):
     def __init__(self, crawler):
@@ -161,6 +162,10 @@ class MainWindow(QMainWindow):
         self.cloud_drive_view = CloudDriveView(self.crawler, parent=self)
         self.cloud_drive_view.status_update.connect(self._update_status)
         self.stacked_widget.addWidget(self.cloud_drive_view)
+
+        # Page 9: Chat View
+        self.chat_view = ChatView(self.crawler, parent=self)
+        self.stacked_widget.addWidget(self.chat_view)
 
         content_layout.addWidget(self.stacked_widget)
         splitter.addWidget(content_container)
@@ -418,6 +423,11 @@ class MainWindow(QMainWindow):
             self.download_btn.hide()
             self.status_label.setText(f"已进入: {title}")
             self.cloud_drive_view.on_show()
+        elif "聊天" in title:
+            self.stacked_widget.setCurrentIndex(9)
+            self.download_btn.hide()
+            self.status_label.setText(f"已进入: {title}")
+            self.chat_view.on_show()
         else:
             self.stacked_widget.setCurrentIndex(0)
             self.material_tree.clear()

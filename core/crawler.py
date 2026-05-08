@@ -12,6 +12,7 @@ from core.apis.material_api import MaterialAPI
 from core.apis.activity_api import ActivityAPI
 from core.apis.homework_api import HomeworkAPI
 from core.apis.cloud_drive_api import CloudDriveAPI
+from core.apis.chat_api import ChatAPI
 
 
 class XuexitongCrawler(
@@ -28,6 +29,7 @@ class XuexitongCrawler(
     ActivityAPI,
     HomeworkAPI,
     CloudDriveAPI,
+    ChatAPI,
 ):
     """聚合各业务域 API 的门面类，仅保留会话与聚合职责。"""
 
@@ -47,4 +49,4 @@ class XuexitongCrawler(
 
     # 具体能力由各业务域 mixin 提供：
     # AuthAPI / CaptchaAPI / CourseAPI / ClassAPI / StatsAPI / GroupAPI /
-    # TeacherAPI / CourseManageAPI / QuestionBankAPI / MaterialAPI / ActivityAPI / HomeworkAPI
+    # TeacherAPI / CourseManageAPI / QuestionBankAPI / MaterialAPI / ActivityAPI / HomeworkAPI / ChatAPI
