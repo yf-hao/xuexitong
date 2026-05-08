@@ -1018,6 +1018,44 @@ class HomeworkStatsExportWorker(QThread):
             self.export_finished.emit(False, f"导出作业情况失败: {e}")
 
 
+class ChatMessageListWorker(QThread):
+    """Worker thread to fetch IM message list."""
+
+    messages_ready = pyqtSignal(list)  # list of chat session dicts
+
+    def __init__(self, crawler):
+        super().__init__()
+        self.crawler = crawler
+
+    def run(self):
+        try:
+            result = self.crawler.get_message_list()
+            self.messages_ready.emit(result)
+        except Exception as e:
+            print(f"ChatMessageListWorker error: {e}")
+            self.messages_ready.emit([])
+
+
+class ChatHistoryWorker(QThread):
+    """Worker thread to fetch IM chat history."""
+
+    history_ready = pyqtSignal(str, list)  # chat_id, history
+
+    def __init__(self, crawler, chat_id: str, limit: int = 50):
+        super().__init__()
+        self.crawler = crawler
+        self.chat_id = chat_id
+        self.limit = limit
+
+    def run(self):
+        try:
+            result = self.crawler.get_history_messages(self.chat_id, limit=self.limit)
+            self.history_ready.emit(self.chat_id, result)
+        except Exception as e:
+            print(f"ChatHistoryWorker error: {e}")
+            self.history_ready.emit(self.chat_id, [])
+
+
 class HomeworkWorker(QThread):
     """Worker thread to fetch homework stats (作业情况)."""
     
