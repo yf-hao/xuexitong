@@ -72,12 +72,12 @@ class ChatAPI:
         """MSync 是否已连接。"""
         return self._msync is not None and self._msync.is_connected()
 
-    def send_message_msync(self, target_chat_id: str, content: str):
+    def send_message_msync(self, target_user_id: str, content: str):
         """
         通过 MSync 发送实时消息。
 
         Args:
-            target_chat_id: 对方 chatId
+            target_user_id: 对方用户 ID / 路由 ID
             content: 消息内容
 
         Returns:
@@ -86,7 +86,7 @@ class ChatAPI:
         if not self._msync or not self._msync.is_connected():
             return False
         try:
-            self._msync.send_message(to_user=target_chat_id, content=content)
+            self._msync.send_message(to_user=target_user_id, content=content)
             return True
         except Exception as e:
             print(f"ChatAPI.send_message_msync: 发送失败 - {e}")
@@ -280,15 +280,23 @@ class ChatAPI:
         """构造浏览器风格的纯数字 hxMsgId。"""
         return str(time.time_ns() + random.randint(0, 9999))
 
-    def send_message(self, target_chat_id: str, content: str, msg_type: int = 1, target_name: str = ""):
+    def send_message(
+        self,
+        target_user_id: str,
+        content: str,
+        msg_type: int = 1,
+        target_name: str = "",
+        history_chat_id: str = "",
+    ):
         """
         发送消息到指定会话。
         仅在 MSync WebSocket 可用时执行真实发送；历史接口只用于保存消息记录。
 
         Args:
-            target_chat_id: 对方 chatId（私聊）或群 chatId
+            target_user_id: 实时发送目标（私聊通常为对方用户 ID）
             content: 消息内容
             msg_type: 消息类型，1=文本
+            history_chat_id: 历史归档使用的会话 ID；为空时回退到 target_user_id
 
         Returns:
             dict: {"status": "success"/"fail", "msg": ...}
@@ -297,12 +305,12 @@ class ChatAPI:
             return {"status": "fail", "msg": "实时消息连接未建立"}
 
         try:
-            ok = self.send_message_msync(target_chat_id, content)
+            ok = self.send_message_msync(target_user_id, content)
             if not ok:
                 return {"status": "fail", "msg": "实时消息发送失败"}
 
             history_result = self._add_message_history(
-                target_chat_id,
+                history_chat_id or target_user_id,
                 content,
                 msg_type,
                 target_name=target_name,

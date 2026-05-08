@@ -105,85 +105,82 @@ def decode_varint(data: bytes, offset: int):
     return val, offset
 
 
-def decode_jid(data: bytes, offset: int):
-    """解码 JID 消息 (field 1/2/3/4)."""
-    end = len(data)
-    jid = {}
-    while offset < end:
-        tag = data[offset]
-        offset += 1
-        field = tag >> 3
-        wire = tag & 0x07
-        if wire == 2:
-            length, offset = decode_varint(data, offset)
-            val = data[offset:offset + length]
-            offset += length
-            jid[field] = val.decode("utf-8", errors="replace")
-        else:
-            break
-    return jid, offset
+def _merge_field(result: dict, field: int, value):
+    """处理 protobuf 重复字段。"""
+    if field not in result:
+        result[field] = value
+    elif isinstance(result[field], list):
+        result[field].append(value)
+    else:
+        result[field] = [result[field], value]
 
 
-def decode_message(data: bytes):
-    """解码 MSync 消息, 返回 dict."""
+def _is_printable_text(value: str) -> bool:
+    return all(ch.isprintable() or ch in "\t\r\n" for ch in value)
+
+
+def _decode_message_internal(data: bytes, strict: bool):
     result = {}
     offset = 0
     end = len(data)
 
     while offset < end:
-        tag = data[offset]
-        offset += 1
+        tag, offset = decode_varint(data, offset)
         field = tag >> 3
         wire = tag & 0x07
+        if field <= 0:
+            raise ValueError("invalid field number")
 
-        if wire == 0:  # varint
+        if wire == 0:
             val, offset = decode_varint(data, offset)
-            result[field] = val
-        elif wire == 2:  # length-delimited
-            length, offset = decode_varint(data, offset)
-            val = data[offset:offset + length]
-            offset += length
-            # 尝试递归解码嵌套消息
-            nested = {}
-            try:
-                n_off = 0
-                while n_off < len(val):
-                    n_tag = val[n_off]
-                    n_off += 1
-                    n_field = n_tag >> 3
-                    n_wire = n_tag & 0x07
-                    if n_wire == 2:
-                        n_len, n_off = decode_varint(val, n_off)
-                        n_val = val[n_off:n_off + n_len]
-                        n_off += n_len
-                        try:
-                            nested[n_field] = n_val.decode("utf-8", errors="replace")
-                        except:
-                            nested[n_field] = n_val.hex()
-                    elif n_wire == 0:
-                        n_v, n_off = decode_varint(val, n_off)
-                        nested[n_field] = n_v
-                    else:
-                        break
-            except:
-                pass
-            if nested:
-                result[field] = nested
-            else:
-                try:
-                    result[field] = val.decode("utf-8", errors="replace")
-                except:
-                    result[field] = val.hex()
-        elif wire == 1:  # 64-bit
-            result[field] = data[offset:offset + 8].hex()
+            _merge_field(result, field, val)
+        elif wire == 1:
+            if offset + 8 > end:
+                raise ValueError("truncated fixed64")
+            val = struct.unpack("<Q", data[offset:offset + 8])[0]
             offset += 8
-        elif wire == 5:  # 32-bit
-            result[field] = data[offset:offset + 4].hex()
-            offset += 4
-        else:
-            break
+            _merge_field(result, field, val)
+        elif wire == 2:
+            length, offset = decode_varint(data, offset)
+            if offset + length > end:
+                raise ValueError("truncated length-delimited")
+            raw = data[offset:offset + length]
+            offset += length
 
+            try:
+                nested = _decode_message_internal(raw, strict=True)
+            except Exception:
+                nested = None
+
+            if nested:
+                _merge_field(result, field, nested)
+                continue
+
+            try:
+                text = raw.decode("utf-8")
+                if _is_printable_text(text):
+                    _merge_field(result, field, text)
+                else:
+                    _merge_field(result, field, raw)
+            except UnicodeDecodeError:
+                _merge_field(result, field, raw)
+        elif wire == 5:
+            if offset + 4 > end:
+                raise ValueError("truncated fixed32")
+            val = struct.unpack("<I", data[offset:offset + 4])[0]
+            offset += 4
+            _merge_field(result, field, val)
+        else:
+            raise ValueError(f"unsupported wire type {wire}")
+
+    if strict and offset != end:
+        raise ValueError("decode did not consume full message")
     return result
+
+
+def decode_message(data: bytes):
+    """解码 MSync 消息, 返回 dict."""
+    return _decode_message_internal(data, strict=False)
 
 
 # ── MSync 消息构造 ─────────────────────────────────────
@@ -336,6 +333,39 @@ def build_send_message(
 
     root.uint32(11, 0)
 
+    return root.bytes()
+
+
+def build_sync_reply(username: str) -> bytes:
+    """构造登录后服务端同步提示的客户端回包。"""
+    root = ProtoBufWriter()
+    root.uint32(1, 0)
+    root.uint32(8, 0)
+
+    meta = ProtoBufWriter()
+    user_ref = ProtoBufWriter()
+    user_ref.string(2, username)
+    meta.embedded(3, user_ref)
+    root.embedded(9, meta)
+
+    root.uint32(11, 0)
+    return root.bytes()
+
+
+def build_receive_ack(message_id: int, username: str) -> bytes:
+    """构造收到下行消息后的 ACK。"""
+    root = ProtoBufWriter()
+    root.uint32(1, 0)
+    root.uint32(8, 0)
+
+    meta = ProtoBufWriter()
+    meta.uint64(2, message_id)
+    user_ref = ProtoBufWriter()
+    user_ref.string(2, username)
+    meta.embedded(3, user_ref)
+    root.embedded(9, meta)
+
+    root.uint32(11, 0)
     return root.bytes()
 
 
@@ -525,6 +555,20 @@ class MSyncClient:
         logger.info(f"MSync: login decoded={decoded}")
         self._ws.send(frame)
 
+    def send_sync_reply(self):
+        """响应服务端登录后的同步提示。"""
+        pb = build_sync_reply(self._username)
+        frame = sockjs_encode(pb)
+        logger.info("MSync: send sync reply")
+        self._ws.send(frame)
+
+    def send_receive_ack(self, message_id: int):
+        """发送收到下行消息后的 ACK。"""
+        pb = build_receive_ack(message_id, self._username)
+        frame = sockjs_encode(pb)
+        logger.info(f"MSync: send receive ack message_id={message_id}")
+        self._ws.send(frame)
+
     # ── 内部方法 ──
 
     def _sockjs_info(self) -> dict:
@@ -565,6 +609,53 @@ class MSyncClient:
         self._heartbeat_timer = threading.Timer(25, beat)
         self._heartbeat_timer.start()
 
+    def _first(self, value):
+        if isinstance(value, list):
+            return value[0] if value else None
+        return value
+
+    def _extract_jid_username(self, value):
+        item = self._first(value)
+        if isinstance(item, dict):
+            username = self._first(item.get(2))
+            if isinstance(username, str):
+                return username
+        return ""
+
+    def _extract_text_push(self, decoded: dict):
+        meta = self._first(decoded.get(9))
+        if not isinstance(meta, dict):
+            return None
+
+        payload = self._first(meta.get(4))
+        if not isinstance(payload, dict):
+            return None
+
+        body = self._first(payload.get(6))
+        if not isinstance(body, dict):
+            return None
+
+        content = self._first(body.get(4))
+        if not isinstance(content, dict):
+            return None
+
+        text = self._first(content.get(2))
+        if not isinstance(text, str) or text == "":
+            return None
+
+        from_user = self._extract_jid_username(payload.get(2))
+        to_user = self._extract_jid_username(payload.get(3))
+        timestamp = self._first(payload.get(1)) or self._first(meta.get(8)) or 0
+        message_id = self._first(meta.get(5))
+
+        return {
+            "from": from_user,
+            "to": to_user,
+            "content": text,
+            "timestamp": timestamp,
+            "message_id": message_id,
+        }
+
     # ── WebSocket 回调 ──
 
     def _on_ws_open(self, ws):
@@ -584,27 +675,38 @@ class MSyncClient:
             if decoded:
                 self._authenticated = True
 
+            message_type = self._first(decoded.get(8))
+            meta = self._first(decoded.get(9))
+
+            if message_type == 2 and isinstance(meta, dict) and self._first(meta.get(1)) is not None:
+                self.send_sync_reply()
+                return
+
+            push = self._extract_text_push(decoded)
+            if push:
+                message_id = push.pop("message_id", None)
+                if isinstance(message_id, int):
+                    self.send_receive_ack(message_id)
+                if self.on_message:
+                    self.on_message(push)
+                return
+
             # 检查是否是消息推送
-            if 9 in decoded and isinstance(decoded[9], dict):
-                meta = decoded[9]
-                if 6 in meta and isinstance(meta[6], dict):
-                    body = meta[6]
-                    if 4 in body and isinstance(body[4], dict):
-                        content = body[4]
-                        text = content.get(2, "")
-                        from_user = ""
-                        if 2 in body and isinstance(body[2], dict):
-                            from_user = body[2].get(2, "")
-                        to_user = ""
-                        if 3 in body and isinstance(body[3], dict):
-                            to_user = body[3].get(2, "")
+            if isinstance(meta, dict):
+                body = self._first(meta.get(6))
+                if isinstance(body, dict):
+                    content = self._first(body.get(4))
+                    if isinstance(content, dict):
+                        text = self._first(content.get(2)) or ""
+                        from_user = self._extract_jid_username(body.get(2))
+                        to_user = self._extract_jid_username(body.get(3))
 
                         if text and self.on_message:
                             self.on_message({
                                 "from": from_user,
                                 "to": to_user,
                                 "content": text,
-                                "timestamp": meta.get(1, 0),
+                                "timestamp": self._first(meta.get(1)) or 0,
                             })
         except Exception as e:
             logger.error(f"MSync: decode error {e}")

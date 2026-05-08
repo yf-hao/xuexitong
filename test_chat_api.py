@@ -1,8 +1,15 @@
 import unittest
+import base64
 from types import SimpleNamespace
 
 from core.apis.chat_api import ChatAPI
-from core.msync_client import sockjs_encode
+from core.msync_client import (
+    MSyncClient,
+    build_receive_ack,
+    build_sync_reply,
+    decode_message,
+    sockjs_encode,
+)
 
 
 class _FakeResponse:
@@ -38,6 +45,7 @@ class _FakeChatAPI(ChatAPI):
         self.session_manager = SimpleNamespace(course_params=course_params or {})
         self._connected = False
         self._send_ok = True
+        self._last_msync_target = None
 
     @property
     def session(self):
@@ -47,12 +55,54 @@ class _FakeChatAPI(ChatAPI):
         return self._connected
 
     def send_message_msync(self, target_chat_id: str, content: str):
+        self._last_msync_target = target_chat_id
         return self._send_ok
 
 
 class ChatAPITests(unittest.TestCase):
     def test_sockjs_encode_uses_client_array_frame(self):
         self.assertEqual(sockjs_encode(b"\x01\x02"), '["AQI="]')
+
+    def test_build_sync_reply_matches_captured_frame(self):
+        frame = base64.b64encode(build_sync_reply("25278974")).decode()
+        self.assertEqual(frame, "CABAAEoMGgoSCDI1Mjc4OTc0WAA=")
+
+    def test_build_receive_ack_matches_captured_frame(self):
+        frame = base64.b64encode(build_receive_ack(1549112508483111976, "25278974")).decode()
+        self.assertEqual(frame, "CABAAEoWEKiYgIrns+O/FRoKEggyNTI3ODk3NFgA")
+
+    def test_decode_message_recursively_decodes_text_push_payload(self):
+        raw = base64.b64decode(
+            "CABAAEqNAgoCCAAi6QEIqJiAiuez478VEjwKDmN4LWRldiNjeHN0dWR5EggyNTI3ODk3NBoL"
+            "ZWFzZW1vYi5jb20iE3dlYmltXzE3NzgyNDU2NTQ2MzcaJwoOY3gtZGV2I2N4c3R1ZHkSCDI1"
+            "Mjc4OTc0GgtlYXNlbW9iLmNvbSD17c294DMoATIpCAESChIIMjUyNzg5NzQaChIIMjUyNzg5"
+            "NzQiCQgAEgUxMjM0NUoCe31CGwoRY2hhdF9yb3V0ZV90YXJnZXQQBzIEc2VsZkIUCgljbGll"
+            "bnRfaWQQBBiH0M294DNKD3siaXNfb25saW5lIjoxfSiomICK57PjvxUyChIIMjUyNzg5NzRA"
+            "+/LNveAz"
+        )
+        decoded = decode_message(raw)
+        payload = decoded[9][4]
+        self.assertEqual(payload[2][2], "25278974")
+        self.assertEqual(payload[3][2], "25278974")
+        self.assertEqual(payload[6][4][2], "12345")
+
+    def test_extract_text_push_returns_message_and_ack_id(self):
+        raw = base64.b64decode(
+            "CABAAEqNAgoCCAAi6QEIqJiAiuez478VEjwKDmN4LWRldiNjeHN0dWR5EggyNTI3ODk3NBoL"
+            "ZWFzZW1vYi5jb20iE3dlYmltXzE3NzgyNDU2NTQ2MzcaJwoOY3gtZGV2I2N4c3R1ZHkSCDI1"
+            "Mjc4OTc0GgtlYXNlbW9iLmNvbSD17c294DMoATIpCAESChIIMjUyNzg5NzQaChIIMjUyNzg5"
+            "NzQiCQgAEgUxMjM0NUoCe31CGwoRY2hhdF9yb3V0ZV90YXJnZXQQBzIEc2VsZkIUCgljbGll"
+            "bnRfaWQQBBiH0M294DNKD3siaXNfb25saW5lIjoxfSiomICK57PjvxUyChIIMjUyNzg5NzRA"
+            "+/LNveAz"
+        )
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        decoded = decode_message(raw)
+        push = client._extract_text_push(decoded)
+
+        self.assertEqual(push["from"], "25278974")
+        self.assertEqual(push["to"], "25278974")
+        self.assertEqual(push["content"], "12345")
+        self.assertEqual(push["message_id"], 1549112508483111976)
 
     def test_get_history_messages_posts_expected_payload(self):
         response = _FakeResponse(
@@ -150,6 +200,24 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertTrue(session.calls[0]["url"].endswith("/webim/user/getUserInfoByTuid"))
         self.assertTrue(session.calls[1]["url"].endswith("/webim/message/history/addMessage"))
+
+    def test_send_message_uses_history_chat_id_for_history_write(self):
+        response = [
+            _FakeResponse(payload={"data": {"name": "郝玉锋", "icon": "http://photo.example/avatar.png"}}),
+            _FakeResponse(payload={"status": "success"}),
+        ]
+        session = _FakeSession(response)
+        api = _FakeChatAPI(
+            session,
+            course_params={"im_tuid": "100", "im_puid": "200", "im_token": "token-1"},
+        )
+        api._connected = True
+
+        result = api.send_message("peer-123", "hello", target_name="张三", history_chat_id="chat-456")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(api._last_msync_target, "peer-123")
+        self.assertEqual(session.calls[1]["data"]["chatManId"], "chat-456")
 
 
 if __name__ == "__main__":
