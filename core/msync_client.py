@@ -371,6 +371,56 @@ def build_receive_ack(message_id: int, username: str) -> bytes:
     return root.bytes()
 
 
+def build_conversation_read(
+    app_key: str,
+    from_user: str,
+    to_user: str,
+    domain: str,
+    resource: str,
+    message_id: int,
+    conversation_type: int = 1,
+) -> bytes:
+    """构造打开会话后的已读同步帧。"""
+    root = ProtoBufWriter()
+    root.uint32(1, 0)
+
+    from_jid = build_jid(app_key, from_user, domain, resource)
+    root.embedded(2, from_jid)
+    root.uint32(8, 0)
+
+    meta = ProtoBufWriter()
+    meta.uint64(1, max(0, int(time.time() * 1000) - MSYNC_SEND_EPOCH_MS))
+    meta.embedded(2, build_jid(app_key, from_user, domain, resource))
+
+    to_jid = ProtoBufWriter()
+    to_jid.string(1, app_key)
+    to_jid.string(2, to_user)
+    to_jid.string(3, domain)
+    meta.embedded(3, to_jid)
+    meta.uint32(5, int(conversation_type or 1))
+
+    body = ProtoBufWriter()
+    body.uint32(1, 4)
+
+    from_inner = ProtoBufWriter()
+    from_inner.string(2, from_user)
+    body.embedded(2, from_inner)
+
+    to_inner = ProtoBufWriter()
+    to_inner.string(2, to_user)
+    body.embedded(3, to_inner)
+    body.string(4, "")
+    body.uint64(6, int(message_id or 0))
+    meta.embedded(6, body)
+
+    comm_sync = ProtoBufWriter()
+    comm_sync.embedded(1, meta)
+    root.embedded(9, comm_sync)
+
+    root.uint32(11, 0)
+    return root.bytes()
+
+
 def build_history_open() -> bytes:
     """构造打开会话历史同步的起始帧。"""
     root = ProtoBufWriter()
@@ -389,6 +439,23 @@ def build_history_subject(subject: str) -> bytes:
     user_ref = ProtoBufWriter()
     user_ref.string(2, subject)
     meta.embedded(3, user_ref)
+    root.embedded(9, meta)
+    root.uint32(11, 0)
+    return root.bytes()
+
+
+def build_history_subject_sync(cursor: int, subject: str, domain: str = "") -> bytes:
+    """构造二阶段逐 subject 历史同步请求帧。"""
+    root = ProtoBufWriter()
+    root.uint32(1, 0)
+    root.uint32(8, 0)
+    meta = ProtoBufWriter()
+    meta.uint64(2, int(cursor or 0))
+    subject_ref = ProtoBufWriter()
+    subject_ref.string(2, subject)
+    if domain:
+        subject_ref.string(3, domain)
+    meta.embedded(3, subject_ref)
     root.embedded(9, meta)
     root.uint32(11, 0)
     return root.bytes()
@@ -422,10 +489,14 @@ def sockjs_encode(data: bytes) -> str:
 
 def sockjs_decode(frame: str) -> bytes:
     """解析 SockJS 接收帧, 返回 protobuf bytes 或 b''."""
+    messages = sockjs_decode_all(frame)
+    return b"".join(messages) if messages else b""
+
+
+def sockjs_decode_all(frame: str) -> list[bytes]:
+    """解析 SockJS 接收帧, 返回 protobuf bytes 列表。"""
     if frame.startswith('a["') and frame.endswith('"]') or frame.startswith('a["') and '"]' in frame:
-        # 处理 a["base64"] 或 a["base64","base64"]
-        inner = frame[2:-1]  # 去掉 a[ 和 ]
-        # 可能有多个消息
+        inner = frame[2:-1]
         parts = []
         for part in inner.split(','):
             part = part.strip().strip('"')
@@ -434,17 +505,10 @@ def sockjs_decode(frame: str) -> bytes:
                     parts.append(base64.b64decode(part))
                 except Exception:
                     pass
-        return b''.join(parts) if parts else b''
-    elif frame.startswith('o'):
-        # SockJS open
-        return b''
-    elif frame.startswith('h'):
-        # SockJS heartbeat
-        return b''
-    elif frame.startswith('c['):
-        # SockJS close
-        return b''
-    return b''
+        return parts
+    if frame.startswith('o') or frame.startswith('h') or frame.startswith('c['):
+        return []
+    return []
 
 
 # ── MSync 客户端 ───────────────────────────────────────
@@ -491,6 +555,11 @@ class MSyncClient:
         self._heartbeat_timer = None
         self._authenticated = False
         self._pending_history_peers = []
+        self._pending_history_summary_peers = []
+        self._pending_subject_syncs = []
+        self._pending_conversation_reads = []
+        self._last_history_summary = None
+        self._last_history_subject_acks = []
 
     # ── 连接管理 ──
 
@@ -616,11 +685,47 @@ class MSyncClient:
         logger.info(f"MSync: send receive ack message_id={message_id}")
         self._ws.send(frame)
 
-    def _send_history_request(self, peer_id: str):
+    def send_conversation_read(self, peer_id: str, message_id: int, conversation_type: int = 1):
+        """发送会话已读同步。"""
+        pb = build_conversation_read(
+            app_key=self.app_key,
+            from_user=self._username,
+            to_user=str(peer_id or ""),
+            domain=self.domain,
+            resource=self._resource,
+            message_id=int(message_id or 0),
+            conversation_type=conversation_type,
+        )
+        frame = sockjs_encode(pb)
+        logger.info(f"MSync: send conversation read peer_id={peer_id} message_id={message_id}")
+        self._ws.send(frame)
+
+    def send_history_subject_sync(self, subject: str, cursor: int, domain: str = ""):
+        """发送二阶段逐 subject 历史同步请求。"""
+        pb = build_history_subject_sync(cursor, subject, domain=domain)
+        self._ws.send(sockjs_encode(pb))
+
+    def _build_history_subjects(self, peer_ids):
         subjects = []
-        for subject in (self._username, peer_id, "admin", "easemob_chat"):
+        for subject in [self._username, *(peer_ids or []), "admin", "easemob_chat"]:
+            subject = str(subject or "")
             if subject and subject not in subjects:
                 subjects.append(subject)
+        return subjects
+
+    def _send_history_request(self, peer_id: str):
+        subjects = self._build_history_subjects([peer_id])
+        frames = [build_history_open()]
+        frames.extend(build_history_subject(subject) for subject in subjects)
+        frames.append(build_history_sync(int(time.time() * 1000)))
+
+        for pb in frames:
+            self._ws.send(sockjs_encode(pb))
+
+    def _send_history_summary_request(self, peer_ids):
+        subjects = self._build_history_subjects(peer_ids)
+        if not subjects:
+            return
 
         frames = [build_history_open()]
         frames.extend(build_history_subject(subject) for subject in subjects)
@@ -628,6 +733,17 @@ class MSyncClient:
 
         for pb in frames:
             self._ws.send(sockjs_encode(pb))
+
+    def _send_history_subject_syncs(self, subject_syncs):
+        for item in subject_syncs or []:
+            if not isinstance(item, dict):
+                continue
+            subject = str(item.get("subject") or "")
+            cursor = item.get("cursor")
+            if not subject or not isinstance(cursor, int):
+                continue
+            domain = str(item.get("domain") or "")
+            self.send_history_subject_sync(subject, cursor, domain=domain)
 
     def _queue_history_request(self, peer_id: str):
         peer_id = str(peer_id or "")
@@ -637,15 +753,88 @@ class MSyncClient:
             self._pending_history_peers.append(peer_id)
         return True
 
+    def _queue_history_summary_request(self, peer_ids):
+        queued = False
+        for peer_id in peer_ids or []:
+            peer_id = str(peer_id or "")
+            if not peer_id:
+                continue
+            if peer_id not in self._pending_history_summary_peers:
+                self._pending_history_summary_peers.append(peer_id)
+            queued = True
+        return queued
+
+    def _queue_subject_syncs(self, subject_syncs):
+        queued = False
+        for item in subject_syncs or []:
+            if not isinstance(item, dict):
+                continue
+            subject = str(item.get("subject") or "")
+            cursor = item.get("cursor")
+            if not subject or not isinstance(cursor, int):
+                continue
+            payload = {
+                "subject": subject,
+                "cursor": cursor,
+                "domain": str(item.get("domain") or ""),
+            }
+            if payload not in self._pending_subject_syncs:
+                self._pending_subject_syncs.append(payload)
+            queued = True
+        return queued
+
+    def _queue_conversation_read(self, peer_id: str, message_id: int, conversation_type: int = 1):
+        peer_id = str(peer_id or "")
+        try:
+            message_id = int(message_id or 0)
+        except Exception:
+            message_id = 0
+        if not peer_id or message_id <= 0:
+            return False
+        payload = {
+            "peer_id": peer_id,
+            "message_id": message_id,
+            "conversation_type": int(conversation_type or 1),
+        }
+        self._pending_conversation_reads = [
+            item for item in self._pending_conversation_reads
+            if not (item.get("peer_id") == peer_id and int(item.get("conversation_type") or 1) == payload["conversation_type"])
+        ]
+        self._pending_conversation_reads.append(payload)
+        return True
+
     def _flush_pending_history_requests(self):
         if not self.is_connected():
             return
+        if self._pending_history_summary_peers:
+            peer_ids = list(self._pending_history_summary_peers)
+            self._pending_history_summary_peers.clear()
+            try:
+                self._send_history_summary_request(peer_ids)
+            except Exception as e:
+                logger.warning(f"MSync: flush pending history summary failed peer_ids={peer_ids} error={e}")
         while self._pending_history_peers:
             peer_id = self._pending_history_peers.pop(0)
             try:
                 self._send_history_request(peer_id)
             except Exception as e:
                 logger.warning(f"MSync: flush pending history failed peer_id={peer_id} error={e}")
+        while self._pending_subject_syncs:
+            payload = self._pending_subject_syncs.pop(0)
+            try:
+                self._send_history_subject_syncs([payload])
+            except Exception as e:
+                logger.warning(f"MSync: flush pending subject sync failed payload={payload} error={e}")
+        while self._pending_conversation_reads:
+            payload = self._pending_conversation_reads.pop(0)
+            try:
+                self.send_conversation_read(
+                    payload.get("peer_id"),
+                    int(payload.get("message_id") or 0),
+                    conversation_type=int(payload.get("conversation_type") or 1),
+                )
+            except Exception as e:
+                logger.warning(f"MSync: flush pending conversation read failed payload={payload} error={e}")
 
     def request_history(self, peer_id: str):
         """请求某个会话的历史同步。"""
@@ -654,6 +843,39 @@ class MSyncClient:
             return True
         if self.is_running():
             return self._queue_history_request(peer_id)
+        raise ConnectionError("未连接")
+
+    def request_history_summary(self, peer_ids):
+        """请求消息列表里一批会话的历史汇总，用于未读计数。"""
+        if self.is_connected():
+            self._send_history_summary_request(peer_ids)
+            return True
+        if self.is_running():
+            return self._queue_history_summary_request(peer_ids)
+        raise ConnectionError("未连接")
+
+    def request_history_subject_syncs(self, subject_syncs):
+        """请求二阶段逐 subject 历史同步。"""
+        if self.is_connected():
+            self._send_history_subject_syncs(subject_syncs)
+            return True
+        if self.is_running():
+            return self._queue_subject_syncs(subject_syncs)
+        raise ConnectionError("未连接")
+
+    def request_conversation_read(self, peer_id: str, message_id: int, conversation_type: int = 1):
+        """请求同步某个会话的已读位置。"""
+        try:
+            message_id = int(message_id or 0)
+        except Exception:
+            message_id = 0
+        if message_id <= 0:
+            return False
+        if self.is_connected():
+            self.send_conversation_read(peer_id, message_id, conversation_type=conversation_type)
+            return True
+        if self.is_running():
+            return self._queue_conversation_read(peer_id, message_id, conversation_type=conversation_type)
         raise ConnectionError("未连接")
 
     # ── 内部方法 ──
@@ -731,6 +953,55 @@ class MSyncClient:
         elif isinstance(value, list):
             for child in value:
                 yield from self._iter_dict_nodes(child, ancestors)
+
+    def _iter_string_values(self, value):
+        if isinstance(value, str):
+            yield value
+            return
+        if isinstance(value, dict):
+            for child in value.values():
+                yield from self._iter_string_values(child)
+            return
+        if isinstance(value, list):
+            for child in value:
+                yield from self._iter_string_values(child)
+
+    def _normalize_class_info(self, value):
+        if not isinstance(value, dict):
+            return None
+        chat_id = str(value.get("chatid") or value.get("chatId") or "").strip()
+        class_name = str(value.get("clazzName") or value.get("classname") or "").strip()
+        course_name = str(value.get("coursename") or value.get("courseName") or "").strip()
+        if not (chat_id or class_name or course_name):
+            return None
+        return {
+            "chat_id": chat_id,
+            "class_name": class_name,
+            "course_name": course_name,
+            "class_id": str(value.get("classid") or value.get("classId") or "").strip(),
+            "course_id": str(value.get("courseid") or value.get("courseId") or "").strip(),
+            "image_url": str(value.get("imageUrl") or value.get("chatIco") or "").strip(),
+            "teacher_factor": str(value.get("teacherfactor") or value.get("teacherFactor") or "").strip(),
+            "role": int(value.get("role") or 0) if str(value.get("role") or "").isdigit() else value.get("role") or 0,
+            "is_teacher": bool(value.get("isTeacher", False)),
+        }
+
+    def _extract_class_info(self, *values):
+        for value in values:
+            for text in self._iter_string_values(value):
+                text = str(text or "").strip()
+                if not text.startswith("{") or not text.endswith("}"):
+                    continue
+                if not any(key in text for key in ('"chatid"', '"chatId"', '"clazzName"', '"classname"', '"coursename"', '"courseName"')):
+                    continue
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    continue
+                normalized = self._normalize_class_info(parsed)
+                if normalized:
+                    return normalized
+        return None
 
     def _extract_text_content(self, value):
         item = self._first(value)
@@ -864,7 +1135,7 @@ class MSyncClient:
                 body_from = self._extract_jid_username(body.get(2))
                 body_to = self._extract_jid_username(body.get(3))
                 peer_id = self._resolve_peer_from_users(route_from, route_to, body_from, body_to)
-                messages.append({
+                message = {
                     "from": route_from or body_from,
                     "to": route_to or body_to,
                     "peer_id": peer_id,
@@ -872,7 +1143,11 @@ class MSyncClient:
                     "timestamp": self._select_timestamp(entry.get(4), meta_timestamp),
                     "message_id": self._select_message_id(entry.get(1), meta.get(5)),
                     "history_sync": True,
-                })
+                }
+                class_info = self._extract_class_info(entry, body)
+                if class_info:
+                    message["class_info"] = class_info
+                messages.append(message)
         return messages
 
     def _extract_read_acks(self, decoded: dict):
@@ -928,6 +1203,15 @@ class MSyncClient:
                 elif not isinstance(conversation_type, int):
                     conversation_type = 0
 
+                unread_count = args.get("unreadCount")
+                if isinstance(unread_count, str):
+                    try:
+                        unread_count = int(unread_count)
+                    except Exception:
+                        unread_count = None
+                elif not isinstance(unread_count, int):
+                    unread_count = None
+
                 event = {
                     "event": "read_ack",
                     "command": command_name,
@@ -939,12 +1223,104 @@ class MSyncClient:
                     "timestamp": int(timestamp or 0),
                     "conversation_type": conversation_type,
                 }
+                if unread_count is not None:
+                    event["unread_count"] = unread_count
                 identity = (event["message_id"], event["timestamp"], event["peer_id"])
                 if identity in seen:
                     continue
                 seen.add(identity)
                 events.append(event)
         return events
+
+    def _extract_history_summary(self, decoded: dict):
+        """提取历史同步汇总帧中的 subject/count 列表。"""
+        if not isinstance(decoded, dict):
+            return None
+
+        message_type = self._first(decoded.get(8))
+        meta = self._first(decoded.get(9))
+        if message_type != 1 or not isinstance(meta, dict):
+            return None
+
+        entries = meta.get(2)
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            return None
+
+        subjects = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            subject = self._extract_jid_username(entry.get(1))
+            count = self._first(entry.get(2))
+            if not subject or not isinstance(count, int):
+                continue
+            subjects.append({
+                "subject": subject,
+                "count": count,
+            })
+
+        if not subjects:
+            return None
+
+        timestamp = self._first(meta.get(3))
+        if not isinstance(timestamp, int):
+            timestamp = 0
+
+        event = {
+            "event": "history_summary",
+            "subjects": subjects,
+            "timestamp": timestamp,
+        }
+        self._last_history_summary = event
+        return event
+
+    def _extract_history_subject_acks(self, decoded: dict):
+        """提取二阶段逐 subject 同步确认帧。"""
+        if not isinstance(decoded, dict):
+            return []
+
+        message_type = self._first(decoded.get(8))
+        meta = self._first(decoded.get(9))
+        if message_type != 0 or not isinstance(meta, dict):
+            return []
+
+        subject_ref = self._first(meta.get(6))
+        if not isinstance(subject_ref, dict):
+            return []
+
+        subject = self._extract_jid_username(subject_ref)
+        if not subject:
+            return []
+
+        domain = str(self._first(subject_ref.get(3)) or "")
+        if isinstance(self._first(meta.get(7)), int):
+            ack_field = 7
+            ack_code = self._first(meta.get(7))
+        elif isinstance(self._first(meta.get(11)), int):
+            ack_field = 11
+            ack_code = self._first(meta.get(11))
+        else:
+            ack_field = 0
+            ack_code = 0
+        if ack_field == 0:
+            return []
+
+        timestamp = self._first(meta.get(8))
+        if not isinstance(timestamp, int):
+            timestamp = 0
+
+        event = {
+            "event": "history_subject_ack",
+            "subject": subject,
+            "domain": domain,
+            "ack_code": int(ack_code or 0),
+            "ack_field": ack_field,
+            "timestamp": timestamp,
+        }
+        self._last_history_subject_acks.append(event)
+        return [event]
 
     def _extract_text_push(self, decoded: dict):
         fallback_push = None
@@ -986,6 +1362,9 @@ class MSyncClient:
                         *[ancestor.get(2) for ancestor in reversed(ancestors)],
                     ),
                 }
+                class_info = self._extract_class_info(node, body, ancestors)
+                if class_info:
+                    push["class_info"] = class_info
 
                 if from_user and to_user:
                     return push
@@ -1002,55 +1381,69 @@ class MSyncClient:
 
     def _on_ws_message(self, ws, message):
         logger.debug(f"MSync: recv raw={message[:100]}...")
-        data = sockjs_decode(message)
-        if not data:
+        frames = sockjs_decode_all(message)
+        if not frames:
             return
 
-        try:
-            decoded = decode_message(data)
-            logger.debug(f"MSync: decoded={decoded}")
-            if decoded:
-                self._authenticated = True
+        for data in frames:
+            try:
+                decoded = decode_message(data)
+                logger.debug(f"MSync: decoded={decoded}")
+                if decoded:
+                    self._authenticated = True
 
-            message_type = self._first(decoded.get(8))
-            meta = self._first(decoded.get(9))
+                message_type = self._first(decoded.get(8))
+                meta = self._first(decoded.get(9))
 
-            if message_type == 2 and isinstance(meta, dict) and self._first(meta.get(1)) is not None:
-                self.send_sync_reply()
+                if message_type == 2 and isinstance(meta, dict) and self._first(meta.get(1)) is not None:
+                    self.send_sync_reply()
+                    self._flush_pending_history_requests()
+                    continue
+
                 self._flush_pending_history_requests()
-                return
 
-            self._flush_pending_history_requests()
+                read_acks = self._extract_read_acks(decoded)
+                if read_acks and self.on_message:
+                    for event in read_acks:
+                        self.on_message(event)
 
-            read_acks = self._extract_read_acks(decoded)
-            if read_acks and self.on_message:
-                for event in read_acks:
-                    self.on_message(event)
+                history_summary = self._extract_history_summary(decoded)
+                if history_summary and self.on_message:
+                    self.on_message(history_summary)
+                    if read_acks:
+                        continue
 
-            batch_messages = self._extract_batch_messages(decoded)
-            if batch_messages:
-                for push in batch_messages:
+                subject_acks = self._extract_history_subject_acks(decoded)
+                if subject_acks and self.on_message:
+                    for event in subject_acks:
+                        self.on_message(event)
+                    if read_acks:
+                        continue
+
+                batch_messages = self._extract_batch_messages(decoded)
+                if batch_messages:
+                    for push in batch_messages:
+                        if self.on_message:
+                            self.on_message(push)
+                    if read_acks or subject_acks:
+                        continue
+                    continue
+
+                push = self._extract_text_push(decoded)
+                if push:
+                    message_id = push.pop("message_id", None)
+                    if isinstance(message_id, int):
+                        self.send_receive_ack(message_id)
                     if self.on_message:
                         self.on_message(push)
-                if read_acks:
-                    return
-                return
+                    continue
 
-            push = self._extract_text_push(decoded)
-            if push:
-                message_id = push.pop("message_id", None)
-                if isinstance(message_id, int):
-                    self.send_receive_ack(message_id)
-                if self.on_message:
-                    self.on_message(push)
-                return
+                if read_acks or subject_acks:
+                    continue
 
-            if read_acks:
-                return
-
-            logger.debug(f"MSync: unrecognized message structure {decoded}")
-        except Exception as e:
-            logger.error(f"MSync: decode error {e}")
+                logger.debug(f"MSync: unrecognized message structure {decoded}")
+            except Exception as e:
+                logger.error(f"MSync: decode error {e}")
 
     def _on_ws_error(self, ws, error):
         self._authenticated = False

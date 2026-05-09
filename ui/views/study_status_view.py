@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QColor
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE
 from ui.workers import (
     AttendanceWorker, AttendanceDetailWorker, AbsenceStatsWorker, HomeworkWorker,
@@ -31,6 +31,9 @@ class StudyStatusView(QWidget):
         self.current_class_id = None         # 当前班级 ID
         self.current_class_name = ""         # 当前授课班级名
         self.communication_manager = CommunicationManager()  # 沟通状态管理器
+        self.absence_worker = None
+        self._absence_stats_loading = False
+        self._absence_dialog_open = False
         self.homework_export_worker = None
         self.btn_homework_export = None
         
@@ -86,12 +89,61 @@ class StudyStatusView(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _apply_stats_table_style(self, table: QTableWidget):
+        """统一统计表格的深色主题，避免不同平台使用系统默认交替行配色。"""
+        if not table:
+            return
+
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setShowGrid(True)
+        table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e1e;
+                alternate-background-color: #252526;
+                color: #e6e6e6;
+                gridline-color: #333333;
+                border: 1px solid #333333;
+                border-radius: 8px;
+                selection-background-color: #007acc;
+                selection-color: #ffffff;
+            }
+            QTableWidget::item {
+                color: #e6e6e6;
+                padding: 6px 8px;
+                border: none;
+            }
+            QTableWidget::item:selected {
+                color: #ffffff;
+                background-color: #007acc;
+            }
+            QHeaderView::section {
+                background-color: #252526;
+                color: #d0d0d0;
+                padding: 8px;
+                border: 1px solid #333333;
+                font-weight: bold;
+            }
+            QTableCornerButton::section {
+                background-color: #252526;
+                border: 1px solid #333333;
+            }
+        """)
+        table.verticalHeader().setDefaultSectionSize(36)
+        table.verticalHeader().setMinimumSectionSize(32)
+
     def _show_loading(self, message: str):
         """显示加载提示"""
         self.clear_content()
         loading_label = QLabel(message)
         loading_label.setStyleSheet("color: #007acc; padding: 20px;")
         self.content_layout.addWidget(loading_label)
+
+    def _set_absence_stats_busy(self, busy: bool):
+        self._absence_stats_loading = bool(busy)
+        if self.btn_absence_stats:
+            self.btn_absence_stats.setEnabled(not busy)
+            self.btn_absence_stats.setText("统计中..." if busy else "📊 缺勤统计")
 
     def _show_placeholder(self, message: str):
         """显示占位提示"""
@@ -169,7 +221,7 @@ class StudyStatusView(QWidget):
         self.attendance_table.setHorizontalHeaderLabels(["活动名称", "活动类型", "创建时间", "活动时间", "状态", "操作"])
         self.attendance_table.setRowCount(len(ended_attendance))
         self.attendance_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.attendance_table.setAlternatingRowColors(True)
+        self._apply_stats_table_style(self.attendance_table)
         self.attendance_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.attendance_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         
@@ -191,7 +243,7 @@ class StudyStatusView(QWidget):
             
             # 状态
             status_item = QTableWidgetItem(activity.status_name)
-            status_item.setForeground(Qt.GlobalColor.darkGray)
+            status_item.setForeground(QColor("#a0a0a0"))
             self.attendance_table.setItem(row, 4, status_item)
             
             # 查看按钮
@@ -300,8 +352,15 @@ class StudyStatusView(QWidget):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "无数据", "请先加载考勤情况数据")
             return
+
+        if self._absence_stats_loading:
+            return
+
+        if self._absence_dialog_open:
+            return
         
         self.status_update.emit("正在统计缺勤情况，请稍候...")
+        self._set_absence_stats_busy(True)
         
         # 异步统计缺勤数据
         self.absence_worker = AbsenceStatsWorker(
@@ -311,15 +370,25 @@ class StudyStatusView(QWidget):
             self.current_class_id,
         )
         self.absence_worker.stats_ready.connect(self._show_absence_stats)
+        self.absence_worker.finished.connect(self._on_absence_stats_worker_finished)
         self.absence_worker.start()
+
+    def _on_absence_stats_worker_finished(self):
+        self.absence_worker = None
+        if not self._absence_dialog_open:
+            self._set_absence_stats_busy(False)
     
     def _show_absence_stats(self, result):
         """显示缺勤统计对话框"""
+        if self._absence_dialog_open:
+            return
+
         if isinstance(result, str):
             # 错误信息
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "统计失败", f"统计缺勤数据失败：\n{result}")
             self.status_update.emit("缺勤统计失败")
+            self._set_absence_stats_busy(False)
             return
         
         # 检查是否有课程和班级 ID
@@ -327,6 +396,7 @@ class StudyStatusView(QWidget):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "错误", "无法获取课程信息")
             self.status_update.emit("缺勤统计失败")
+            self._set_absence_stats_busy(False)
             return
         
         # 导入并显示对话框
@@ -339,7 +409,12 @@ class StudyStatusView(QWidget):
             self.current_class_name,
             self
         )
-        dialog.exec()
+        self._absence_dialog_open = True
+        try:
+            dialog.exec()
+        finally:
+            self._absence_dialog_open = False
+            self._set_absence_stats_busy(False)
         
         self.status_update.emit("缺勤统计完成")
 
@@ -404,7 +479,7 @@ class StudyStatusView(QWidget):
         self.homework_table.setColumnCount(10)
         self.homework_table.setHorizontalHeaderLabels(["学号", "姓名", "作业数", "已提交", "待批", "未提交", "平均分", "最低分", "最高分", "沟通情况"])
         self.homework_table.setRowCount(len(result))
-        self.homework_table.setAlternatingRowColors(True)
+        self._apply_stats_table_style(self.homework_table)
         self.homework_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.homework_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         
@@ -499,9 +574,9 @@ class StudyStatusView(QWidget):
             # 存储 person_id 到单元格数据中，确保排序后仍能正确关联
             comm_item.setData(Qt.ItemDataRole.UserRole, stats.person_id)
             if communicated:
-                comm_item.setForeground(Qt.GlobalColor.darkGreen)
+                comm_item.setForeground(QColor("#4caf50"))
             else:
-                comm_item.setForeground(Qt.GlobalColor.gray)
+                comm_item.setForeground(QColor("#b8b8b8"))
             self.homework_table.setItem(row, 9, comm_item)
         
         # 数据填充完成，启用排序功能
@@ -559,9 +634,9 @@ class StudyStatusView(QWidget):
         # 更新表格显示
         comm_item.setText("☑" if new_status else "☐")
         if new_status:
-            comm_item.setForeground(Qt.GlobalColor.darkGreen)
+            comm_item.setForeground(QColor("#4caf50"))
         else:
-            comm_item.setForeground(Qt.GlobalColor.gray)
+            comm_item.setForeground(QColor("#b8b8b8"))
     
     def keyPressEvent(self, event):
         """处理键盘事件。"""

@@ -156,6 +156,26 @@ class ChatAPI:
             logger.warning(f"ChatAPI.request_history_msync: 请求失败 - {e}")
             return False
 
+    def request_history_summary_msync(self, target_user_ids: list[str]):
+        """通过 MSync 请求会话列表的历史汇总，用于未读计数。"""
+        if not self._msync:
+            return False
+        try:
+            return bool(self._msync.request_history_summary(target_user_ids))
+        except Exception as e:
+            logger.warning(f"ChatAPI.request_history_summary_msync: 请求失败 - {e}")
+            return False
+
+    def request_conversation_read_msync(self, target_user_id: str, message_id: str | int):
+        """通过 MSync 同步会话已读位置。"""
+        if not self._msync:
+            return False
+        try:
+            return bool(self._msync.request_conversation_read(target_user_id, message_id))
+        except Exception as e:
+            logger.warning(f"ChatAPI.request_conversation_read_msync: 请求失败 - {e}")
+            return False
+
     def get_group_members(self, room_id: str, tuid=None, token=None):
         """获取群聊成员列表。"""
         room_id = str(room_id or "")

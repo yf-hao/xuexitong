@@ -1,22 +1,30 @@
+import json
 import unittest
 import base64
 import threading
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.apis.chat_api import ChatAPI
 from core.msync_client import (
     MSyncClient,
+    build_conversation_read,
     build_history_open,
     build_history_subject,
+    build_history_subject_sync,
     build_history_sync,
     build_send_message,
     build_receive_ack,
     build_sync_reply,
     decode_message,
     sockjs_encode,
+    sockjs_decode_all,
 )
 from ui.views.chat_view import ChatView
+from ui.views.study_status_view import StudyStatusView
+from ui.dialogs.absence_stats_dialog import AbsenceStatsDialog
 
 
 class _FakeResponse:
@@ -104,6 +112,23 @@ class ChatAPITests(unittest.TestCase):
         frame = base64.b64encode(build_receive_ack(1549112508483111976, "25278974")).decode()
         self.assertEqual(frame, "CABAAEoWEKiYgIrns+O/FRoKEggyNTI3ODk3NFgA")
 
+    def test_build_conversation_read_matches_captured_frame(self):
+        with patch("core.msync_client.time.time", return_value=1778320752.883):
+            frame = base64.b64encode(
+                build_conversation_read(
+                    app_key="cx-dev#cxstudy",
+                    from_user="25278974",
+                    to_user="247836588",
+                    domain="easemob.com",
+                    resource="webim_1778318788491",
+                    message_id=1549317683114151060,
+                )
+            ).decode()
+        self.assertEqual(
+            frame,
+            "CAASPAoOY3gtZGV2I2N4c3R1ZHkSCDI1Mjc4OTc0GgtlYXNlbW9iLmNvbSITd2ViaW1fMTc3ODMxODc4ODQ5MUAASp0BCpoBCPOxxLj4DhI8Cg5jeC1kZXYjY3hzdHVkeRIIMjUyNzg5NzQaC2Vhc2Vtb2IuY29tIhN3ZWJpbV8xNzc4MzE4Nzg4NDkxGigKDmN4LWRldiNjeHN0dWR5EgkyNDc4MzY1ODgaC2Vhc2Vtb2IuY29tKAEyJwgEEgoSCDI1Mjc4OTc0GgsSCTI0NzgzNjU4OCIAMJSZgJKWh5LAFVgA",
+        )
+
     def test_build_history_frames_match_captured_frames(self):
         self.assertEqual(base64.b64encode(build_history_open()).decode(), "CABAAVgA")
         self.assertEqual(base64.b64encode(build_history_subject("25278974")).decode(), "CABAAEoMGgoSCDI1Mjc4OTc0WAA=")
@@ -114,6 +139,26 @@ class ChatAPITests(unittest.TestCase):
             base64.b64encode(build_history_sync(1778250648847)).decode(),
             "CABAAEoPCg0Ij5r+v+AzKAAyAggAWAA=",
         )
+
+    def test_build_history_subject_sync_matches_captured_frames(self):
+        self.assertEqual(
+            base64.b64encode(build_history_subject_sync(1549416979549404396, "247836588")).decode(),
+            "CABAAEoXEOz5gJiK0ajAFRoLEgkyNDc4MzY1ODhYAA==",
+        )
+        self.assertEqual(
+            base64.b64encode(
+                build_history_subject_sync(
+                    1549420076426333220,
+                    "313439014682626",
+                    domain="conference.easemob.com",
+                )
+            ).decode(),
+            "CABAAEo1EKSYgPqaq6nAFRopEg8zMTM0MzkwMTQ2ODI2MjYaFmNvbmZlcmVuY2UuZWFzZW1vYi5jb21YAA==",
+        )
+
+    def test_sockjs_decode_all_splits_multiple_messages(self):
+        decoded = sockjs_decode_all('a["QQ==","Qg=="]')
+        self.assertEqual(decoded, [b"A", b"B"])
 
     def test_build_send_message_matches_captured_browser_frame(self):
         with patch("core.msync_client.time.time", return_value=1778249614.196):
@@ -318,6 +363,187 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(ack["from_puid"], "30047383")
         self.assertEqual(ack["timestamp"], 1778249900000)
 
+    def test_extract_read_ack_includes_unread_count(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        client._username = "25278974"
+        decoded = {
+            9: {
+                4: {
+                    2: {2: "25278974"},
+                    3: {2: "25278974"},
+                    6: {
+                        1: 1,
+                        2: {2: "25278974"},
+                        3: {2: "25278974"},
+                        4: {1: 6, 10: "CMD_READ_ACK"},
+                        5: [
+                            {1: "conversationId", 6: "25278974"},
+                            {1: "messageId", 6: "1549287205527104536"},
+                            {1: "timestamp", 6: "1778286337275"},
+                            {1: "unreadCount", 3: 1},
+                        ],
+                    },
+                }
+            }
+        }
+
+        events = client._extract_read_acks(decoded)
+
+        self.assertEqual(events[0]["unread_count"], 1)
+
+    def test_extract_history_summary_returns_subject_counts(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        decoded = {
+            1: 0,
+            8: 1,
+            9: {
+                1: {1: 0},
+                2: [
+                    {1: {2: "247836588"}, 2: 4},
+                    {1: {2: "25278974"}, 2: 3},
+                    {1: {2: "358566558"}, 2: 5},
+                    {1: {2: "easemob_chat"}, 2: 1},
+                ],
+                3: 1778316224885,
+            },
+        }
+
+        event = client._extract_history_summary(decoded)
+
+        self.assertEqual(
+            event,
+            {
+                "event": "history_summary",
+                "subjects": [
+                    {"subject": "247836588", "count": 4},
+                    {"subject": "25278974", "count": 3},
+                    {"subject": "358566558", "count": 5},
+                    {"subject": "easemob_chat", "count": 1},
+                ],
+                "timestamp": 1778316224885,
+            },
+        )
+        self.assertEqual(client._last_history_summary, event)
+
+    def test_extract_history_subject_ack_ignores_batch_history_frame(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        decoded = {
+            1: 0,
+            8: 0,
+            9: {
+                4: [{
+                    1: 1549416979549404396,
+                    2: {2: "25278974"},
+                    3: {2: "247836588"},
+                    4: 1778316552653,
+                    6: {1: 4, 2: {2: "25278974"}, 3: {2: "247836588"}, 4: "", 6: 1549317683114151060},
+                }],
+                5: 1549416979549404396,
+                6: {2: "247836588"},
+                8: 1778317529391,
+            },
+        }
+
+        events = client._extract_history_subject_acks(decoded)
+
+        self.assertEqual(events, [])
+
+    def test_extract_history_subject_ack_returns_subject_timestamp_and_flag(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        decoded = {
+            1: 0,
+            8: 0,
+            9: {
+                1: {1: 0},
+                6: {2: "313439014682626", 3: "conference.easemob.com"},
+                11: 1,
+                8: 1778317531421,
+            },
+        }
+
+        events = client._extract_history_subject_acks(decoded)
+
+        self.assertEqual(
+            events,
+            [{
+                "event": "history_subject_ack",
+                "subject": "313439014682626",
+                "domain": "conference.easemob.com",
+                "ack_code": 1,
+                "ack_field": 11,
+                "timestamp": 1778317531421,
+            }],
+        )
+        self.assertEqual(client._last_history_subject_acks[-1], events[0])
+
+    def test_extract_batch_messages_includes_class_info(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        client._username = "25278974"
+        decoded = {
+            9: {
+                4: [{
+                    1: 1549133423325482008,
+                    2: {2: "358566558"},
+                    3: {2: "25278974"},
+                    4: 1778250284057,
+                    6: {
+                        1: 1,
+                        2: {2: "358566558"},
+                        3: {2: "25278974"},
+                        4: {1: 0, 2: "老师说明天上课"},
+                        8: (
+                            '{"chatid":"306927744647171","clazzName":"4.01计科3班、4班",'
+                            '"coursename":"离散数学（2025-2026-2）","imageUrl":"https://photo.example/group.png"}'
+                        ),
+                    },
+                }]
+            }
+        }
+
+        messages = client._extract_batch_messages(decoded)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(
+            messages[0]["class_info"],
+            {
+                "chat_id": "306927744647171",
+                "class_name": "4.01计科3班、4班",
+                "course_name": "离散数学（2025-2026-2）",
+                "class_id": "",
+                "course_id": "",
+                "image_url": "https://photo.example/group.png",
+                "teacher_factor": "",
+                "role": 0,
+                "is_teacher": False,
+            },
+        )
+
+    def test_extract_text_push_includes_class_info(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        decoded = {
+            9: {
+                4: {
+                    2: {2: "358574049"},
+                    3: {2: "25278974"},
+                    6: {
+                        2: {2: "358574049"},
+                        3: {2: "25278974"},
+                        4: {1: 0, 2: "好的老师"},
+                        8: (
+                            '{"chatid":"306927944925186","clazzName":"4.03计科2班、区块链1班",'
+                            '"coursename":"离散数学（2025-2026-2）"}'
+                        ),
+                    },
+                }
+            }
+        }
+
+        push = client._extract_text_push(decoded)
+
+        self.assertEqual(push["content"], "好的老师")
+        self.assertEqual(push["class_info"]["chat_id"], "306927944925186")
+        self.assertEqual(push["class_info"]["class_name"], "4.03计科2班、区块链1班")
+
     def test_request_history_queues_while_connecting(self):
         client = MSyncClient(app_key="cx-dev#cxstudy")
         client._username = "25278974"
@@ -328,6 +554,48 @@ class ChatAPITests(unittest.TestCase):
 
         self.assertTrue(queued)
         self.assertEqual(client._pending_history_peers, ["340857874"])
+
+    def test_request_history_summary_queues_while_connecting(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        client._running = True
+        client._ws = SimpleNamespace(send=lambda frame: None)
+
+        queued = client.request_history_summary(["247836588", "358566558"])
+
+        self.assertTrue(queued)
+        self.assertEqual(client._pending_history_summary_peers, ["247836588", "358566558"])
+
+    def test_request_history_subject_syncs_queues_while_connecting(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        client._running = True
+        client._ws = SimpleNamespace(send=lambda frame: None)
+
+        queued = client.request_history_subject_syncs([
+            {"subject": "247836588", "cursor": 1549416979549404396},
+            {"subject": "313439014682626", "domain": "conference.easemob.com", "cursor": 1549420076426333220},
+        ])
+
+        self.assertTrue(queued)
+        self.assertEqual(
+            client._pending_subject_syncs,
+            [
+                {"subject": "247836588", "cursor": 1549416979549404396, "domain": ""},
+                {"subject": "313439014682626", "cursor": 1549420076426333220, "domain": "conference.easemob.com"},
+            ],
+        )
+
+    def test_request_conversation_read_queues_while_connecting(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        client._running = True
+        client._ws = SimpleNamespace(send=lambda frame: None)
+
+        queued = client.request_conversation_read("247836588", 1549317683114151060)
+
+        self.assertTrue(queued)
+        self.assertEqual(
+            client._pending_conversation_reads,
+            [{"peer_id": "247836588", "message_id": 1549317683114151060, "conversation_type": 1}],
+        )
 
     def test_on_ws_message_dispatches_read_ack_and_batch_message(self):
         events = []
@@ -368,12 +636,392 @@ class ChatAPITests(unittest.TestCase):
             }
         }
 
-        with patch("core.msync_client.sockjs_decode", return_value=b"x"), patch("core.msync_client.decode_message", return_value=decoded):
+        with patch("core.msync_client.decode_message", return_value=decoded):
             client._on_ws_message(None, 'a["eA=="]')
 
         self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["event"], "read_ack")
         self.assertEqual(events[1]["content"], "123")
+
+    def test_on_ws_message_dispatches_history_summary(self):
+        events = []
+        client = MSyncClient(app_key="cx-dev#cxstudy", on_message=events.append)
+        decoded = {
+            1: 0,
+            8: 1,
+            9: {
+                1: {1: 0},
+                2: [
+                    {1: {2: "358566558"}, 2: 5},
+                    {1: {2: "easemob_chat"}, 2: 1},
+                ],
+                3: 1778316224885,
+            },
+        }
+
+        with patch("core.msync_client.decode_message", return_value=decoded):
+            client._on_ws_message(None, 'a["eA=="]')
+
+        self.assertEqual(
+            events,
+            [{
+                "event": "history_summary",
+                "subjects": [
+                    {"subject": "358566558", "count": 5},
+                    {"subject": "easemob_chat", "count": 1},
+                ],
+                "timestamp": 1778316224885,
+            }],
+        )
+
+    def test_on_ws_message_dispatches_multiple_history_subject_acks(self):
+        events = []
+        client = MSyncClient(app_key="cx-dev#cxstudy", on_message=events.append)
+        decoded_frames = [
+            {
+                1: 0,
+                8: 0,
+                9: {
+                    1: {1: 0},
+                    6: {2: "247836588"},
+                    7: 1,
+                    8: 1778317531380,
+                },
+            },
+            {
+                1: 0,
+                8: 0,
+                9: {
+                    1: {1: 0},
+                    6: {2: "313439014682626", 3: "conference.easemob.com"},
+                    11: 1,
+                    8: 1778317531421,
+                },
+            },
+        ]
+
+        with patch("core.msync_client.decode_message", side_effect=decoded_frames):
+            client._on_ws_message(None, 'a["QQ==","Qg=="]')
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "event": "history_subject_ack",
+                    "subject": "247836588",
+                    "domain": "",
+                    "ack_code": 1,
+                    "ack_field": 7,
+                    "timestamp": 1778317531380,
+                },
+                {
+                    "event": "history_subject_ack",
+                    "subject": "313439014682626",
+                    "domain": "conference.easemob.com",
+                    "ack_code": 1,
+                    "ack_field": 11,
+                    "timestamp": 1778317531421,
+                },
+            ],
+        )
+
+    def test_chat_view_store_class_info_metadata_updates_sessions(self):
+        row_updates = []
+        view = SimpleNamespace(
+            _session_meta_by_peer={},
+            _history_id_by_peer={},
+            _unread_count_by_peer={},
+            _raw_sessions=[{
+                "chatId": "358566558",
+                "chatName": "离散数学（2025-2026-2）",
+                "chatIco": "",
+            }],
+        )
+        view._resolve_session_peer_id = lambda session: str(session.get("chatId", "") or "")
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._merge_session_metadata = lambda session: ChatView._merge_session_metadata(view, session)
+        view._update_session_row = lambda peer_id="", history_id="", session=None: row_updates.append((peer_id, history_id, session))
+
+        changed = ChatView._store_class_info_metadata(
+            view,
+            "358566558",
+            {
+                "chat_id": "306927744647171",
+                "class_name": "4.01计科3班、4班",
+                "course_name": "离散数学（2025-2026-2）",
+                "image_url": "https://photo.example/group.png",
+            },
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(view._session_meta_by_peer["358566558"]["subtitle"], "4.01计科3班、4班")
+        self.assertEqual(view._history_id_by_peer["358566558"], "306927744647171")
+        self.assertEqual(view._raw_sessions[0]["subtitle"], "4.01计科3班、4班")
+        self.assertEqual(view._raw_sessions[0]["chatIco"], "https://photo.example/group.png")
+        self.assertEqual(len(row_updates), 1)
+        self.assertEqual(row_updates[0][0], "306927744647171")
+        self.assertEqual(row_updates[0][1], "306927744647171")
+
+    def test_chat_view_store_class_info_metadata_carries_unread_count_to_chat_id(self):
+        view = SimpleNamespace(
+            _session_meta_by_peer={},
+            _history_id_by_peer={},
+            _unread_count_by_peer={"358566558": 5},
+            _raw_sessions=[{"chatId": "306927744647171", "chatName": "离散数学", "chatIco": ""}],
+        )
+        view._resolve_session_peer_id = lambda session: str(session.get("chatId", "") or "")
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._merge_session_metadata = lambda session: ChatView._merge_session_metadata(view, session)
+        view._update_session_row = lambda peer_id="", history_id="", session=None: True
+
+        ChatView._store_class_info_metadata(
+            view,
+            "358566558",
+            {"chat_id": "306927744647171", "class_name": "4.01计科3班、4班"},
+        )
+
+        self.assertEqual(view._unread_count_by_peer["306927744647171"], 5)
+
+    def test_chat_view_history_summary_updates_rows_without_refresh(self):
+        row_updates = []
+        refreshed = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _history_id_by_peer={"358566558": "306927744647171"},
+            _unread_count_by_peer={},
+            _raw_sessions=[{"chatId": "306927744647171", "chatName": "离散数学"}],
+        )
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._apply_history_summary_unread = lambda subjects: ChatView._apply_history_summary_unread(view, subjects)
+        view._update_session_unread_row = lambda peer_id="", history_id="", unread_count=0: row_updates.append((peer_id, history_id, unread_count))
+        view._refresh_session_list = lambda sessions=None: refreshed.append(True)
+
+        ChatView._on_msync_message(
+            view,
+            {
+                "event": "history_summary",
+                "subjects": [{"subject": "358566558", "count": 0}],
+            },
+        )
+
+        self.assertEqual(row_updates, [("358566558", "306927744647171", 0)])
+        self.assertEqual(refreshed, [])
+
+    def test_chat_view_history_summary_keeps_open_conversation_unread_at_zero(self):
+        row_updates = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="306927744647171",
+            _current_history_id="306927744647171",
+            _history_id_by_peer={"358566558": "306927744647171"},
+            _unread_count_by_peer={"358566558": 2, "306927744647171": 2},
+            _locally_read_conversations=set(),
+            _raw_sessions=[{"chatId": "306927744647171", "chatName": "离散数学"}],
+        )
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._apply_history_summary_unread = lambda subjects: ChatView._apply_history_summary_unread(view, subjects)
+        view._update_session_unread_row = lambda peer_id="", history_id="", unread_count=0: row_updates.append((peer_id, history_id, unread_count))
+
+        ChatView._on_msync_message(
+            view,
+            {
+                "event": "history_summary",
+                "subjects": [{"subject": "358566558", "count": 2}],
+            },
+        )
+
+        self.assertEqual(view._unread_count_by_peer["358566558"], 0)
+        self.assertEqual(row_updates, [("358566558", "306927744647171", 0)])
+
+    def test_chat_view_history_summary_does_not_restore_locally_cleared_unread(self):
+        row_updates = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="other-chat",
+            _current_history_id="other-chat",
+            _history_id_by_peer={"358566558": "306927744647171"},
+            _unread_count_by_peer={"358566558": 0, "306927744647171": 0},
+            _locally_read_conversations={"358566558", "306927744647171"},
+            _raw_sessions=[{"chatId": "306927744647171", "chatName": "离散数学"}],
+        )
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._apply_history_summary_unread = lambda subjects: ChatView._apply_history_summary_unread(view, subjects)
+        view._update_session_unread_row = lambda peer_id="", history_id="", unread_count=0: row_updates.append((peer_id, history_id, unread_count))
+
+        ChatView._on_msync_message(
+            view,
+            {
+                "event": "history_summary",
+                "subjects": [{"subject": "358566558", "count": 3}],
+            },
+        )
+
+        self.assertEqual(view._unread_count_by_peer["358566558"], 0)
+        self.assertEqual(row_updates, [])
+
+    def test_chat_view_resolve_session_peer_id_uses_history_mapping_for_groups(self):
+        view = SimpleNamespace(
+            _history_id_by_peer={"358566558": "306927744647171"},
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+        )
+        view._resolve_peer_id_by_history_id = lambda history_id: ChatView._resolve_peer_id_by_history_id(view, history_id)
+
+        peer_id = ChatView._resolve_session_peer_id(
+            view,
+            {"chatId": "306927744647171", "chatName": "离散数学"},
+        )
+
+        self.assertEqual(peer_id, "358566558")
+
+    def test_chat_view_merge_session_metadata_applies_unread_count(self):
+        view = SimpleNamespace(
+            _session_meta_by_peer={},
+            _unread_count_by_peer={"358566558": 3},
+            _history_id_by_peer={"358566558": "306927744647171"},
+        )
+        view._resolve_session_peer_id = lambda session: str(session.get("chatId", "") or "")
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+
+        merged = ChatView._merge_session_metadata(
+            view,
+            {"chatId": "306927744647171", "chatName": "离散数学", "updateTime": 1},
+        )
+
+        self.assertEqual(merged["unread_count"], 3)
+
+    def test_chat_view_merge_session_metadata_replaces_stale_group_chat_id_with_real_history_id(self):
+        view = SimpleNamespace(
+            _session_meta_by_peer={"358566558": {"chatId": "306927744647171", "courseName": "离散数学（2025-2026-2）"}},
+            _unread_count_by_peer={},
+            _history_id_by_peer={"358566558": "306927744647171"},
+        )
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+
+        merged = ChatView._merge_session_metadata(
+            view,
+            {"chatId": "358566558", "chatName": "离散数学", "updateTime": 1},
+        )
+
+        self.assertEqual(merged["chatId"], "306927744647171")
+        self.assertEqual(merged["courseName"], "离散数学（2025-2026-2）")
+
+    def test_chat_view_resolve_session_history_id_prefers_preserved_history_key(self):
+        history_id = ChatView._resolve_session_history_id(
+            SimpleNamespace(),
+            {"_historyKey": "306927744647171", "chatId": "358566558"},
+        )
+
+        self.assertEqual(history_id, "306927744647171")
+
+    def test_chat_view_on_read_ack_updates_unread_count(self):
+        row_updates = []
+        view = SimpleNamespace(
+            _pending_read_acks={},
+            _history_id_by_peer={"25278974": "25278974"},
+            _unread_count_by_peer={},
+            _message_cache={},
+            _raw_sessions=[{"chatId": "25278974", "chatName": "自己"}],
+        )
+        view._conversation_key = lambda: ""
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._update_session_unread_row = lambda peer_id="", history_id="", unread_count=0: row_updates.append((peer_id, history_id, unread_count))
+
+        ChatView._on_read_ack(
+            view,
+            {
+                "message_id": "1549287205527104536",
+                "timestamp": 1778286337275,
+                "peer_id": "25278974/webim_1778286327053",
+                "unread_count": 1,
+            },
+        )
+
+        self.assertEqual(view._pending_read_acks["1549287205527104536"], 1778286337275)
+        self.assertEqual(view._unread_count_by_peer["25278974"], 1)
+        self.assertEqual(row_updates, [("25278974/webim_1778286327053", "25278974", 1)])
+
+    def test_chat_view_clear_current_unread_count_updates_row_without_refresh(self):
+        row_updates = []
+        refreshed = []
+        view = SimpleNamespace(
+            _current_target_id="25278974",
+            _current_history_id="25278974",
+            _history_id_by_peer={"25278974": "25278974"},
+            _unread_count_by_peer={"25278974": 3},
+            _raw_sessions=[{"chatId": "25278974", "chatName": "自己", "unread_count": 3}],
+        )
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._update_session_unread_row = lambda peer_id="", history_id="", unread_count=0: row_updates.append((peer_id, history_id, unread_count))
+        view._refresh_session_list = lambda sessions=None: refreshed.append(True)
+
+        changed = ChatView._clear_current_unread_count(view)
+
+        self.assertTrue(changed)
+        self.assertEqual(view._unread_count_by_peer["25278974"], 0)
+        self.assertEqual(row_updates, [("25278974", "25278974", 0)])
+        self.assertEqual(refreshed, [])
+
+    def test_chat_view_clear_current_unread_count_uses_history_mapping_for_group_peer(self):
+        row_updates = []
+        view = SimpleNamespace(
+            _current_target_id="306927744647171",
+            _current_history_id="306927744647171",
+            _history_id_by_peer={"358566558": "306927744647171"},
+            _unread_count_by_peer={"358566558": 2, "306927744647171": 2},
+            _raw_sessions=[{"chatId": "306927744647171", "chatName": "离散数学", "unread_count": 2}],
+        )
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._update_session_unread_row = lambda peer_id="", history_id="", unread_count=0: row_updates.append((peer_id, history_id, unread_count))
+
+        changed = ChatView._clear_current_unread_count(view)
+
+        self.assertTrue(changed)
+        self.assertEqual(view._unread_count_by_peer["358566558"], 0)
+        self.assertEqual(view._unread_count_by_peer["306927744647171"], 0)
+        self.assertEqual(row_updates, [("358566558", "306927744647171", 0)])
+
+    def test_chat_view_on_messages_loaded_requests_unread_summary(self):
+        requested = []
+        view = SimpleNamespace(
+            loading_hint=SimpleNamespace(hide=lambda: None),
+            chat_list=SimpleNamespace(setEnabled=lambda enabled: None, clear=lambda: None, addItem=lambda item: None),
+            _current_history_id=None,
+            _current_target_id=None,
+            _raw_sessions=[],
+            _suppress_unread_summary_request=False,
+            crawler=SimpleNamespace(request_history_summary_msync=lambda peer_ids: requested.append(peer_ids)),
+        )
+        view._merge_session_metadata = lambda session: session
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._request_unread_summary = lambda sessions: ChatView._request_unread_summary(view, sessions)
+        view._add_session_item = lambda session: None
+        view._restore_selected_chat = lambda chat_id: None
+
+        ChatView._on_messages_loaded(
+            view,
+            [
+                {"chatId": "358566558", "chatName": "离散数学", "updateTime": 2, "isGroup": 0},
+                {"chatId": "358574049", "chatName": "另一个群", "updateTime": 1, "isGroup": 0},
+            ],
+        )
+
+        self.assertEqual(requested, [["358566558", "358574049"]])
 
     def test_get_history_messages_posts_msg_id_for_existing_session(self):
         response = _FakeResponse(
@@ -470,6 +1118,337 @@ class ChatAPITests(unittest.TestCase):
             session.calls[0]["data"],
             {"roomId": "306927744647171", "token": "token-1", "tuid": "100"},
         )
+
+    def test_chat_view_load_group_members_uses_persisted_cache_file(self):
+        room_id = "306927744647171"
+        room_name = "离散数学（2025-2026-2）"
+        class_name = "4.03计科2班、区块链1班"
+        cache_name = f"{room_name}-{class_name}"
+        members = [{
+            "person_id": "25278974",
+            "name": "郝玉锋",
+            "student_id": "30047383",
+            "avatar_url": "http://photo.example/avatar.png",
+            "tuid": "25278974",
+            "puid": "30047383",
+        }]
+        rendered = []
+        selected_tabs = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            with open(cache_dir / f"{cache_name}.json", "w", encoding="utf-8") as f:
+                json.dump(members, f, ensure_ascii=False, indent=2)
+
+            view = SimpleNamespace(
+                _current_group_room_id="",
+                _current_group_room_name="",
+                _current_group_cache_name="",
+                _group_members_cache={},
+                _group_name_by_room_id={},
+                _group_cache_name_by_room_id={},
+                _group_members_cache_dir=cache_dir,
+                _group_members_worker=None,
+                _pending_group_room_id="",
+                student_tab=object(),
+                tab_widget=SimpleNamespace(setCurrentWidget=lambda widget: selected_tabs.append(widget)),
+            )
+            view._resolve_group_room_id = lambda session: ChatView._resolve_group_room_id(view, session)
+            view._resolve_group_room_name = lambda session: ChatView._resolve_group_room_name(view, session)
+            view._resolve_group_cache_name = lambda session: ChatView._resolve_group_cache_name(view, session)
+            view.set_students = lambda students: rendered.append(students)
+
+            ChatView._load_group_members(view, {"roomId": room_id, "chatName": room_name, "subtitle": class_name})
+
+            self.assertEqual(view._group_members_cache[room_id], members)
+            self.assertEqual(rendered, [members])
+            self.assertEqual(selected_tabs, [view.student_tab])
+
+    def test_chat_view_group_members_are_persisted_after_successful_load(self):
+        room_id = "306927744647171"
+        room_name = "离散数学（2025-2026-2）"
+        class_name = "4.03计科2班、区块链1班"
+        cache_name = f"{room_name}-{class_name}"
+        members = [{
+            "person_id": "25278974",
+            "name": "郝玉锋",
+            "student_id": "30047383",
+            "avatar_url": "http://photo.example/avatar.png",
+            "tuid": "25278974",
+            "puid": "30047383",
+        }]
+        rendered = []
+        selected_tabs = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            view = SimpleNamespace(
+                _group_members_cache={},
+                _group_members_cache_dir=cache_dir,
+                _current_group_room_id=room_id,
+                _current_group_room_name=room_name,
+                _current_group_cache_name=cache_name,
+                _group_name_by_room_id={room_id: room_name},
+                _group_cache_name_by_room_id={room_id: cache_name},
+                _pending_group_room_id="",
+                student_tab=object(),
+                tab_widget=SimpleNamespace(setCurrentWidget=lambda widget: selected_tabs.append(widget)),
+            )
+            view.set_students = lambda students: rendered.append(students)
+
+            ChatView._on_group_members_loaded(view, room_id, members)
+
+            cache_file = cache_dir / f"{cache_name}.json"
+            self.assertTrue(cache_file.exists())
+            with open(cache_file, "r", encoding="utf-8") as f:
+                self.assertEqual(json.load(f), members)
+            self.assertEqual(rendered, [members])
+            self.assertEqual(selected_tabs, [view.student_tab])
+
+    def test_chat_view_refresh_current_group_members_clears_cache_and_reloads(self):
+        room_id = "306927744647171"
+        room_name = "离散数学（2025-2026-2）"
+        class_name = "4.03计科2班、区块链1班"
+        cache_name = f"{room_name}-{class_name}"
+        started = []
+        selected_tabs = []
+        loading_calls = []
+
+        class _FakeSignal:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+        class _FakeGroupMembersWorker:
+            def __init__(self, crawler, current_room_id):
+                self.crawler = crawler
+                self.room_id = current_room_id
+                self.members_ready = _FakeSignal()
+                self._running = False
+
+            def isRunning(self):
+                return self._running
+
+            def start(self):
+                started.append(self.room_id)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / f"{cache_name}.json"
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump([{"person_id": "25278974", "name": "郝玉锋"}], f, ensure_ascii=False, indent=2)
+
+            view = SimpleNamespace(
+                crawler=SimpleNamespace(),
+                _current_group_room_id=room_id,
+                _current_group_room_name=room_name,
+                _current_group_cache_name=cache_name,
+                _group_members_cache={room_id: [{"person_id": "25278974", "name": "旧缓存"}], "other": [{"person_id": "1"}]},
+                _group_name_by_room_id={room_id: room_name},
+                _group_cache_name_by_room_id={room_id: cache_name},
+                _group_members_cache_dir=cache_dir,
+                _group_members_worker=None,
+                _pending_group_room_id="",
+                student_tab=object(),
+                tab_widget=SimpleNamespace(setCurrentWidget=lambda widget: selected_tabs.append(widget)),
+                _on_group_members_loaded=lambda *args, **kwargs: None,
+            )
+            view._show_group_members_loading = lambda: loading_calls.append(room_id)
+
+            with patch("ui.views.chat_view.ChatGroupMembersWorker", _FakeGroupMembersWorker):
+                ChatView._refresh_current_group_members(view)
+
+            self.assertFalse(cache_file.exists())
+            self.assertNotIn(room_id, view._group_members_cache)
+            self.assertIn("other", view._group_members_cache)
+            self.assertEqual(loading_calls, [room_id])
+            self.assertEqual(started, [room_id])
+            self.assertEqual(selected_tabs, [view.student_tab])
+
+    def test_chat_view_group_cache_filename_uses_sanitized_group_name(self):
+        cache_dir = Path("/tmp/group_members")
+        view = SimpleNamespace(_group_members_cache_dir=cache_dir, _current_group_cache_name="")
+
+        cache_file = ChatView._group_members_cache_file(view, "306927744647171", '离散数学:/2025*群聊?-4.03/计科2班')
+
+        self.assertEqual(cache_file, cache_dir / "离散数学_2025_群聊_-4.03_计科2班.json")
+
+    def test_chat_view_update_group_tab_title_formats_count(self):
+        titles = []
+        student_tab = object()
+        tab_widget = SimpleNamespace(
+            indexOf=lambda widget: 1 if widget is student_tab else -1,
+            setTabText=lambda index, text: titles.append((index, text)),
+        )
+        view = SimpleNamespace(tab_widget=tab_widget, student_tab=student_tab)
+
+        ChatView._update_group_tab_title(view, 105)
+
+        self.assertEqual(titles, [(1, "群组(105)")])
+
+    def test_chat_view_update_group_tab_title_hides_zero_count(self):
+        titles = []
+        student_tab = object()
+        tab_widget = SimpleNamespace(
+            indexOf=lambda widget: 1 if widget is student_tab else -1,
+            setTabText=lambda index, text: titles.append((index, text)),
+        )
+        view = SimpleNamespace(tab_widget=tab_widget, student_tab=student_tab)
+
+        ChatView._update_group_tab_title(view, 0)
+
+        self.assertEqual(titles, [(1, "群组")])
+
+    def test_study_status_table_style_sets_explicit_cross_platform_colors(self):
+        class _FakeHeader:
+            def __init__(self):
+                self.default_size = None
+                self.minimum_size = None
+
+            def setDefaultSectionSize(self, size):
+                self.default_size = size
+
+            def setMinimumSectionSize(self, size):
+                self.minimum_size = size
+
+        class _FakeTable:
+            def __init__(self):
+                self.alternating = None
+                self.word_wrap = None
+                self.show_grid = None
+                self.style_sheet = ""
+                self.header = _FakeHeader()
+
+            def setAlternatingRowColors(self, value):
+                self.alternating = value
+
+            def setWordWrap(self, value):
+                self.word_wrap = value
+
+            def setShowGrid(self, value):
+                self.show_grid = value
+
+            def setStyleSheet(self, value):
+                self.style_sheet = value
+
+            def verticalHeader(self):
+                return self.header
+
+        table = _FakeTable()
+        view = SimpleNamespace()
+
+        StudyStatusView._apply_stats_table_style(view, table)
+
+        self.assertTrue(table.alternating)
+        self.assertFalse(table.word_wrap)
+        self.assertTrue(table.show_grid)
+        self.assertIn("alternate-background-color: #252526;", table.style_sheet)
+        self.assertIn("color: #e6e6e6;", table.style_sheet)
+        self.assertEqual(table.header.default_size, 36)
+        self.assertEqual(table.header.minimum_size, 32)
+
+    def test_absence_stats_table_style_sets_explicit_cross_platform_colors(self):
+        class _FakeHeader:
+            def __init__(self):
+                self.default_size = None
+                self.minimum_size = None
+
+            def setDefaultSectionSize(self, size):
+                self.default_size = size
+
+            def setMinimumSectionSize(self, size):
+                self.minimum_size = size
+
+        class _FakeTable:
+            def __init__(self):
+                self.alternating = None
+                self.word_wrap = None
+                self.show_grid = None
+                self.style_sheet = ""
+                self.header = _FakeHeader()
+
+            def setAlternatingRowColors(self, value):
+                self.alternating = value
+
+            def setWordWrap(self, value):
+                self.word_wrap = value
+
+            def setShowGrid(self, value):
+                self.show_grid = value
+
+            def setStyleSheet(self, value):
+                self.style_sheet = value
+
+            def verticalHeader(self):
+                return self.header
+
+        table = _FakeTable()
+        dialog = SimpleNamespace()
+
+        AbsenceStatsDialog._apply_table_style(dialog, table)
+
+        self.assertTrue(table.alternating)
+        self.assertFalse(table.word_wrap)
+        self.assertTrue(table.show_grid)
+        self.assertIn("alternate-background-color: #252526;", table.style_sheet)
+        self.assertIn("selection-color: #ffffff;", table.style_sheet)
+        self.assertEqual(table.header.default_size, 36)
+        self.assertEqual(table.header.minimum_size, 32)
+
+    def test_study_status_absence_stats_ignores_rapid_repeat_clicks(self):
+        started = []
+
+        class _FakeSignal:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+        class _FakeAbsenceWorker:
+            def __init__(self, crawler, attendance_data, course_id, class_id):
+                self.crawler = crawler
+                self.attendance_data = attendance_data
+                self.course_id = course_id
+                self.class_id = class_id
+                self.stats_ready = _FakeSignal()
+                self.finished = _FakeSignal()
+
+            def start(self):
+                started.append((self.course_id, self.class_id))
+
+        button_states = []
+        status_updates = []
+        button = SimpleNamespace(
+            setEnabled=lambda enabled: button_states.append(("enabled", enabled)),
+            setText=lambda text: button_states.append(("text", text)),
+        )
+        view = SimpleNamespace(
+            current_attendance_data=[object()],
+            _absence_stats_loading=False,
+            _absence_dialog_open=False,
+            crawler=SimpleNamespace(),
+            current_course_id="course-1",
+            current_class_id="class-1",
+            btn_absence_stats=button,
+            status_update=SimpleNamespace(emit=lambda text: status_updates.append(text)),
+        )
+        view._set_absence_stats_busy = lambda busy: StudyStatusView._set_absence_stats_busy(view, busy)
+        view._show_absence_stats = lambda result: StudyStatusView._show_absence_stats(view, result)
+        view._on_absence_stats_worker_finished = lambda: StudyStatusView._on_absence_stats_worker_finished(view)
+
+        with patch("ui.views.study_status_view.AbsenceStatsWorker", _FakeAbsenceWorker):
+            StudyStatusView._on_absence_stats_clicked(view)
+            StudyStatusView._on_absence_stats_clicked(view)
+
+        self.assertEqual(started, [("course-1", "class-1")])
+        self.assertTrue(view._absence_stats_loading)
+        self.assertIn(("enabled", False), button_states)
+        self.assertIn(("text", "统计中..."), button_states)
 
     def test_extract_class_chat_map_from_me_html(self):
         html = (
@@ -638,6 +1617,307 @@ class ChatAPITests(unittest.TestCase):
             ChatView._ensure_msync_connected(view)
 
         self.assertEqual(mock_thread.call_count, 1)
+
+    def test_chat_view_ensure_msync_connected_requests_unread_summary_after_connect(self):
+        requested = []
+
+        class _Crawler:
+            def is_msync_connected(self):
+                return False
+
+            def connect_msync(self, on_message=None, on_error=None, on_close=None):
+                return SimpleNamespace()
+
+            def request_history_summary_msync(self, peer_ids):
+                requested.append(peer_ids)
+                return True
+
+        thread_targets = []
+
+        def _make_thread(target=None, name=None, daemon=None):
+            thread_targets.append(target)
+            return SimpleNamespace(start=lambda: target())
+
+        with patch("ui.views.chat_view.threading.Thread", side_effect=_make_thread):
+            view = SimpleNamespace(
+                crawler=_Crawler(),
+                _msync_connecting=False,
+                _msync_connect_lock=threading.Lock(),
+                _current_target_id="",
+                _raw_sessions=[{"chatId": "358566558"}, {"chatId": "358574049"}],
+            )
+            view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+            view._request_unread_summary = lambda sessions: ChatView._request_unread_summary(view, sessions)
+            view.msync_message_received = SimpleNamespace(emit=lambda msg: None)
+
+            ChatView._ensure_msync_connected(view)
+
+        self.assertEqual(requested, [["358566558", "358574049"]])
+
+    def test_chat_view_sync_conversation_read_state_uses_latest_cached_message(self):
+        requested = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(request_conversation_read_msync=lambda peer_id, message_id: requested.append((peer_id, message_id)) or True),
+            _current_target_id="247836588",
+            _current_history_id="306927744647171",
+            _message_cache={
+                "306927744647171": [
+                    {"message_id": "1549317683114151050", "timestamp": 1},
+                    {"message_id": "1549317683114151060", "timestamp": 2},
+                ]
+            },
+            _last_read_sync_by_conversation={},
+        )
+        view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+        view._message_sort_key = lambda msg: ChatView._message_sort_key(view, msg)
+        view._latest_message_id_for_conversation = lambda conversation_key=None: ChatView._latest_message_id_for_conversation(view, conversation_key)
+
+        synced = ChatView._sync_conversation_read_state(view)
+
+        self.assertTrue(synced)
+        self.assertEqual(requested, [("247836588", "1549317683114151060")])
+        self.assertEqual(view._last_read_sync_by_conversation["306927744647171"], "1549317683114151060")
+
+    def test_chat_view_sync_conversation_read_state_resolves_group_peer_from_history_id(self):
+        requested = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(request_conversation_read_msync=lambda peer_id, message_id: requested.append((peer_id, message_id)) or True),
+            _current_target_id="306927744647171",
+            _current_history_id="306927744647171",
+            _history_id_by_peer={"358566558": "306927744647171"},
+            _message_cache={"306927744647171": [{"message_id": "1549317683114151060", "timestamp": 2}]},
+            _last_read_sync_by_conversation={},
+        )
+        view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+        view._message_sort_key = lambda msg: ChatView._message_sort_key(view, msg)
+        view._latest_message_id_for_conversation = lambda conversation_key=None: ChatView._latest_message_id_for_conversation(view, conversation_key)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+
+        synced = ChatView._sync_conversation_read_state(view)
+
+        self.assertTrue(synced)
+        self.assertEqual(requested, [("358566558", "1549317683114151060")])
+
+    def test_chat_view_load_current_chat_history_starts_new_worker_for_new_chat(self):
+        created = []
+
+        class _Signal:
+            def __init__(self):
+                self.callbacks = []
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+        class _Worker:
+            def __init__(self, crawler, chat_id, limit=200):
+                self.crawler = crawler
+                self.chat_id = chat_id
+                self.limit = limit
+                self.history_ready = _Signal()
+                self.finished = _Signal()
+                self.started = False
+                created.append(self)
+            def isRunning(self):
+                return False
+            def start(self):
+                self.started = True
+
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(),
+            _current_history_id="new-chat",
+            _history_worker=SimpleNamespace(chat_id="old-chat", isRunning=lambda: True),
+            _history_workers=[],
+            _on_history_loaded=lambda chat_id, messages: None,
+        )
+
+        with patch("ui.views.chat_view.ChatHistoryWorker", _Worker):
+            ChatView._load_current_chat_history(view)
+
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].chat_id, "new-chat")
+        self.assertTrue(created[0].started)
+        self.assertIs(view._history_worker, created[0])
+
+    def test_chat_view_history_sync_message_refreshes_without_reloading_list(self):
+        refreshed = []
+        loaded = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="",
+            _current_history_id="",
+            _current_target_name="",
+            _history_id_by_peer={},
+            _raw_sessions=[{"chatId": "358566558", "chatName": "离散数学"}],
+            _message_cache={},
+            _unread_count_by_peer={},
+        )
+        view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._resolve_session_display_name = lambda peer_id, msg, fallback_name="": ChatView._resolve_session_display_name(view, peer_id, msg, fallback_name)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._store_class_info_metadata = lambda peer_id, class_info: False
+        view._conversation_key = lambda peer_id=None, history_id=None: str(history_id or peer_id or "")
+        view._append_cached_message = lambda **kwargs: None
+        view._is_ai_assistant_conversation = lambda peer_id, msg=None: False
+        view._is_current_conversation_message = lambda peer_id, msg: False
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._refresh_session_list = lambda sessions=None: refreshed.append(sessions)
+        view._upsert_session_from_message = lambda peer_id, msg, display_name="": ChatView._upsert_session_from_message(view, peer_id, msg, display_name)
+        view._load_message_list = lambda: loaded.append(True)
+
+        ChatView._on_msync_message(
+            view,
+            {
+                "from": "358566558",
+                "to": "25278974",
+                "peer_id": "358566558",
+                "content": "好的谢谢老师",
+                "timestamp": 1778311611198,
+                "message_id": "1549395756211768472",
+                "history_sync": True,
+            },
+        )
+
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(loaded, [])
+
+    def test_chat_view_live_message_upserts_session_without_reloading_list(self):
+        refreshed = []
+        loaded = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="",
+            _current_history_id="",
+            _current_target_name="",
+            _history_id_by_peer={},
+            _raw_sessions=[{"chatId": "358566558", "chatName": "离散数学", "updateTime": 1}],
+            _message_cache={},
+            _unread_count_by_peer={},
+        )
+        view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._resolve_session_display_name = lambda peer_id, msg, fallback_name="": ChatView._resolve_session_display_name(view, peer_id, msg, fallback_name)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._store_class_info_metadata = lambda peer_id, class_info: False
+        view._conversation_key = lambda peer_id=None, history_id=None: str(history_id or peer_id or "")
+        view._append_cached_message = lambda **kwargs: None
+        view._is_ai_assistant_conversation = lambda peer_id, msg=None: False
+        view._is_current_conversation_message = lambda peer_id, msg: False
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._refresh_session_list = lambda sessions=None: refreshed.append(sessions)
+        view._upsert_session_from_message = lambda peer_id, msg, display_name="": ChatView._upsert_session_from_message(view, peer_id, msg, display_name)
+        view._load_message_list = lambda: loaded.append(True)
+
+        ChatView._on_msync_message(
+            view,
+            {
+                "from": "358566558",
+                "to": "25278974",
+                "peer_id": "358566558",
+                "content": "新的实时消息",
+                "timestamp": 1778312000000,
+                "message_id": "1549399999999999999",
+            },
+        )
+
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(loaded, [])
+
+    def test_chat_view_self_message_does_not_leak_current_chat_name_into_group_session(self):
+        refreshed = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="peer-1",
+            _current_history_id="peer-1",
+            _current_target_name="郝玉锋",
+            _history_id_by_peer={"358566558": "306927744647171"},
+            _session_meta_by_peer={"358566558": {"courseName": "离散数学（2025-2026-2）"}},
+            _raw_sessions=[{"chatId": "306927744647171", "chatName": "358566558", "updateTime": 1, "isGroup": 0, "isPrivate": False}],
+            _message_cache={},
+            _unread_count_by_peer={},
+        )
+        view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._resolve_session_display_name = lambda peer_id, msg, fallback_name="": ChatView._resolve_session_display_name(view, peer_id, msg, fallback_name)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._store_class_info_metadata = lambda peer_id, class_info: False
+        view._conversation_key = lambda peer_id=None, history_id=None: str(history_id or peer_id or "")
+        view._append_cached_message = lambda **kwargs: None
+        view._is_ai_assistant_conversation = lambda peer_id, msg=None: False
+        view._is_current_conversation_message = lambda peer_id, msg: False
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._refresh_session_list = lambda sessions=None: refreshed.append(sessions)
+        view._upsert_session_from_message = lambda peer_id, msg, display_name="": ChatView._upsert_session_from_message(view, peer_id, msg, display_name)
+        view._load_message_list = lambda: None
+
+        ChatView._on_msync_message(
+            view,
+            {
+                "from": "25278974",
+                "to": "358566558",
+                "peer_id": "358566558",
+                "content": "我发到群里的消息",
+                "timestamp": 1778312000001,
+                "message_id": "1549400000000000000",
+            },
+        )
+
+        self.assertEqual(len(refreshed), 1)
+        updated = refreshed[0][0]
+        self.assertEqual(updated["chatName"], "离散数学（2025-2026-2）")
+        self.assertEqual(updated["isGroup"], 0)
+        self.assertFalse(updated["isPrivate"])
+
+    def test_chat_view_private_session_with_different_history_id_stays_out_of_group_section(self):
+        refreshed = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="",
+            _current_history_id="",
+            _current_target_name="",
+            _history_id_by_peer={"25278974": "self-history-id"},
+            _session_meta_by_peer={},
+            _raw_sessions=[{"chatId": "self-history-id", "chatName": "郝玉锋", "updateTime": 1, "isGroup": 1, "isPrivate": True}],
+            _message_cache={},
+            _unread_count_by_peer={},
+        )
+        view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._resolve_session_display_name = lambda peer_id, msg, fallback_name="": ChatView._resolve_session_display_name(view, peer_id, msg, fallback_name)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._store_class_info_metadata = lambda peer_id, class_info: False
+        view._conversation_key = lambda peer_id=None, history_id=None: str(history_id or peer_id or "")
+        view._append_cached_message = lambda **kwargs: None
+        view._is_ai_assistant_conversation = lambda peer_id, msg=None: False
+        view._is_current_conversation_message = lambda peer_id, msg: False
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._refresh_session_list = lambda sessions=None: refreshed.append(sessions)
+        view._upsert_session_from_message = lambda peer_id, msg, display_name="": ChatView._upsert_session_from_message(view, peer_id, msg, display_name)
+        view._load_message_list = lambda: None
+        view._is_group_session = lambda session: ChatView._is_group_session(view, session)
+
+        ChatView._on_msync_message(
+            view,
+            {
+                "from": "25278974",
+                "to": "25278974",
+                "peer_id": "25278974",
+                "content": "自己发给自己的消息",
+                "timestamp": 1778312000002,
+                "message_id": "1549400000000000001",
+            },
+        )
+
+        updated = refreshed[0][0]
+        self.assertEqual(updated["isGroup"], 1)
+        self.assertTrue(updated["isPrivate"])
 
 
 if __name__ == "__main__":

@@ -3,8 +3,11 @@
 """
 from html import escape
 from datetime import datetime
+import json
+import re
 import threading
 import time
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -16,6 +19,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QByteArray, QUrl
 from PyQt6.QtGui import QFont, QPixmap, QKeyEvent
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
+from core.config import DATA_DIR
 from ui.workers import ChatMessageListWorker, ChatHistoryWorker, ChatGroupMembersWorker
 from core.logger import get_logger
 
@@ -155,23 +159,29 @@ CHAT_STYLE = """
 class ChatSessionItem(QWidget):
     """自定义会话列表项：头像 + 名字/副标题 + 时间"""
 
-    def __init__(self, name: str, time_str: str, avatar_url: str = None, session=None, subtitle: str = "", parent=None):
+    def __init__(self, name: str, time_str: str, avatar_url: str = None, session=None, subtitle: str = "", unread_count: int = 0, parent=None):
         super().__init__(parent)
         self._avatar_url = avatar_url
         self._session = session
-        self._setup_ui(name, time_str, avatar_url, subtitle)
+        self._setup_ui(name, time_str, avatar_url, subtitle, unread_count)
 
-    def _setup_ui(self, name: str, time_str: str, avatar_url: str, subtitle: str):
+    def _setup_ui(self, name: str, time_str: str, avatar_url: str, subtitle: str, unread_count: int):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(10)
 
         # 头像
+        self.avatar_container = QWidget()
+        self.avatar_container.setFixedSize(40, 40)
         self.avatar_label = QLabel()
-        self.avatar_label.setFixedSize(40, 40)
+        self.avatar_label.setParent(self.avatar_container)
+        self.avatar_label.setGeometry(0, 0, 40, 40)
         self.avatar_label.setScaledContents(True)
         self._set_placeholder_avatar(name)
-        layout.addWidget(self.avatar_label)
+        self.unread_badge_label = QLabel(self.avatar_container)
+        self.unread_badge_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.unread_badge_label.hide()
+        layout.addWidget(self.avatar_container)
 
         # 中间：名字 + 副标题
         text_layout = QVBoxLayout()
@@ -197,6 +207,7 @@ class ChatSessionItem(QWidget):
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         if time_str:
             layout.addWidget(self.time_label)
+        self.set_unread_count(unread_count)
 
     def _set_placeholder_avatar(self, name: str):
         """显示名字首字作为占位头像"""
@@ -212,6 +223,26 @@ class ChatSessionItem(QWidget):
             self.avatar_label.setPixmap(pixmap)
             self.avatar_label.setStyleSheet("")
             self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def set_unread_count(self, unread_count: int):
+        try:
+            unread_count = int(unread_count or 0)
+        except Exception:
+            unread_count = 0
+        if unread_count <= 0:
+            self.unread_badge_label.hide()
+            return
+
+        badge_text = "99+" if unread_count > 99 else str(unread_count)
+        badge_width = 22 if len(badge_text) >= 2 else 18
+        self.unread_badge_label.setText(badge_text)
+        self.unread_badge_label.setGeometry(40 - badge_width, 0, badge_width, 18)
+        self.unread_badge_label.setStyleSheet(
+            "background-color: #ff4d4f; color: white; border-radius: 9px; "
+            "font-size: 11px; font-weight: bold; padding: 0 4px;"
+        )
+        self.unread_badge_label.raise_()
+        self.unread_badge_label.show()
 
 
 class StudentSearchLineEdit(QLineEdit):
@@ -239,6 +270,7 @@ class ChatView(QWidget):
         self._current_target_name = None
         self._message_worker = None
         self._history_worker = None
+        self._history_workers = []
         self._group_members_worker = None
         self._last_send_error = ""
         self._raw_sessions = []  # 保存原始 API 返回数据
@@ -246,10 +278,20 @@ class ChatView(QWidget):
         self._pending_read_acks = {}
         self._msync_connecting = False
         self._msync_connect_lock = threading.Lock()
+        self._suppress_unread_summary_request = False
         self._all_students = []
         self._history_id_by_peer = {}
+        self._session_meta_by_peer = {}
+        self._unread_count_by_peer = {}
+        self._locally_read_conversations = set()
+        self._last_read_sync_by_conversation = {}
         self._group_members_cache = {}
+        self._group_members_cache_dir = Path(DATA_DIR) / "data" / "group_members"
         self._current_group_room_id = ""
+        self._current_group_room_name = ""
+        self._current_group_cache_name = ""
+        self._group_name_by_room_id = {}
+        self._group_cache_name_by_room_id = {}
         self._pending_group_room_id = ""
         self._avatar_requests = {}  # QNetworkReply -> ChatSessionItem，用于异步回调
         self._net_mgr = QNetworkAccessManager(self)
@@ -285,23 +327,34 @@ class ChatView(QWidget):
         self.chat_list.currentItemChanged.connect(self._on_chat_selected)
         self.tab_widget.addTab(self.chat_list, "消息")
 
-        # Tab 2: 学生列表
+        # Tab 2: 群组列表
         self.student_tab = QWidget()
         student_layout = QVBoxLayout(self.student_tab)
         student_layout.setContentsMargins(0, 0, 0, 0)
         student_layout.setSpacing(0)
+        student_header_layout = QHBoxLayout()
+        student_header_layout.setContentsMargins(0, 0, 0, 0)
+        student_header_layout.setSpacing(6)
         self.student_search = StudentSearchLineEdit()
         self.student_search.setObjectName("student_search")
         self.student_search.setPlaceholderText("搜索学生...")
         self.student_search.textChanged.connect(self._on_student_search_changed)
-        student_layout.addWidget(self.student_search)
+        student_header_layout.addWidget(self.student_search, stretch=1)
+        self.group_refresh_btn = QPushButton("刷新")
+        self.group_refresh_btn.setObjectName("group_refresh_btn")
+        self.group_refresh_btn.setFixedHeight(28)
+        self.group_refresh_btn.setFixedWidth(52)
+        self.group_refresh_btn.setEnabled(False)
+        self.group_refresh_btn.clicked.connect(self._refresh_current_group_members)
+        student_header_layout.addWidget(self.group_refresh_btn)
+        student_layout.addLayout(student_header_layout)
         self.student_list = QListWidget()
         self.student_list.setObjectName("student_list")
         self.student_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.student_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.student_list.currentItemChanged.connect(self._on_student_selected)
         student_layout.addWidget(self.student_list)
-        self.tab_widget.addTab(self.student_tab, "学生")
+        self.tab_widget.addTab(self.student_tab, "群组")
 
         # 加载状态提示
         self.loading_hint = QLabel("")
@@ -374,6 +427,8 @@ class ChatView(QWidget):
         if not self._raw_sessions:
             self._load_message_list()
         self._ensure_msync_connected()
+        if self._raw_sessions:
+            self._request_unread_summary(self._raw_sessions)
 
     def _load_message_list(self):
         """异步加载会话列表"""
@@ -391,7 +446,19 @@ class ChatView(QWidget):
         """会话列表加载完成回调"""
         self.loading_hint.hide()
         self.chat_list.setEnabled(True)
+        prepared_sessions = []
+        for session in sessions or []:
+            if isinstance(session, dict):
+                item = dict(session)
+                if not item.get("_historyKey"):
+                    item["_historyKey"] = str(item.get("msgId", "") or item.get("chatId", "") or "")
+                prepared_sessions.append(item)
+            else:
+                prepared_sessions.append(session)
+        sessions = [self._merge_session_metadata(session) for session in prepared_sessions]
         self._raw_sessions = sessions
+        if not self._suppress_unread_summary_request:
+            self._request_unread_summary(sessions)
         selected_chat_id = self._current_history_id or self._current_target_id
         self.chat_list.clear()
 
@@ -429,13 +496,37 @@ class ChatView(QWidget):
         if selected_chat_id:
             self._restore_selected_chat(selected_chat_id)
 
+    def _request_unread_summary(self, sessions: list):
+        if not hasattr(self.crawler, "request_history_summary_msync"):
+            return
+        peer_ids = []
+        for session in sessions or []:
+            if not isinstance(session, dict):
+                continue
+            peer_id = self._resolve_session_peer_id(session)
+            if peer_id and peer_id not in peer_ids:
+                peer_ids.append(peer_id)
+        if peer_ids:
+            self.crawler.request_history_summary_msync(peer_ids)
+
+    def _refresh_session_list(self, sessions: list = None):
+        sessions = self._raw_sessions if sessions is None else sessions
+        self._suppress_unread_summary_request = True
+        try:
+            self._on_messages_loaded(sessions)
+        finally:
+            self._suppress_unread_summary_request = False
+
     def _resolve_session_peer_id(self, session: dict) -> str:
         """为已有会话解析实时发送目标。"""
-        chat_id = session.get("chatId", "")
-        if chat_id not in (None, ""):
-            return str(chat_id)
+        chat_id = str(session.get("chatId", "") or "")
+        if chat_id:
+            mapped_peer_id = ChatView._resolve_peer_id_by_history_id(self, chat_id)
+            if mapped_peer_id:
+                return mapped_peer_id
         msg_id = str(session.get("msgId", "") or "")
-        current_tuid = str(self.crawler.session_manager.course_params.get("im_tuid", "") or "")
+        course_params = getattr(getattr(getattr(self, "crawler", None), "session_manager", None), "course_params", {}) or {}
+        current_tuid = str(course_params.get("im_tuid", "") or "")
         if msg_id and "+" in msg_id:
             left, right = msg_id.split("+", 1)
             if current_tuid and left == current_tuid:
@@ -444,25 +535,389 @@ class ChatView(QWidget):
                 return left
         return str(chat_id or "")
 
+    def _resolve_peer_id_by_history_id(self, history_id: str) -> str:
+        history_id = str(history_id or "")
+        if not history_id:
+            return ""
+        for peer_id, mapped_history_id in (getattr(self, "_history_id_by_peer", {}) or {}).items():
+            if str(mapped_history_id or "") == history_id:
+                return str(peer_id or "")
+        return ""
+
+    def _resolve_session_history_id(self, session: dict) -> str:
+        if not isinstance(session, dict):
+            return ""
+        return str(session.get("_historyKey", "") or session.get("msgId", "") or session.get("chatId", "") or "")
+
+    def _resolve_active_peer_id(self, peer_id: str = "", history_id: str = "") -> str:
+        peer_id = str(peer_id or "")
+        history_id = str(history_id or "")
+        if history_id:
+            mapped_peer_id = ChatView._resolve_peer_id_by_history_id(self, history_id)
+            if mapped_peer_id:
+                return mapped_peer_id
+        return ChatView._normalize_unread_peer_id(self, peer_id)
+
+    def _resolve_best_history_key(self, session: dict = None, peer_id: str = "", history_id: str = "") -> str:
+        session = session if isinstance(session, dict) else {}
+        peer_id = str(peer_id or "")
+        history_id = str(history_id or "")
+        active_peer_id = ChatView._resolve_active_peer_id(self, peer_id, history_id)
+
+        meta = {}
+        for key in (active_peer_id, peer_id, history_id):
+            value = (getattr(self, "_session_meta_by_peer", {}) or {}).get(str(key or ""))
+            if isinstance(value, dict) and value:
+                meta = value
+                break
+
+        candidates = []
+        for candidate in (
+            session.get("_historyKey"),
+            session.get("msgId"),
+            meta.get("chatId"),
+            (getattr(self, "_history_id_by_peer", {}) or {}).get(active_peer_id, ""),
+            history_id,
+            session.get("chatId"),
+        ):
+            candidate = str(candidate or "")
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        for candidate in candidates:
+            if candidate != active_peer_id:
+                return candidate
+        return candidates[0] if candidates else ""
+
+    def _mark_conversation_locally_read(self, peer_id: str = "", history_id: str = ""):
+        if not hasattr(self, "_locally_read_conversations"):
+            self._locally_read_conversations = set()
+        for key in (
+            ChatView._normalize_unread_peer_id(self, peer_id),
+            str(history_id or ""),
+        ):
+            if key:
+                self._locally_read_conversations.add(key)
+
+    def _clear_conversation_locally_read_marker(self, peer_id: str = "", history_id: str = ""):
+        if not hasattr(self, "_locally_read_conversations"):
+            self._locally_read_conversations = set()
+        for key in (
+            ChatView._normalize_unread_peer_id(self, peer_id),
+            str(history_id or ""),
+        ):
+            if key:
+                self._locally_read_conversations.discard(key)
+
+    def _normalize_unread_peer_id(self, peer_id: str) -> str:
+        peer_id = str(peer_id or "")
+        if "/" in peer_id:
+            return peer_id.split("/", 1)[0]
+        return peer_id
+
+    def _extract_session_unread_count(self, session: dict) -> int:
+        if not isinstance(session, dict):
+            return 0
+        for key in ("unread_count", "unreadCount", "unread", "unRead", "msgUnRead", "notReadCount"):
+            value = session.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return max(int(value), 0)
+            except Exception:
+                continue
+        return 0
+
+    def _get_unread_count(self, peer_id: str = "", history_id: str = "", session: dict = None) -> int:
+        for key in (self._normalize_unread_peer_id(peer_id), str(history_id or "")):
+            if key and key in self._unread_count_by_peer:
+                try:
+                    return max(int(self._unread_count_by_peer.get(key, 0) or 0), 0)
+                except Exception:
+                    return 0
+        history_id = str(history_id or "")
+        if history_id:
+            for mapped_peer_id, mapped_history_id in (self._history_id_by_peer or {}).items():
+                if str(mapped_history_id or "") != history_id:
+                    continue
+                mapped_peer_id = self._normalize_unread_peer_id(mapped_peer_id)
+                if mapped_peer_id in self._unread_count_by_peer:
+                    try:
+                        return max(int(self._unread_count_by_peer.get(mapped_peer_id, 0) or 0), 0)
+                    except Exception:
+                        return 0
+        return self._extract_session_unread_count(session or {})
+
+    def _set_unread_count(self, peer_id: str, unread_count: int, history_id: str = ""):
+        peer_id = self._normalize_unread_peer_id(peer_id)
+        history_id = str(history_id or "")
+        try:
+            unread_count = max(int(unread_count or 0), 0)
+        except Exception:
+            unread_count = 0
+
+        changed = False
+        for key in (peer_id, history_id):
+            if not key:
+                continue
+            if self._unread_count_by_peer.get(key) != unread_count:
+                self._unread_count_by_peer[key] = unread_count
+                changed = True
+        return changed
+
+    def _apply_history_summary_unread(self, subjects: list):
+        changed = []
+        current_history_id = str(getattr(self, "_current_history_id", "") or "")
+        current_peer_id = ChatView._resolve_active_peer_id(self, getattr(self, "_current_target_id", ""), current_history_id)
+        for item in subjects or []:
+            if not isinstance(item, dict):
+                continue
+            subject = self._normalize_unread_peer_id(item.get("subject"))
+            if not subject:
+                continue
+            try:
+                count = max(int(item.get("count") or 0), 0)
+            except Exception:
+                continue
+            mapped_history_id = str(self._history_id_by_peer.get(subject, "") or "")
+            if (
+                subject == current_peer_id
+                or (current_history_id and mapped_history_id == current_history_id)
+                or subject in getattr(self, "_locally_read_conversations", set())
+                or (mapped_history_id and mapped_history_id in getattr(self, "_locally_read_conversations", set()))
+            ):
+                count = 0
+            if self._set_unread_count(subject, count):
+                changed.append({"peer_id": subject, "history_id": mapped_history_id, "unread_count": count})
+        return changed
+
+    def _clear_current_unread_count(self):
+        changed = False
+        history_id = self._current_history_id or self._history_id_by_peer.get(str(self._current_target_id or ""), "")
+        active_peer_id = ChatView._resolve_active_peer_id(self, self._current_target_id, history_id)
+        ChatView._mark_conversation_locally_read(self, active_peer_id, history_id)
+        if active_peer_id or history_id:
+            changed = self._set_unread_count(
+                active_peer_id,
+                0,
+                history_id=history_id,
+            )
+        if changed:
+            self._update_session_unread_row(active_peer_id, history_id, 0)
+        return changed
+
+    def _merge_session_metadata(self, session: dict) -> dict:
+        if not isinstance(session, dict):
+            return session
+        merged = dict(session)
+        peer_id = str(self._resolve_session_peer_id(merged) or "")
+        chat_id = str(merged.get("chatId", "") or "")
+        meta = None
+        for key in (peer_id, chat_id):
+            if key and key in self._session_meta_by_peer:
+                meta = self._session_meta_by_peer[key]
+                break
+        if isinstance(meta, dict):
+            if meta.get("subtitle"):
+                merged["subtitle"] = meta["subtitle"]
+            if meta.get("courseName"):
+                merged["courseName"] = meta["courseName"]
+            if meta.get("chatIco") and not merged.get("chatIco"):
+                merged["chatIco"] = meta["chatIco"]
+            if meta.get("chatId") and (
+                not merged.get("chatId")
+                or str(merged.get("chatId") or "") == peer_id
+            ):
+                merged["chatId"] = meta["chatId"]
+            if meta.get("chatId") and (
+                not merged.get("_historyKey")
+                or str(merged.get("_historyKey") or "") == peer_id
+            ):
+                merged["_historyKey"] = meta["chatId"]
+        unread_count = self._get_unread_count(peer_id, chat_id, merged)
+        if unread_count:
+            merged["unread_count"] = unread_count
+        else:
+            merged.pop("unread_count", None)
+        return merged
+
+    def _store_class_info_metadata(self, peer_id: str, class_info: dict):
+        if not isinstance(class_info, dict):
+            return False
+
+        meta = {}
+        if class_info.get("class_name"):
+            meta["subtitle"] = str(class_info.get("class_name") or "")
+        if class_info.get("course_name"):
+            meta["courseName"] = str(class_info.get("course_name") or "")
+        if class_info.get("image_url"):
+            meta["chatIco"] = str(class_info.get("image_url") or "")
+        if class_info.get("chat_id"):
+            meta["chatId"] = str(class_info.get("chat_id") or "")
+        if not meta:
+            return False
+
+        changed = False
+        for key in (str(peer_id or ""), str(meta.get("chatId") or "")):
+            if not key:
+                continue
+            current = dict(self._session_meta_by_peer.get(key) or {})
+            merged = dict(current)
+            merged.update({k: v for k, v in meta.items() if v})
+            if merged != current:
+                self._session_meta_by_peer[key] = merged
+                changed = True
+
+        if meta.get("chatId") and peer_id and not self._history_id_by_peer.get(str(peer_id)):
+            self._history_id_by_peer[str(peer_id)] = str(meta["chatId"])
+            changed = True
+        if meta.get("chatId") and peer_id:
+            existing_unread = self._get_unread_count(peer_id, "")
+            if existing_unread and self._set_unread_count(peer_id, existing_unread, history_id=str(meta["chatId"])):
+                changed = True
+
+        if changed and self._raw_sessions:
+            updated_sessions = [self._merge_session_metadata(session) for session in self._raw_sessions]
+            if updated_sessions != self._raw_sessions:
+                self._raw_sessions = updated_sessions
+                target_history_id = str(meta.get("chatId") or self._history_id_by_peer.get(str(peer_id or ""), "") or "")
+                for session in updated_sessions:
+                    if not isinstance(session, dict):
+                        continue
+                    current_peer_id = self._resolve_session_peer_id(session)
+                    current_history_id = str(session.get("msgId", "") or session.get("chatId", "") or "")
+                    if str(peer_id or "") not in {current_peer_id, current_history_id} and target_history_id not in {current_peer_id, current_history_id}:
+                        continue
+                    self._update_session_row(current_peer_id, current_history_id, session=session)
+
+        return changed
+
+    def _upsert_session_from_message(self, peer_id: str, msg: dict, display_name: str = ""):
+        peer_id = str(peer_id or "")
+        if not peer_id:
+            return False
+
+        history_id = str(self._history_id_by_peer.get(peer_id, "") or peer_id)
+        timestamp = int(msg.get("timestamp") or int(time.time() * 1000))
+        is_group = bool(msg.get("class_info"))
+        session_name = self._resolve_session_display_name(peer_id, msg, fallback_name=display_name)
+
+        updated_sessions = []
+        found = False
+        for session in self._raw_sessions or []:
+            if not isinstance(session, dict):
+                updated_sessions.append(session)
+                continue
+
+            current = dict(session)
+            current_peer_id = self._resolve_session_peer_id(current)
+            current_history_id = ChatView._resolve_session_history_id(self, current)
+            if peer_id not in {current_peer_id, current_history_id} and history_id not in {current_peer_id, current_history_id}:
+                updated_sessions.append(current)
+                continue
+
+            found = True
+            current["updateTime"] = timestamp
+            current_name = str(current.get("chatName") or "")
+            if not current_name or current_name in {current_peer_id, current_history_id, peer_id, history_id}:
+                current["chatName"] = session_name
+            if not current.get("chatId"):
+                current["chatId"] = history_id
+            if not current.get("_historyKey"):
+                current["_historyKey"] = current_history_id or history_id
+            if ChatView._is_group_session(self, current):
+                is_group = True
+            if is_group:
+                current["isGroup"] = 0
+                current["isPrivate"] = False
+            updated_sessions.append(current)
+
+        if not found:
+            new_session = {
+                "chatId": history_id,
+                "_historyKey": history_id if history_id != peer_id else "",
+                "chatName": session_name,
+                "chatIco": "",
+                "updateTime": timestamp,
+                "isGroup": 0 if is_group else 1,
+                "isPrivate": False if is_group else True,
+            }
+            updated_sessions.append(new_session)
+
+        if updated_sessions == (self._raw_sessions or []):
+            return False
+
+        self._raw_sessions = updated_sessions
+        self._refresh_session_list(updated_sessions)
+        return True
+
+    def _resolve_session_display_name(self, peer_id: str, msg: dict, fallback_name: str = "") -> str:
+        peer_id = str(peer_id or "")
+        msg = msg if isinstance(msg, dict) else {}
+        class_info = msg.get("class_info")
+        if not isinstance(class_info, dict):
+            class_info = {}
+
+        history_id = str(getattr(self, "_history_id_by_peer", {}).get(peer_id, "") or "")
+        meta_by_peer = getattr(self, "_session_meta_by_peer", {}) or {}
+        meta = {}
+        for key in (peer_id, history_id):
+            value = meta_by_peer.get(str(key or ""))
+            if isinstance(value, dict) and value:
+                meta = value
+                break
+
+        for candidate in (
+            class_info.get("course_name"),
+            msg.get("chatName"),
+            msg.get("name"),
+            meta.get("courseName"),
+            class_info.get("class_name"),
+            meta.get("subtitle"),
+            fallback_name,
+            peer_id,
+        ):
+            candidate = str(candidate or "").strip()
+            if candidate:
+                return candidate
+        return peer_id
+
     def _add_session_item(self, session: dict):
         """向消息列表添加一个自定义会话项（头像+名字+时间）"""
+        session, item_widget, peer_id, item_name, item_history_id, unread_count, avatar_url = self._build_session_item_components(session)
+        item = QListWidgetItem()
+        item.setSizeHint(item_widget.sizeHint())
+        item.setData(Qt.ItemDataRole.UserRole, peer_id)
+        item.setData(Qt.ItemDataRole.UserRole + 1, item_name)
+        item.setData(Qt.ItemDataRole.UserRole + 2, session)
+        item.setData(Qt.ItemDataRole.UserRole + 3, item_history_id)
+        item.setData(Qt.ItemDataRole.UserRole + 4, unread_count)
+
+        self.chat_list.addItem(item)
+        self.chat_list.setItemWidget(item, item_widget)
+
+        # 异步加载头像
+        if avatar_url:
+            self._request_avatar(self.chat_list, item, avatar_url)
+
+    def _build_session_item_components(self, session: dict):
+        session = self._merge_session_metadata(session)
         chat_id = str(session.get("chatId", "") or "")
         history_key = str(session.get("msgId", "") or "")
+        history_id = history_key or chat_id
         name = session.get("chatName", "未知")
         peer_id = self._resolve_session_peer_id(session)
         update_time = session.get("updateTime", 0)
-        avatar_url = session.get("chatIco", "")
-        if history_key or chat_id:
-            self._history_id_by_peer[peer_id] = history_key or chat_id
+        avatar_url = str(session.get("chatIco", "") or "")
+        if history_id:
+            self._history_id_by_peer[peer_id] = history_id
 
-        # 清理 avatar_url：如果是 HTML 则提取 src
-        if avatar_url and avatar_url.startswith("<"):
+        if avatar_url.startswith("<"):
             import re
             m = re.search(r'src=["\']([^"\']+)["\']', avatar_url)
             if m:
                 avatar_url = m.group(1)
 
-        # 格式化时间
         time_str = ""
         if update_time:
             try:
@@ -479,22 +934,89 @@ class ChatView(QWidget):
             except Exception:
                 pass
 
-        # 创建自定义 widget 项
         subtitle = str(session.get("subtitle", "") or "")
-        item_widget = ChatSessionItem(name, time_str, avatar_url, session, subtitle=subtitle)
-        item = QListWidgetItem()
-        item.setSizeHint(item_widget.sizeHint())
-        item.setData(Qt.ItemDataRole.UserRole, peer_id)
-        item.setData(Qt.ItemDataRole.UserRole + 1, name)
-        item.setData(Qt.ItemDataRole.UserRole + 2, session)
-        item.setData(Qt.ItemDataRole.UserRole + 3, history_key or chat_id)
+        unread_count = self._get_unread_count(peer_id, history_id, session)
+        item_widget = ChatSessionItem(name, time_str, avatar_url, session, subtitle=subtitle, unread_count=unread_count)
+        return session, item_widget, peer_id, name, history_id, unread_count, avatar_url
 
-        self.chat_list.addItem(item)
-        self.chat_list.setItemWidget(item, item_widget)
+    def _update_session_row(self, peer_id: str = "", history_id: str = "", session: dict = None):
+        list_widget = getattr(self, "chat_list", None)
+        if list_widget is None:
+            return False
 
-        # 异步加载头像
-        if avatar_url:
-            self._request_avatar(self.chat_list, item, avatar_url)
+        peer_id = self._normalize_unread_peer_id(peer_id)
+        history_id = str(history_id or "")
+        updated = False
+        for index in range(list_widget.count()):
+            item = list_widget.item(index)
+            if item is None:
+                continue
+            item_peer_id = self._normalize_unread_peer_id(item.data(Qt.ItemDataRole.UserRole) or "")
+            item_history_id = str(item.data(Qt.ItemDataRole.UserRole + 3) or "")
+            if peer_id not in {item_peer_id, item_history_id} and history_id not in {item_peer_id, item_history_id}:
+                continue
+            source_session = session or item.data(Qt.ItemDataRole.UserRole + 2) or {}
+            built_session, item_widget, built_peer_id, item_name, built_history_id, unread_count, avatar_url = self._build_session_item_components(source_session)
+            item.setSizeHint(item_widget.sizeHint())
+            item.setData(Qt.ItemDataRole.UserRole, built_peer_id)
+            item.setData(Qt.ItemDataRole.UserRole + 1, item_name)
+            item.setData(Qt.ItemDataRole.UserRole + 2, built_session)
+            item.setData(Qt.ItemDataRole.UserRole + 3, built_history_id)
+            item.setData(Qt.ItemDataRole.UserRole + 4, unread_count)
+            list_widget.setItemWidget(item, item_widget)
+            if avatar_url:
+                self._request_avatar(list_widget, item, avatar_url)
+            updated = True
+        return updated
+
+    def _update_session_unread_row(self, peer_id: str = "", history_id: str = "", unread_count: int = 0):
+        peer_id = self._normalize_unread_peer_id(peer_id)
+        history_id = str(history_id or "")
+        try:
+            unread_count = max(int(unread_count or 0), 0)
+        except Exception:
+            unread_count = 0
+
+        updated = False
+        for session in self._raw_sessions or []:
+            if not isinstance(session, dict):
+                continue
+            current_peer_id = self._resolve_session_peer_id(session)
+            current_history_id = str(session.get("msgId", "") or session.get("chatId", "") or "")
+            if peer_id not in {current_peer_id, current_history_id} and history_id not in {current_peer_id, current_history_id}:
+                continue
+            if unread_count > 0:
+                session["unread_count"] = unread_count
+            else:
+                session.pop("unread_count", None)
+            updated = True
+
+        list_widget = getattr(self, "chat_list", None)
+        if list_widget is None:
+            return updated
+
+        for index in range(list_widget.count()):
+            item = list_widget.item(index)
+            if item is None:
+                continue
+            item_peer_id = self._normalize_unread_peer_id(item.data(Qt.ItemDataRole.UserRole) or "")
+            item_history_id = str(item.data(Qt.ItemDataRole.UserRole + 3) or "")
+            if peer_id not in {item_peer_id, item_history_id} and history_id not in {item_peer_id, item_history_id}:
+                continue
+            item.setData(Qt.ItemDataRole.UserRole + 4, unread_count)
+            session = item.data(Qt.ItemDataRole.UserRole + 2) or {}
+            if isinstance(session, dict):
+                session = dict(session)
+                if unread_count > 0:
+                    session["unread_count"] = unread_count
+                else:
+                    session.pop("unread_count", None)
+                item.setData(Qt.ItemDataRole.UserRole + 2, session)
+            widget = list_widget.itemWidget(item)
+            if widget and hasattr(widget, "set_unread_count"):
+                widget.set_unread_count(unread_count)
+            updated = True
+        return updated
 
     def set_messages(self, messages: list[dict]):
         """设置消息列表（兼容旧接口，新数据通过 _on_messages_loaded 处理）
@@ -526,6 +1048,15 @@ class ChatView(QWidget):
         self._all_students = list(students or [])
         self._render_students(self._filtered_students())
 
+    def _update_group_tab_title(self, count: int = 0):
+        if not hasattr(self, "tab_widget") or not hasattr(self, "student_tab"):
+            return
+        index = self.tab_widget.indexOf(self.student_tab)
+        if index >= 0:
+            normalized_count = max(0, int(count or 0))
+            title = f"群组({normalized_count})" if normalized_count > 0 else "群组"
+            self.tab_widget.setTabText(index, title)
+
     def _filtered_students(self):
         keyword = self.student_search.text().strip().lower() if hasattr(self, "student_search") else ""
         if not keyword:
@@ -537,8 +1068,9 @@ class ChatView(QWidget):
 
     def _render_students(self, students: list[dict]):
         self.student_list.clear()
+        ChatView._update_group_tab_title(self, len(students or []))
         if not students:
-            self.student_list.addItem(QListWidgetItem("未找到匹配学生"))
+            self.student_list.addItem(QListWidgetItem("未找到匹配群组"))
             return
         for stu in students:
             name = stu.get("name", "未知")
@@ -577,11 +1109,214 @@ class ChatView(QWidget):
     def _show_group_members_loading(self):
         self._all_students = []
         self.student_list.clear()
+        ChatView._update_group_tab_title(self, 0)
         self.student_list.addItem(QListWidgetItem("正在加载群成员..."))
+
+    def _show_group_members_empty(self):
+        self._all_students = []
+        self.student_list.clear()
+        ChatView._update_group_tab_title(self, 0)
+        self.student_list.addItem(QListWidgetItem("暂无群成员"))
+
+    def _update_group_refresh_button_state(self):
+        if hasattr(self, "group_refresh_btn"):
+            self.group_refresh_btn.setEnabled(bool(self._current_group_room_id))
+
+    def _resolve_group_room_name(self, session: dict) -> str:
+        if not isinstance(session, dict):
+            session = {}
+        for key in ("chatName", "name", "title", "courseName"):
+            value = session.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        room_id = ChatView._resolve_group_room_id(self, session)
+        if room_id:
+            return str(getattr(self, "_group_name_by_room_id", {}).get(room_id, "") or "").strip()
+        return ""
+
+    def _resolve_group_cache_name(self, session: dict) -> str:
+        room_name = ChatView._resolve_group_room_name(self, session)
+        class_name = ""
+        if isinstance(session, dict):
+            for key in ("subtitle", "className", "classname", "class_name"):
+                value = session.get(key)
+                if value not in (None, ""):
+                    class_name = str(value).strip()
+                    break
+        if not class_name:
+            room_id = ChatView._resolve_group_room_id(self, session)
+            if room_id:
+                return str(getattr(self, "_group_cache_name_by_room_id", {}).get(room_id, "") or room_name).strip()
+        if room_name and class_name and class_name != room_name:
+            return f"{room_name}-{class_name}"
+        return room_name or class_name
+
+    def _sanitize_group_cache_filename(self, room_name: str, room_id: str = "") -> str:
+        normalized_name = re.sub(r'[\\/:*?"<>|]+', "_", str(room_name or "").strip())
+        normalized_name = normalized_name.strip().strip(".")
+        normalized_name = re.sub(r"\s+", " ", normalized_name)
+        return normalized_name or str(room_id or "").strip()
+
+    def _legacy_group_members_cache_file(self, room_id: str) -> Path:
+        cache_dir = Path(getattr(self, "_group_members_cache_dir", Path(DATA_DIR) / "data" / "group_members"))
+        return cache_dir / f"{str(room_id or '').strip()}.json"
+
+    def _group_members_cache_file(self, room_id: str, cache_name: str = "") -> Path:
+        cache_dir = Path(getattr(self, "_group_members_cache_dir", Path(DATA_DIR) / "data" / "group_members"))
+        file_stem = ChatView._sanitize_group_cache_filename(self, cache_name or getattr(self, "_current_group_cache_name", ""), room_id)
+        return cache_dir / f"{file_stem}.json"
+
+    def _load_persisted_group_members(self, room_id: str, cache_name: str = "", room_name: str = ""):
+        room_id = str(room_id or "").strip()
+        if not room_id:
+            return None
+
+        candidate_files = []
+        for candidate_name in (cache_name, room_name):
+            candidate_name = str(candidate_name or "").strip()
+            if not candidate_name:
+                continue
+            candidate_file = ChatView._group_members_cache_file(self, room_id, candidate_name)
+            if candidate_file not in candidate_files:
+                candidate_files.append(candidate_file)
+        legacy_cache_file = ChatView._legacy_group_members_cache_file(self, room_id)
+        if legacy_cache_file not in candidate_files:
+            candidate_files.append(legacy_cache_file)
+
+        target_file = next((path for path in candidate_files if path.exists()), None)
+        if target_file is None:
+            return None
+
+        try:
+            with open(target_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"ChatView: 读取群成员缓存失败 room_id={room_id}, error={e}")
+            return None
+
+        if not isinstance(payload, list):
+            logger.warning(f"ChatView: 群成员缓存格式异常 room_id={room_id}, type={type(payload).__name__}")
+            return None
+
+        members = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            member = dict(item)
+            member["person_id"] = str(member.get("person_id") or member.get("tuid") or "")
+            member["name"] = str(member.get("name") or "未知")
+            member["student_id"] = str(member.get("student_id") or member.get("puid") or "")
+            member["avatar_url"] = str(member.get("avatar_url") or "")
+            if member.get("tuid") not in (None, "") or member["person_id"]:
+                member["tuid"] = str(member.get("tuid") or member["person_id"])
+            if member.get("puid") not in (None, "") or member["student_id"]:
+                member["puid"] = str(member.get("puid") or member["student_id"])
+            members.append(member)
+
+        logger.info(f"ChatView: 已加载群成员缓存 room_id={room_id}, file={target_file.name}, count={len(members)}")
+        return members
+
+    def _persist_group_members(self, room_id: str, members: list, cache_name: str = ""):
+        room_id = str(room_id or "").strip()
+        if not room_id or not isinstance(members, list):
+            return
+
+        payload = []
+        for item in members:
+            if not isinstance(item, dict):
+                continue
+            member = dict(item)
+            if "person_id" in member:
+                member["person_id"] = str(member.get("person_id") or "")
+            if "name" in member:
+                member["name"] = str(member.get("name") or "")
+            if "student_id" in member:
+                member["student_id"] = str(member.get("student_id") or "")
+            if "avatar_url" in member:
+                member["avatar_url"] = str(member.get("avatar_url") or "")
+            if "tuid" in member:
+                member["tuid"] = str(member.get("tuid") or "")
+            if "puid" in member:
+                member["puid"] = str(member.get("puid") or "")
+            payload.append(member)
+
+        if not payload:
+            return
+
+        cache_file = ChatView._group_members_cache_file(self, room_id, cache_name)
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            logger.info(f"ChatView: 已保存群成员缓存 room_id={room_id}, file={cache_file.name}, count={len(payload)}")
+        except (OSError, TypeError, ValueError) as e:
+            logger.warning(f"ChatView: 保存群成员缓存失败 room_id={room_id}, error={e}")
+
+    def _delete_persisted_group_members(self, room_id: str, cache_name: str = "", room_name: str = ""):
+        room_id = str(room_id or "").strip()
+        if not room_id:
+            return False
+
+        removed = False
+        candidate_files = {
+            ChatView._legacy_group_members_cache_file(self, room_id),
+        }
+        if cache_name:
+            candidate_files.add(ChatView._group_members_cache_file(self, room_id, cache_name))
+        if room_name:
+            candidate_files.add(ChatView._group_members_cache_file(self, room_id, room_name))
+        for cache_file in candidate_files:
+            try:
+                cache_file.unlink()
+                logger.info(f"ChatView: 已删除群成员缓存 room_id={room_id}, file={cache_file.name}")
+                removed = True
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                logger.warning(f"ChatView: 删除群成员缓存失败 room_id={room_id}, error={e}")
+        return removed
+
+    def _start_group_members_reload(self, room_id: str):
+        room_id = str(room_id or "").strip()
+        if not room_id:
+            return False
+
+        if self._group_members_worker and self._group_members_worker.isRunning():
+            self._pending_group_room_id = room_id
+            return False
+
+        self._pending_group_room_id = ""
+        self._show_group_members_loading()
+        self._group_members_worker = ChatGroupMembersWorker(self.crawler, room_id)
+        self._group_members_worker.members_ready.connect(self._on_group_members_loaded)
+        self._group_members_worker.start()
+        return True
+
+    def _refresh_current_group_members(self):
+        room_id = str(self._current_group_room_id or "").strip()
+        room_name = str(self._current_group_room_name or self._group_name_by_room_id.get(room_id, "") or "").strip()
+        cache_name = str(self._current_group_cache_name or self._group_cache_name_by_room_id.get(room_id, "") or "").strip()
+        if not room_id:
+            return
+
+        self._group_members_cache.pop(room_id, None)
+        ChatView._delete_persisted_group_members(self, room_id, cache_name, room_name)
+        if hasattr(self, "tab_widget") and hasattr(self, "student_tab"):
+            self.tab_widget.setCurrentWidget(self.student_tab)
+        ChatView._start_group_members_reload(self, room_id)
 
     def _load_group_members(self, session: dict):
         room_id = self._resolve_group_room_id(session)
+        room_name = ChatView._resolve_group_room_name(self, session)
+        cache_name = ChatView._resolve_group_cache_name(self, session)
         self._current_group_room_id = room_id
+        self._current_group_room_name = room_name
+        self._current_group_cache_name = cache_name
+        if room_id and room_name:
+            self._group_name_by_room_id[room_id] = room_name
+        if room_id and cache_name:
+            self._group_cache_name_by_room_id[room_id] = cache_name
+        ChatView._update_group_refresh_button_state(self)
         if not room_id:
             self.student_list.clear()
             self.student_list.addItem(QListWidgetItem("无法获取群成员"))
@@ -589,23 +1324,31 @@ class ChatView(QWidget):
 
         cached = self._group_members_cache.get(room_id)
         if cached is not None:
-            self.set_students(cached)
+            if cached:
+                self.set_students(cached)
+            else:
+                self._show_group_members_empty()
             self.tab_widget.setCurrentWidget(self.student_tab)
             return
 
-        if self._group_members_worker and self._group_members_worker.isRunning():
-            self._pending_group_room_id = room_id
+        persisted = ChatView._load_persisted_group_members(self, room_id, cache_name, room_name)
+        if persisted is not None:
+            self._group_members_cache[room_id] = persisted
+            if persisted:
+                self.set_students(persisted)
+            else:
+                self._show_group_members_empty()
+            self.tab_widget.setCurrentWidget(self.student_tab)
             return
 
-        self._pending_group_room_id = ""
-        self._show_group_members_loading()
-        self._group_members_worker = ChatGroupMembersWorker(self.crawler, room_id)
-        self._group_members_worker.members_ready.connect(self._on_group_members_loaded)
-        self._group_members_worker.start()
+        ChatView._start_group_members_reload(self, room_id)
 
     def _on_group_members_loaded(self, room_id: str, members: list):
         room_id = str(room_id or "")
+        cache_name = str(self._group_cache_name_by_room_id.get(room_id, "") or self._current_group_cache_name or "").strip()
         self._group_members_cache[room_id] = members or []
+        if members:
+            ChatView._persist_group_members(self, room_id, members, cache_name)
         if room_id != self._current_group_room_id:
             pending_room_id = self._pending_group_room_id
             if pending_room_id and pending_room_id != room_id:
@@ -616,8 +1359,7 @@ class ChatView(QWidget):
             self.set_students(members)
             self.tab_widget.setCurrentWidget(self.student_tab)
         else:
-            self.student_list.clear()
-            self.student_list.addItem(QListWidgetItem("暂无群成员"))
+            self._show_group_members_empty()
 
     def append_message(self, sender: str, text: str, is_self: bool = False, status_text: str = ""):
         """向聊天区域追加一条消息"""
@@ -811,6 +1553,37 @@ class ChatView(QWidget):
         if self._last_send_error:
             self.append_message("系统", self._last_send_error, is_self=False)
 
+    def _latest_message_id_for_conversation(self, conversation_key: str = None) -> str:
+        conversation_key = conversation_key or self._conversation_key()
+        messages = self._message_cache.get(conversation_key, []) or []
+        for item in reversed(sorted(messages, key=self._message_sort_key)):
+            message_id = str(item.get("message_id") or "")
+            if message_id:
+                return message_id
+        return ""
+
+    def _sync_conversation_read_state(self, peer_id: str = None, history_id: str = None, message_id: str = ""):
+        if not hasattr(self.crawler, "request_conversation_read_msync"):
+            return False
+        peer_id = str(peer_id if peer_id is not None else self._current_target_id or "")
+        history_id = str(history_id if history_id is not None else self._current_history_id or "")
+        peer_id = ChatView._resolve_active_peer_id(self, peer_id, history_id)
+        if not peer_id:
+            return False
+
+        conversation_key = self._conversation_key(peer_id=peer_id, history_id=history_id)
+        message_id = str(message_id or self._latest_message_id_for_conversation(conversation_key))
+        if not message_id:
+            return False
+
+        if self._last_read_sync_by_conversation.get(conversation_key) == message_id:
+            return False
+
+        if self.crawler.request_conversation_read_msync(peer_id, message_id):
+            self._last_read_sync_by_conversation[conversation_key] = message_id
+            return True
+        return False
+
     def _append_cached_message(self, sender_id: str, sender_name: str, content: str, is_self: bool, timestamp: int = 0, conversation_key: str = None, message_id: str = "", read_state: str = "", read_at: int = 0):
         """向本地缓存追加一条消息。"""
         conversation_key = conversation_key or self._conversation_key()
@@ -874,7 +1647,7 @@ class ChatView(QWidget):
     def _show_empty_state(self):
         """显示空状态占位"""
         self.chat_messages.clear()
-        self.chat_messages.setPlaceholderText("选择左侧的对话或学生开始聊天")
+        self.chat_messages.setPlaceholderText("选择左侧的对话或群组开始聊天")
         self.chat_title_label.setText("选择一个对话")
         self.send_btn.setEnabled(False)
 
@@ -882,14 +1655,20 @@ class ChatView(QWidget):
         """消息列表选中事件"""
         if not current:
             return
-        target_id = current.data(Qt.ItemDataRole.UserRole)
-        name = current.data(Qt.ItemDataRole.UserRole + 1) or "未知"
-        history_id = current.data(Qt.ItemDataRole.UserRole + 3) or ""
         session = current.data(Qt.ItemDataRole.UserRole + 2) or {}
+        target_id = self._resolve_session_peer_id(session) or current.data(Qt.ItemDataRole.UserRole)
+        name = current.data(Qt.ItemDataRole.UserRole + 1) or "未知"
+        history_id = ChatView._resolve_best_history_key(
+            self,
+            session,
+            peer_id=str(target_id or ""),
+            history_id=str(current.data(Qt.ItemDataRole.UserRole + 3) or ""),
+        )
         if self._is_group_session(session):
             self._load_group_members(session)
         else:
             self._current_group_room_id = ""
+            ChatView._update_group_refresh_button_state(self)
         self._open_chat(target_id, name, history_id=history_id)
 
     def _on_student_selected(self, current: QListWidgetItem, previous: QListWidgetItem):
@@ -898,15 +1677,16 @@ class ChatView(QWidget):
             return
         target_id = current.data(Qt.ItemDataRole.UserRole)
         name = current.data(Qt.ItemDataRole.UserRole + 1) or "未知"
-        history_id = self._history_id_by_peer.get(str(target_id), "")
+        history_id = ChatView._resolve_best_history_key(self, peer_id=str(target_id or ""), history_id=self._history_id_by_peer.get(str(target_id), ""))
         self._open_chat(target_id, name, history_id=history_id)
 
     def _open_chat(self, target_id: str, target_name: str, history_id: str = ""):
         """打开与目标的聊天"""
         self._current_target_id = str(target_id or "")
-        self._current_history_id = str(history_id or "") or None
+        self._current_history_id = ChatView._resolve_best_history_key(self, peer_id=self._current_target_id, history_id=history_id) or None
         self._current_target_name = target_name
         self._last_send_error = ""
+        self._clear_current_unread_count()
         self.chat_title_label.setText(target_name)
         self.send_btn.setEnabled(bool(target_id))
         conversation_key = self._conversation_key()
@@ -917,8 +1697,9 @@ class ChatView(QWidget):
             self.chat_messages.setPlaceholderText("正在加载聊天记录...")
 
         self._ensure_msync_connected()
+        self._sync_conversation_read_state()
         if hasattr(self.crawler, "request_history_msync"):
-            self.crawler.request_history_msync(self._current_target_id)
+            self.crawler.request_history_msync(ChatView._resolve_active_peer_id(self, self._current_target_id, self._current_history_id) or self._current_target_id)
         if self._current_history_id:
             self._load_current_chat_history()
 
@@ -972,8 +1753,11 @@ class ChatView(QWidget):
                     on_error=lambda e: logger.error(f"MSync error: {e}"),
                     on_close=lambda c, m: logger.info(f"MSync closed: {c} {m}"),
                 )
+                if self._raw_sessions:
+                    self._request_unread_summary(self._raw_sessions)
                 if self._current_target_id and hasattr(self.crawler, "request_history_msync"):
-                    self.crawler.request_history_msync(self._current_target_id)
+                    self.crawler.request_history_msync(ChatView._resolve_active_peer_id(self, self._current_target_id, self._current_history_id) or self._current_target_id)
+                    self._sync_conversation_read_state()
             except Exception as e:
                 logger.error(f"MSync connect failed: {e}")
             finally:
@@ -986,12 +1770,15 @@ class ChatView(QWidget):
         """异步加载当前会话历史消息。"""
         if not self._current_history_id:
             return
-        if self._history_worker and self._history_worker.isRunning():
+        if self._history_worker and self._history_worker.isRunning() and str(getattr(self._history_worker, "chat_id", "") or "") == str(self._current_history_id):
             return
 
-        self._history_worker = ChatHistoryWorker(self.crawler, self._current_history_id, limit=limit)
-        self._history_worker.history_ready.connect(self._on_history_loaded)
-        self._history_worker.start()
+        worker = ChatHistoryWorker(self.crawler, self._current_history_id, limit=limit)
+        worker.history_ready.connect(self._on_history_loaded)
+        worker.finished.connect(lambda w=worker: self._history_workers.remove(w) if w in self._history_workers else None)
+        self._history_workers.append(worker)
+        self._history_worker = worker
+        worker.start()
 
     def _on_history_loaded(self, chat_id: str, messages: list):
         """历史消息加载完成回调。"""
@@ -1004,8 +1791,10 @@ class ChatView(QWidget):
             if self._current_target_id and self._current_history_id and self._current_target_id != self._current_history_id:
                 self._history_id_by_peer[self._current_target_id] = self._current_history_id
             self._render_cached_messages(conversation_key)
+            self._sync_conversation_read_state(peer_id=self._current_target_id, history_id=str(chat_id))
         elif conversation_key in self._message_cache:
             self._render_cached_messages(conversation_key)
+            self._sync_conversation_read_state(peer_id=self._current_target_id, history_id=str(chat_id))
         else:
             self.chat_messages.clear()
             self.chat_messages.setPlaceholderText(f"与 {self._current_target_name or '该会话'} 的对话")
@@ -1055,8 +1844,19 @@ class ChatView(QWidget):
         if msg.get("event") == "read_ack":
             self._on_read_ack(msg)
             return
+        if msg.get("event") == "history_summary":
+            changed_rows = self._apply_history_summary_unread(msg.get("subjects") or [])
+            if changed_rows:
+                for row in changed_rows:
+                    self._update_session_unread_row(
+                        row.get("peer_id", ""),
+                        row.get("history_id", ""),
+                        row.get("unread_count", 0),
+                    )
+            return
 
         peer_id = str(msg.get("peer_id") or self._resolve_message_peer_id(msg) or "")
+        self._store_class_info_metadata(peer_id, msg.get("class_info"))
         from_user = str(msg.get("from", "") or "")
         content = msg.get("content", "")
         timestamp = msg.get("timestamp", 0)
@@ -1085,10 +1885,27 @@ class ChatView(QWidget):
 
         # 如果当前正在和该用户聊天，直接显示
         if self._is_current_conversation_message(peer_id, msg):
+            if not is_self:
+                self._set_unread_count(peer_id, 0, history_id=self._history_id_by_peer.get(peer_id, ""))
             self._render_cached_messages(conversation_key)
+            if not is_self:
+                self._sync_conversation_read_state(
+                    peer_id=peer_id,
+                    history_id=self._history_id_by_peer.get(peer_id, ""),
+                    message_id=str(msg.get("message_id", "") or ""),
+                )
         else:
             # 否则刷新会话列表（显示未读）
-            self._load_message_list()
+            if not is_self:
+                ChatView._clear_conversation_locally_read_marker(self, peer_id, self._history_id_by_peer.get(peer_id, ""))
+                current_unread = self._get_unread_count(peer_id, self._history_id_by_peer.get(peer_id, ""))
+                self._set_unread_count(peer_id, current_unread + 1, history_id=self._history_id_by_peer.get(peer_id, ""))
+            if self._raw_sessions:
+                self._upsert_session_from_message(peer_id, msg, display_name=sender_name if not is_self else "")
+            elif msg.get("history_sync"):
+                self._refresh_session_list()
+            else:
+                self._load_message_list()
 
     def _on_read_ack(self, msg: dict):
         message_id = str(msg.get("message_id") or "")
@@ -1097,6 +1914,13 @@ class ChatView(QWidget):
 
         read_at = int(msg.get("timestamp") or 0)
         self._pending_read_acks[message_id] = max(int(self._pending_read_acks.get(message_id, 0) or 0), read_at)
+        unread_count = msg.get("unread_count")
+        if unread_count is not None:
+            self._set_unread_count(
+                str(msg.get("peer_id") or ""),
+                unread_count,
+                history_id=self._history_id_by_peer.get(self._normalize_unread_peer_id(str(msg.get("peer_id") or "")), ""),
+            )
 
         current_key = self._conversation_key()
         updated_current = False
@@ -1111,6 +1935,12 @@ class ChatView(QWidget):
 
         if updated_current:
             self._render_cached_messages(current_key)
+        if unread_count is not None:
+            self._update_session_unread_row(
+                str(msg.get("peer_id") or ""),
+                self._history_id_by_peer.get(self._normalize_unread_peer_id(str(msg.get("peer_id") or "")), ""),
+                unread_count,
+            )
 
     def _on_send(self):
         """发送消息"""
@@ -1141,7 +1971,7 @@ class ChatView(QWidget):
                 )
                 self._render_cached_messages()
                 if hasattr(self.crawler, "request_history_msync"):
-                    self.crawler.request_history_msync(self._current_target_id)
+                    self.crawler.request_history_msync(ChatView._resolve_active_peer_id(self, self._current_target_id, self._current_history_id) or self._current_target_id)
             else:
                 self._last_send_error = f"发送失败: {result.get('msg', '未知错误')}"
                 self.append_message("系统", self._last_send_error, is_self=False)

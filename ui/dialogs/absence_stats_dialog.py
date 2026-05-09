@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QPushButton, QHBoxLayout, QFileDialog, QMessageBox, QApplication
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtGui import QKeySequence, QShortcut, QColor
 from core.communication_manager import CommunicationManager
 from core.exporters.absence_stats_exporter import build_absence_stats_filename
 from ui.workers import AbsenceStatsExportWorker
@@ -114,8 +114,7 @@ class AbsenceStatsDialog(QDialog):
         self.table.setColumnWidth(3, 100)  # 缺勤次数
         self.table.setColumnWidth(4, 100)  # 总签到次数
         self.table.setColumnWidth(5, 80)   # 沟通情况
-        
-        self.table.setAlternatingRowColors(True)
+        self._apply_table_style(self.table)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -138,7 +137,7 @@ class AbsenceStatsDialog(QDialog):
             # 缺勤次数
             absent_item = QTableWidgetItem(str(stats['absent_count']))
             absent_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            absent_item.setForeground(Qt.GlobalColor.red)
+            absent_item.setForeground(QColor("#ff6b6b"))
             self.table.setItem(row, 3, absent_item)
             
             # 总签到次数
@@ -158,9 +157,9 @@ class AbsenceStatsDialog(QDialog):
             # 存储 person_id 到单元格数据中
             comm_item.setData(Qt.ItemDataRole.UserRole, person_id)
             if communicated:
-                comm_item.setForeground(Qt.GlobalColor.darkGreen)
+                comm_item.setForeground(QColor("#4caf50"))
             else:
-                comm_item.setForeground(Qt.GlobalColor.gray)
+                comm_item.setForeground(QColor("#b8b8b8"))
             self.table.setItem(row, 5, comm_item)
         
         layout.addWidget(self.table)
@@ -177,6 +176,47 @@ class AbsenceStatsDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
+
+    def _apply_table_style(self, table: QTableWidget):
+        if not table:
+            return
+
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setShowGrid(True)
+        table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e1e;
+                alternate-background-color: #252526;
+                color: #e6e6e6;
+                gridline-color: #404040;
+                border: 1px solid #404040;
+                selection-background-color: #007acc;
+                selection-color: #ffffff;
+            }
+            QTableWidget::item {
+                color: #e6e6e6;
+                padding: 6px 8px;
+                border: none;
+            }
+            QTableWidget::item:selected {
+                background-color: #007acc;
+                color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                padding: 6px;
+                border: 1px solid #404040;
+                font-weight: bold;
+            }
+            QTableCornerButton::section {
+                background-color: #3c3c3c;
+                border: 1px solid #404040;
+            }
+        """)
+        table.verticalHeader().setDefaultSectionSize(36)
+        table.verticalHeader().setMinimumSectionSize(32)
     
     def _on_cell_clicked(self, row: int, column: int):
         """处理表格单元格点击事件。"""
@@ -203,9 +243,9 @@ class AbsenceStatsDialog(QDialog):
         # 更新表格显示
         comm_item.setText("☑" if new_status else "☐")
         if new_status:
-            comm_item.setForeground(Qt.GlobalColor.darkGreen)
+            comm_item.setForeground(QColor("#4caf50"))
         else:
-            comm_item.setForeground(Qt.GlobalColor.gray)
+            comm_item.setForeground(QColor("#b8b8b8"))
     
     def keyPressEvent(self, event):
         """处理键盘事件。"""
