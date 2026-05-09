@@ -1,6 +1,7 @@
 """
 聊天相关 API — 超信 IM 会话列表等接口
 """
+import json
 import re
 import random
 import threading
@@ -22,6 +23,50 @@ class ChatAPI:
 
     _msync = None  # 类属性，避免 __init__ 未被调用的问题
 
+    @staticmethod
+    def _extract_class_chat_map(html: str):
+        """从 /webim/me HTML 中提取 classChat 映射。"""
+        if not html:
+            return {}
+
+        match = re.search(r"var\s+classChat\s*=\s*(\{.*?\})\s*;", html, re.S)
+        if not match:
+            return {}
+
+        try:
+            data = json.loads(match.group(1))
+        except Exception:
+            logger.debug("ChatAPI._extract_class_chat_map: classChat JSON 解析失败")
+            return {}
+
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _apply_class_chat_metadata(sessions: list, class_chat_map: dict):
+        """将 /webim/me 中的群聊班级名补充到会话副标题。"""
+        if not isinstance(sessions, list) or not isinstance(class_chat_map, dict) or not class_chat_map:
+            return sessions
+
+        enriched = []
+        for session in sessions:
+            if not isinstance(session, dict):
+                enriched.append(session)
+                continue
+
+            item = dict(session)
+            chat_id = str(item.get("chatId", "") or "")
+            class_info = class_chat_map.get(f"chatid{chat_id}")
+            if isinstance(class_info, dict):
+                classname = str(class_info.get("classname", "") or "").strip()
+                if classname:
+                    item["subtitle"] = classname
+                coursename = str(class_info.get("coursename", "") or "").strip()
+                if coursename:
+                    item["courseName"] = coursename
+            enriched.append(item)
+
+        return enriched
+
     # ── MSync 实时连接 ──
 
     def connect_msync(self, on_message=None, on_error=None, on_close=None):
@@ -31,6 +76,15 @@ class ChatAPI:
         Returns:
             MSyncClient 实例，失败返回 None
         """
+        if self._msync and hasattr(self._msync, "is_running") and self._msync.is_running():
+            if on_message is not None:
+                self._msync.on_message = on_message
+            if on_error is not None:
+                self._msync.on_error = on_error
+            if on_close is not None:
+                self._msync.on_close = on_close
+            return self._msync
+
         token = self.session_manager.course_params.get("im_token")
         tuid = self.session_manager.course_params.get("im_tuid")
 
@@ -92,6 +146,84 @@ class ChatAPI:
             print(f"ChatAPI.send_message_msync: 发送失败 - {e}")
             return False
 
+    def request_history_msync(self, target_user_id: str):
+        """通过 MSync 请求会话历史。"""
+        if not self._msync:
+            return False
+        try:
+            return bool(self._msync.request_history(target_user_id))
+        except Exception as e:
+            logger.warning(f"ChatAPI.request_history_msync: 请求失败 - {e}")
+            return False
+
+    def get_group_members(self, room_id: str, tuid=None, token=None):
+        """获取群聊成员列表。"""
+        room_id = str(room_id or "")
+        if not room_id:
+            return []
+
+        params = self._resolve_im_params(tuid=tuid, puid=None, token=token)
+        if not params:
+            return []
+
+        try:
+            url = "https://im.chaoxing.com/webim/group/getGroupInfoByCount"
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Origin": "https://im.chaoxing.com",
+                "Pragma": "no-cache",
+                "Referer": "https://im.chaoxing.com/webim/me",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+            data = {
+                "roomId": room_id,
+                "token": params["token"],
+                "tuid": params["tuid"],
+            }
+
+            resp = self.session.post(url, headers=headers, data=data, timeout=15)
+            logger.info(
+                "ChatAPI.get_group_members: status=%s room_id=%s len=%s",
+                resp.status_code,
+                room_id,
+                len(resp.text),
+            )
+            if resp.status_code != 200:
+                logger.warning(f"ChatAPI.get_group_members: HTTP错误 {resp.status_code}, room_id={room_id}")
+                return []
+
+            result = resp.json()
+            members = result.get("members", [])
+            if not isinstance(members, list):
+                return []
+
+            normalized = []
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                normalized.append({
+                    "person_id": str(member.get("tuid", "") or ""),
+                    "name": member.get("name", "未知"),
+                    "student_id": str(member.get("puid", "") or ""),
+                    "avatar_url": member.get("pic", "") or "",
+                    "tuid": str(member.get("tuid", "") or ""),
+                    "puid": str(member.get("puid", "") or ""),
+                })
+
+            return normalized
+        except Exception as e:
+            logger.exception(f"ChatAPI.get_group_members: 获取失败 - {e}")
+            return []
+
     def _resolve_im_params(self, tuid=None, puid=None, token=None):
         """统一获取 IM 鉴权参数，失败返回 None。"""
         if not all([tuid, puid, token]):
@@ -139,6 +271,8 @@ class ChatAPI:
                     "im_puid": _credentials_cache["puid"],
                     "im_token": _credentials_cache["token"],
                 })
+                if _credentials_cache.get("class_chat_map"):
+                    self.session_manager.course_params["im_class_chat"] = dict(_credentials_cache["class_chat_map"])
                 return dict(_credentials_cache)
 
         # 锁外执行 HTTP 请求（避免长时间持有锁）
@@ -208,6 +342,8 @@ class ChatAPI:
                 logger.debug(f"  HTML前500字: {html[:500]}")
                 return None
 
+            class_chat_map = self._extract_class_chat_map(html)
+
             # 缓存到全局和 session_manager
             with _credentials_lock:
                 _credentials_cache = {
@@ -215,6 +351,7 @@ class ChatAPI:
                     "puid": creds["puid"],
                     "fid": creds.get("fid"),
                     "token": creds["token"],
+                    "class_chat_map": class_chat_map,
                 }
                 _credentials_ts = now
 
@@ -222,6 +359,7 @@ class ChatAPI:
                 "im_tuid": creds["tuid"],
                 "im_puid": creds["puid"],
                 "im_token": creds["token"],
+                "im_class_chat": class_chat_map,
             })
 
             logger.info(f"ChatAPI.get_im_credentials: 成功 tuid={creds['tuid']}, puid={creds['puid']}")
@@ -395,22 +533,18 @@ class ChatAPI:
 
     # ── 会话列表 ──
 
-    def get_history_messages(self, chat_id: str, limit: int = 50, tuid=None, puid=None, token=None):
+    def get_history_messages(self, history_key: str, limit: int = 200, tuid=None, puid=None, token=None):
         """
         获取指定会话的历史消息。
 
         Args:
-            chat_id: 会话 ID
+            history_key: 浏览器消息列表中的 msgId；无 msgId 时可回退到 chatId
             limit: 拉取条数
 
         Returns:
             list[dict]: 历史消息列表，失败返回空列表
         """
-        if not chat_id:
-            return []
-
-        params = self._resolve_im_params(tuid=tuid, puid=puid, token=token)
-        if not params:
+        if not history_key:
             return []
 
         try:
@@ -433,19 +567,24 @@ class ChatAPI:
                 "X-Requested-With": "XMLHttpRequest",
             }
 
-            data = {
-                "tuid": params["tuid"],
-                "puid": params["puid"],
-                "token": params["token"],
-                "chatId": chat_id,
-                "limit": str(limit),
-            }
+            data = {"msgId": history_key}
+            if "+" not in history_key:
+                params = self._resolve_im_params(tuid=tuid, puid=puid, token=token)
+                if not params:
+                    return []
+                data = {
+                    "tuid": params["tuid"],
+                    "puid": params["puid"],
+                    "token": params["token"],
+                    "chatId": history_key,
+                    "limit": str(limit),
+                }
 
             resp = self.session.post(url, headers=headers, data=data, timeout=15)
-            logger.info(f"ChatAPI.get_history_messages: status={resp.status_code}, chat_id={chat_id}, len={len(resp.text)}")
+            logger.info(f"ChatAPI.get_history_messages: status={resp.status_code}, history_key={history_key}, len={len(resp.text)}")
 
             if resp.status_code != 200:
-                logger.warning(f"ChatAPI.get_history_messages: HTTP错误 {resp.status_code}, chat_id={chat_id}")
+                logger.warning(f"ChatAPI.get_history_messages: HTTP错误 {resp.status_code}, history_key={history_key}")
                 return []
 
             result = resp.json()
@@ -454,7 +593,7 @@ class ChatAPI:
             logger.info(
                 "ChatAPI.get_history_messages: status=%s, chat_id=%s, data_count=%s",
                 result.get("status"),
-                chat_id,
+                history_key,
                 len(messages),
             )
 
@@ -525,7 +664,8 @@ class ChatAPI:
                 logger.warning(f"ChatAPI.get_message_list: 响应异常 {result.get('msg', '')}, 完整={str(result)[:300]}")
                 return []
 
-            return result["data"]
+            class_chat_map = self.session_manager.course_params.get("im_class_chat")
+            return self._apply_class_chat_metadata(result["data"], class_chat_map)
 
         except Exception as e:
             logger.exception(f"ChatAPI.get_message_list: 获取失败 - {e}")

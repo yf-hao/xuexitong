@@ -1041,7 +1041,7 @@ class ChatHistoryWorker(QThread):
 
     history_ready = pyqtSignal(str, list)  # chat_id, history
 
-    def __init__(self, crawler, chat_id: str, limit: int = 50):
+    def __init__(self, crawler, chat_id: str, limit: int = 200):
         super().__init__()
         self.crawler = crawler
         self.chat_id = chat_id
@@ -1054,6 +1054,25 @@ class ChatHistoryWorker(QThread):
         except Exception as e:
             print(f"ChatHistoryWorker error: {e}")
             self.history_ready.emit(self.chat_id, [])
+
+
+class ChatGroupMembersWorker(QThread):
+    """Worker thread to fetch group member list."""
+
+    members_ready = pyqtSignal(str, list)  # room_id, members
+
+    def __init__(self, crawler, room_id: str):
+        super().__init__()
+        self.crawler = crawler
+        self.room_id = room_id
+
+    def run(self):
+        try:
+            result = self.crawler.get_group_members(self.room_id)
+            self.members_ready.emit(self.room_id, result)
+        except Exception as e:
+            print(f"ChatGroupMembersWorker error: {e}")
+            self.members_ready.emit(self.room_id, [])
 
 
 class HomeworkWorker(QThread):

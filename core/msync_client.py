@@ -24,6 +24,8 @@ from core.logger import get_logger
 
 logger = get_logger()
 
+MSYNC_SEND_EPOCH_MS = 1264953600000
+
 
 # ── Protobuf 编码辅助 ──────────────────────────────────
 
@@ -293,7 +295,7 @@ def build_send_message(
 
     # field 9 = commSyncUL → 嵌套一层 field 1 = Meta
     meta = ProtoBufWriter()
-    meta.uint64(1, int(time.time() * 1000))
+    meta.uint64(1, max(0, int(time.time() * 1000) - MSYNC_SEND_EPOCH_MS))
 
     fj = build_jid(app_key, from_user, domain, resource)
     meta.embedded(2, fj)
@@ -365,6 +367,47 @@ def build_receive_ack(message_id: int, username: str) -> bytes:
     meta.embedded(3, user_ref)
     root.embedded(9, meta)
 
+    root.uint32(11, 0)
+    return root.bytes()
+
+
+def build_history_open() -> bytes:
+    """构造打开会话历史同步的起始帧。"""
+    root = ProtoBufWriter()
+    root.uint32(1, 0)
+    root.uint32(8, 1)
+    root.uint32(11, 0)
+    return root.bytes()
+
+
+def build_history_subject(subject: str) -> bytes:
+    """构造会话历史同步的主题帧。"""
+    root = ProtoBufWriter()
+    root.uint32(1, 0)
+    root.uint32(8, 0)
+    meta = ProtoBufWriter()
+    user_ref = ProtoBufWriter()
+    user_ref.string(2, subject)
+    meta.embedded(3, user_ref)
+    root.embedded(9, meta)
+    root.uint32(11, 0)
+    return root.bytes()
+
+
+def build_history_sync(timestamp_ms: int) -> bytes:
+    """构造会话历史同步请求帧。"""
+    root = ProtoBufWriter()
+    root.uint32(1, 0)
+    root.uint32(8, 0)
+    meta = ProtoBufWriter()
+    sync = ProtoBufWriter()
+    sync.uint64(1, timestamp_ms)
+    sync.uint32(5, 0)
+    body = ProtoBufWriter()
+    body.uint32(1, 0)
+    sync.embedded(6, body)
+    meta.embedded(1, sync)
+    root.embedded(9, meta)
     root.uint32(11, 0)
     return root.bytes()
 
@@ -447,6 +490,7 @@ class MSyncClient:
         self._session = None
         self._heartbeat_timer = None
         self._authenticated = False
+        self._pending_history_peers = []
 
     # ── 连接管理 ──
 
@@ -515,6 +559,9 @@ class MSyncClient:
             and self._ws.sock.connected
         )
 
+    def is_running(self) -> bool:
+        return self._running and self._ws is not None
+
     # ── 消息发送 ──
 
     def send_message(self, to_user: str, content: str, msg_type: int = 0):
@@ -569,6 +616,46 @@ class MSyncClient:
         logger.info(f"MSync: send receive ack message_id={message_id}")
         self._ws.send(frame)
 
+    def _send_history_request(self, peer_id: str):
+        subjects = []
+        for subject in (self._username, peer_id, "admin", "easemob_chat"):
+            if subject and subject not in subjects:
+                subjects.append(subject)
+
+        frames = [build_history_open()]
+        frames.extend(build_history_subject(subject) for subject in subjects)
+        frames.append(build_history_sync(int(time.time() * 1000)))
+
+        for pb in frames:
+            self._ws.send(sockjs_encode(pb))
+
+    def _queue_history_request(self, peer_id: str):
+        peer_id = str(peer_id or "")
+        if not peer_id:
+            return False
+        if peer_id not in self._pending_history_peers:
+            self._pending_history_peers.append(peer_id)
+        return True
+
+    def _flush_pending_history_requests(self):
+        if not self.is_connected():
+            return
+        while self._pending_history_peers:
+            peer_id = self._pending_history_peers.pop(0)
+            try:
+                self._send_history_request(peer_id)
+            except Exception as e:
+                logger.warning(f"MSync: flush pending history failed peer_id={peer_id} error={e}")
+
+    def request_history(self, peer_id: str):
+        """请求某个会话的历史同步。"""
+        if self.is_connected():
+            self._send_history_request(peer_id)
+            return True
+        if self.is_running():
+            return self._queue_history_request(peer_id)
+        raise ConnectionError("未连接")
+
     # ── 内部方法 ──
 
     def _sockjs_info(self) -> dict:
@@ -616,45 +703,295 @@ class MSyncClient:
 
     def _extract_jid_username(self, value):
         item = self._first(value)
+        if isinstance(item, str):
+            return item
+        if isinstance(item, list):
+            for part in item:
+                username = self._extract_jid_username(part)
+                if username:
+                    return username
         if isinstance(item, dict):
             username = self._first(item.get(2))
             if isinstance(username, str):
                 return username
+            nested = self._first(item.get(1))
+            if isinstance(nested, dict):
+                username = self._first(nested.get(2))
+                if isinstance(username, str):
+                    return username
         return ""
 
-    def _extract_text_push(self, decoded: dict):
-        meta = self._first(decoded.get(9))
-        if not isinstance(meta, dict):
-            return None
+    def _iter_dict_nodes(self, value, ancestors=None):
+        ancestors = ancestors or []
+        if isinstance(value, dict):
+            yield value, ancestors
+            next_ancestors = ancestors + [value]
+            for child in value.values():
+                yield from self._iter_dict_nodes(child, next_ancestors)
+        elif isinstance(value, list):
+            for child in value:
+                yield from self._iter_dict_nodes(child, ancestors)
 
-        payload = self._first(meta.get(4))
-        if not isinstance(payload, dict):
-            return None
+    def _extract_text_content(self, value):
+        item = self._first(value)
+        if isinstance(item, list):
+            for part in item:
+                text = self._extract_text_content(part)
+                if text:
+                    return text
+        if isinstance(item, dict):
+            direct = self._first(item.get(2))
+            if isinstance(direct, str) and direct and 3 not in item:
+                return direct
+            for key in (4, 6, 1):
+                text = self._extract_text_content(item.get(key))
+                if text:
+                    return text
+        return ""
 
-        body = self._first(payload.get(6))
+    def _extract_message_body_text(self, body: dict):
         if not isinstance(body, dict):
+            return ""
+        for candidate in (body.get(4), body.get(6), body.get(1)):
+            text = self._extract_text_content(candidate)
+            if text:
+                return text
+        return ""
+
+    def _extract_command_name(self, body: dict):
+        if not isinstance(body, dict):
+            return ""
+        command = self._first(body.get(4))
+        if not isinstance(command, dict):
+            return ""
+        name = self._first(command.get(10))
+        return name if isinstance(name, str) else ""
+
+    def _extract_command_argument_value(self, arg: dict):
+        if not isinstance(arg, dict):
             return None
+        for field in (6, 3, 4, 2):
+            value = self._first(arg.get(field))
+            if isinstance(value, (str, int)):
+                return value
+        return None
 
-        content = self._first(body.get(4))
-        if not isinstance(content, dict):
-            return None
+    def _extract_command_arguments(self, body: dict):
+        args = {}
+        if not isinstance(body, dict):
+            return args
+        entries = body.get(5)
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            return args
 
-        text = self._first(content.get(2))
-        if not isinstance(text, str) or text == "":
-            return None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            key = self._first(entry.get(1))
+            if not isinstance(key, str) or not key:
+                continue
+            value = self._extract_command_argument_value(entry)
+            if value is not None:
+                args[key] = value
+        return args
 
-        from_user = self._extract_jid_username(payload.get(2))
-        to_user = self._extract_jid_username(payload.get(3))
-        timestamp = self._first(payload.get(1)) or self._first(meta.get(8)) or 0
-        message_id = self._first(meta.get(5))
+    def _select_timestamp(self, *values):
+        for value in values:
+            candidate = self._first(value)
+            if isinstance(candidate, int) and candidate >= 10**11:
+                return candidate
+        return 0
 
-        return {
-            "from": from_user,
-            "to": to_user,
-            "content": text,
-            "timestamp": timestamp,
-            "message_id": message_id,
-        }
+    def _select_message_id(self, *values):
+        for value in values:
+            candidate = self._first(value)
+            if isinstance(candidate, int) and candidate >= 10**12:
+                return candidate
+        return None
+
+    def _iter_meta_dicts(self, decoded: dict):
+        metas = decoded.get(9)
+        if isinstance(metas, list):
+            for meta in metas:
+                if isinstance(meta, dict):
+                    yield meta
+        elif isinstance(metas, dict):
+            yield metas
+
+    def _resolve_peer_from_users(self, primary_from: str, primary_to: str, body_from: str, body_to: str):
+        current = str(self._username or "")
+        for from_user, to_user in (
+            (body_from, body_to),
+            (primary_from, primary_to),
+            (body_to, body_from),
+            (primary_to, primary_from),
+        ):
+            if from_user == current and to_user:
+                return to_user
+            if to_user == current and from_user:
+                return from_user
+            if from_user and from_user == to_user:
+                return from_user
+        return body_from or primary_from or body_to or primary_to
+
+    def _extract_batch_messages(self, decoded: dict):
+        messages = []
+        for meta in self._iter_meta_dicts(decoded):
+            entries = meta.get(4)
+            if isinstance(entries, dict):
+                entries = [entries]
+            if not isinstance(entries, list):
+                continue
+
+            meta_timestamp = self._first(meta.get(8))
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                body = self._first(entry.get(6))
+                if not isinstance(body, dict):
+                    continue
+                body_type = self._first(body.get(1))
+                if body_type != 1:
+                    continue
+                text = self._extract_message_body_text(body)
+                if not text:
+                    continue
+
+                route_from = self._extract_jid_username(entry.get(2))
+                route_to = self._extract_jid_username(entry.get(3))
+                body_from = self._extract_jid_username(body.get(2))
+                body_to = self._extract_jid_username(body.get(3))
+                peer_id = self._resolve_peer_from_users(route_from, route_to, body_from, body_to)
+                messages.append({
+                    "from": route_from or body_from,
+                    "to": route_to or body_to,
+                    "peer_id": peer_id,
+                    "content": text,
+                    "timestamp": self._select_timestamp(entry.get(4), meta_timestamp),
+                    "message_id": self._select_message_id(entry.get(1), meta.get(5)),
+                    "history_sync": True,
+                })
+        return messages
+
+    def _extract_read_acks(self, decoded: dict):
+        events = []
+        seen = set()
+        for node, ancestors in self._iter_dict_nodes(decoded):
+            body_candidates = []
+            for key in (6, 4):
+                value = node.get(key)
+                if isinstance(value, dict):
+                    body_candidates.append(value)
+                elif isinstance(value, list):
+                    body_candidates.extend(part for part in value if isinstance(part, dict))
+            if not body_candidates:
+                continue
+
+            for body in body_candidates:
+                command_name = self._extract_command_name(body)
+                if command_name != "CMD_READ_ACK":
+                    continue
+
+                args = self._extract_command_arguments(body)
+                message_id = args.get("messageId")
+                if message_id is None:
+                    continue
+
+                route_from = self._extract_jid_username(node.get(2)) or self._extract_jid_username(body.get(2))
+                route_to = self._extract_jid_username(node.get(3)) or self._extract_jid_username(body.get(3))
+                body_from = self._extract_jid_username(body.get(2))
+                body_to = self._extract_jid_username(body.get(3))
+                peer_id = str(args.get("conversationId") or self._resolve_peer_from_users(route_from, route_to, body_from, body_to) or "")
+
+                timestamp = args.get("timestamp")
+                if isinstance(timestamp, str):
+                    try:
+                        timestamp = int(timestamp)
+                    except Exception:
+                        timestamp = 0
+                elif not isinstance(timestamp, int):
+                    timestamp = self._select_timestamp(
+                        node.get(1),
+                        node.get(8),
+                        *[ancestor.get(1) for ancestor in reversed(ancestors)],
+                        *[ancestor.get(8) for ancestor in reversed(ancestors)],
+                    )
+
+                conversation_type = args.get("conversationType")
+                if isinstance(conversation_type, str):
+                    try:
+                        conversation_type = int(conversation_type)
+                    except Exception:
+                        conversation_type = 0
+                elif not isinstance(conversation_type, int):
+                    conversation_type = 0
+
+                event = {
+                    "event": "read_ack",
+                    "command": command_name,
+                    "peer_id": peer_id,
+                    "from": route_from or body_from,
+                    "to": route_to or body_to,
+                    "from_puid": str(args.get("fromPuid") or ""),
+                    "message_id": str(message_id),
+                    "timestamp": int(timestamp or 0),
+                    "conversation_type": conversation_type,
+                }
+                identity = (event["message_id"], event["timestamp"], event["peer_id"])
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                events.append(event)
+        return events
+
+    def _extract_text_push(self, decoded: dict):
+        fallback_push = None
+        for node, ancestors in self._iter_dict_nodes(decoded):
+            body_candidates = []
+            for key in (6, 4):
+                value = node.get(key)
+                if isinstance(value, dict):
+                    body_candidates.append(value)
+                elif isinstance(value, list):
+                    body_candidates.extend(part for part in value if isinstance(part, dict))
+            if not body_candidates:
+                body_candidates = [node]
+
+            for body in body_candidates:
+                text = self._extract_message_body_text(body)
+                if not text:
+                    continue
+
+                from_user = self._extract_jid_username(node.get(2)) or self._extract_jid_username(body.get(2))
+                to_user = self._extract_jid_username(node.get(3)) or self._extract_jid_username(body.get(3))
+                if not (from_user or to_user):
+                    continue
+
+                push = {
+                    "from": from_user,
+                    "to": to_user,
+                    "content": text,
+                    "timestamp": self._select_timestamp(
+                        node.get(1),
+                        node.get(8),
+                        *[ancestor.get(1) for ancestor in reversed(ancestors)],
+                        *[ancestor.get(8) for ancestor in reversed(ancestors)],
+                    ),
+                    "message_id": self._select_message_id(
+                        node.get(5),
+                        node.get(2),
+                        *[ancestor.get(5) for ancestor in reversed(ancestors)],
+                        *[ancestor.get(2) for ancestor in reversed(ancestors)],
+                    ),
+                }
+
+                if from_user and to_user:
+                    return push
+                if fallback_push is None:
+                    fallback_push = push
+        return fallback_push
 
     # ── WebSocket 回调 ──
 
@@ -680,6 +1017,23 @@ class MSyncClient:
 
             if message_type == 2 and isinstance(meta, dict) and self._first(meta.get(1)) is not None:
                 self.send_sync_reply()
+                self._flush_pending_history_requests()
+                return
+
+            self._flush_pending_history_requests()
+
+            read_acks = self._extract_read_acks(decoded)
+            if read_acks and self.on_message:
+                for event in read_acks:
+                    self.on_message(event)
+
+            batch_messages = self._extract_batch_messages(decoded)
+            if batch_messages:
+                for push in batch_messages:
+                    if self.on_message:
+                        self.on_message(push)
+                if read_acks:
+                    return
                 return
 
             push = self._extract_text_push(decoded)
@@ -691,23 +1045,10 @@ class MSyncClient:
                     self.on_message(push)
                 return
 
-            # 检查是否是消息推送
-            if isinstance(meta, dict):
-                body = self._first(meta.get(6))
-                if isinstance(body, dict):
-                    content = self._first(body.get(4))
-                    if isinstance(content, dict):
-                        text = self._first(content.get(2)) or ""
-                        from_user = self._extract_jid_username(body.get(2))
-                        to_user = self._extract_jid_username(body.get(3))
+            if read_acks:
+                return
 
-                        if text and self.on_message:
-                            self.on_message({
-                                "from": from_user,
-                                "to": to_user,
-                                "content": text,
-                                "timestamp": self._first(meta.get(1)) or 0,
-                            })
+            logger.debug(f"MSync: unrecognized message structure {decoded}")
         except Exception as e:
             logger.error(f"MSync: decode error {e}")
 
