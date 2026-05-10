@@ -1,13 +1,14 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QFrame, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
-    QFileDialog, QMessageBox
+    QFileDialog, QMessageBox, QApplication, QProgressDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
 from core.group_members_cache import resolve_student_from_group_cache
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE
 from ui.dialogs.student_message_dialog import StudentMessageDialog
+from ui.dialogs.homework_reminder_dialog import DEFAULT_HOMEWORK_REMINDER_TEMPLATE, HomeworkReminderDialog
 from ui.workers import (
     AttendanceWorker, AttendanceDetailWorker, AbsenceStatsWorker, HomeworkWorker,
     HomeworkStatsExportWorker,
@@ -39,6 +40,9 @@ class StudyStatusView(QWidget):
         self._absence_dialog_open = False
         self.homework_export_worker = None
         self.btn_homework_export = None
+        self.btn_homework_reminder = None
+        self._homework_reminder_template = DEFAULT_HOMEWORK_REMINDER_TEMPLATE
+        self._homework_reminder_threshold = 1
         
         self.setup_ui()
         
@@ -89,8 +93,25 @@ class StudyStatusView(QWidget):
         """清空内容区域"""
         while self.content_layout.count():
             item = self.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            self._delete_layout_item(item)
+        self.btn_homework_export = None
+        self.btn_homework_reminder = None
+
+    def _delete_layout_item(self, item):
+        if item is None:
+            return
+
+        widget = item.widget()
+        if widget is not None:
+            widget.deleteLater()
+            return
+
+        child_layout = item.layout()
+        if child_layout is None:
+            return
+
+        while child_layout.count():
+            self._delete_layout_item(child_layout.takeAt(0))
 
     def _apply_stats_table_style(self, table: QTableWidget):
         """统一统计表格的深色主题，避免不同平台使用系统默认交替行配色。"""
@@ -234,6 +255,142 @@ class StudyStatusView(QWidget):
             parent=self,
         )
         dialog.exec()
+
+    @staticmethod
+    def _format_homework_student_label(stats) -> str:
+        student_name = str(getattr(stats, "user_name", "") or "").strip() or "未知学生"
+        student_id = str(getattr(stats, "alias_name", "") or "").strip()
+        if student_id:
+            return f"{student_name}（{student_id}）"
+        return student_name
+
+    @staticmethod
+    def _render_homework_reminder_message(stats, template: str) -> str:
+        values = {
+            "student_name": str(getattr(stats, "user_name", "") or "").strip(),
+            "student_id": str(getattr(stats, "alias_name", "") or "").strip(),
+            "total_count": str(int(getattr(stats, "complete_num", 0) or 0)),
+            "submitted_count": str(int(getattr(stats, "work_submitted", 0) or 0)),
+            "pending_count": str(int(getattr(stats, "pending_count", 0) or 0)),
+            "unsubmitted_count": str(int(getattr(stats, "unsubmitted_count", 0) or 0)),
+        }
+        message = str(template or "").strip()
+        for key, value in values.items():
+            message = message.replace(f"{{{key}}}", value)
+        return message
+
+    @staticmethod
+    def _calculate_homework_reminder_threshold(stats_list) -> int:
+        total_count = 0
+        for stats in stats_list or []:
+            total_count = max(total_count, int(getattr(stats, "complete_num", 0) or 0))
+        return max(1, (total_count // 2) + 1)
+
+    def _set_homework_reminder_busy(self, busy: bool):
+        if self.btn_homework_reminder:
+            self.btn_homework_reminder.setEnabled(not busy)
+            self.btn_homework_reminder.setText("发送中..." if busy else "🔔 一键提醒")
+
+    @staticmethod
+    def _create_homework_reminder_progress_dialog(parent, total_count: int):
+        progress = QProgressDialog("正在准备发送提醒...", None, 0, max(0, int(total_count or 0)), parent)
+        progress.setWindowTitle("一键提醒")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.show()
+        return progress
+
+    def _on_homework_reminder_clicked(self):
+        if not self.current_homework_data:
+            QMessageBox.warning(self, "无数据", "当前没有可提醒的作业统计数据")
+            return
+
+        default_threshold = StudyStatusView._calculate_homework_reminder_threshold(self.current_homework_data)
+        dialog = HomeworkReminderDialog(
+            threshold=default_threshold,
+            message_template=self._homework_reminder_template,
+            parent=self,
+        )
+        if dialog.exec() != 1:
+            return
+
+        self._homework_reminder_threshold = dialog.threshold
+        self._homework_reminder_template = dialog.message_template
+        self._send_homework_reminders(dialog.threshold, dialog.message_template)
+
+    def _send_homework_reminders(self, threshold: int, template: str):
+        eligible_stats = [
+            stats for stats in (self.current_homework_data or [])
+            if int(getattr(stats, "unsubmitted_count", 0) or 0) >= int(threshold or 0)
+        ]
+        if not eligible_stats:
+            QMessageBox.information(self, "无需提醒", f"当前没有未提交数达到 {threshold} 的学生")
+            return
+
+        self._set_homework_reminder_busy(True)
+        progress = StudyStatusView._create_homework_reminder_progress_dialog(self, len(eligible_stats))
+        success_count = 0
+        failed_messages = []
+        duplicate_messages = []
+
+        try:
+            for index, stats in enumerate(eligible_stats, start=1):
+                student_name = str(getattr(stats, "user_name", "") or "").strip()
+                student_id = str(getattr(stats, "alias_name", "") or "").strip()
+                student_label = self._format_homework_student_label(stats)
+                progress.setLabelText(f"正在发送第 {index}/{len(eligible_stats)} 名学生：{student_label}")
+                progress.setValue(index - 1)
+                resolved = self._resolve_student_message_target(student_name)
+
+                if resolved["status"] == "cache_missing":
+                    cache_name = f"{self.current_course_name}-{self.current_class_name}".strip("-")
+                    QMessageBox.warning(self, "未找到群成员缓存", f"未找到群成员缓存文件：\n{cache_name}.json")
+                    return
+                if resolved["status"] == "duplicate":
+                    duplicate_messages.append(
+                        f"{student_label}：因学生重名，未自动发送提醒信息，请通过消息手动发送。"
+                    )
+                    continue
+                if resolved["status"] != "success":
+                    failed_messages.append(f"{student_label}：未在群成员缓存中找到学生")
+                    continue
+
+                content = self._render_homework_reminder_message(stats, template)
+                result = StudentMessageDialog.send_student_message(
+                    self.crawler,
+                    resolved["matches"][0],
+                    content,
+                )
+                if isinstance(result, dict) and result.get("status") == "success":
+                    success_count += 1
+                    self._mark_homework_student_communicated(student_id)
+                else:
+                    error_message = result.get("msg") if isinstance(result, dict) else str(result or "")
+                    failed_messages.append(f"{student_label}：{error_message or '消息发送失败'}")
+
+                app = QApplication.instance()
+                if app is not None:
+                    app.processEvents()
+                progress.setValue(index)
+        finally:
+            progress.close()
+            self._set_homework_reminder_busy(False)
+
+        summary_lines = [
+            f"共筛选 {len(eligible_stats)} 名学生，成功发送 {success_count} 名。",
+        ]
+        if failed_messages:
+            summary_lines.append("")
+            summary_lines.append("发送失败：")
+            summary_lines.extend(failed_messages)
+        if duplicate_messages:
+            summary_lines.append("")
+            summary_lines.append("以下学生因重名未发送：")
+            summary_lines.extend(duplicate_messages)
+        QMessageBox.information(self, "提醒发送完成", "\n".join(summary_lines))
 
     def _show_placeholder(self, message: str):
         """显示占位提示"""
@@ -688,6 +845,25 @@ class StudyStatusView(QWidget):
         self.content_layout.addWidget(self.homework_table)
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
+        self.btn_homework_reminder = QPushButton("🔔 一键提醒")
+        self.btn_homework_reminder.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_homework_reminder.setStyleSheet("""
+            QPushButton {
+                background-color: #007acc;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 20px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #005c99;
+            }
+        """)
+        self.btn_homework_reminder.clicked.connect(self._on_homework_reminder_clicked)
+        btn_layout.addWidget(self.btn_homework_reminder)
+
         self.btn_homework_export = QPushButton("导出")
         self.btn_homework_export.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_homework_export.setStyleSheet("""

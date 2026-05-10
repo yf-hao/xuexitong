@@ -99,17 +99,25 @@ class StudentMessageDialog(QDialog):
             info_lines.append(f"PUID：{puid}")
         return info_lines
 
-    def _ensure_connected(self, timeout: float = 5.0, interval: float = 0.1):
-        if not hasattr(self.crawler, "is_msync_connected"):
+    @staticmethod
+    def _get_crawler(dialog_or_crawler):
+        if hasattr(dialog_or_crawler, "crawler"):
+            return getattr(dialog_or_crawler, "crawler")
+        return dialog_or_crawler
+
+    @classmethod
+    def _ensure_connected(cls, dialog_or_crawler, timeout: float = 5.0, interval: float = 0.1):
+        crawler = cls._get_crawler(dialog_or_crawler)
+        if not hasattr(crawler, "is_msync_connected"):
             return False
         try:
-            if self.crawler.is_msync_connected():
+            if crawler.is_msync_connected():
                 return True
-            if hasattr(self.crawler, "connect_msync"):
-                self.crawler.connect_msync()
+            if hasattr(crawler, "connect_msync"):
+                crawler.connect_msync()
             deadline = time.monotonic() + max(0.1, float(timeout or 0))
             while time.monotonic() < deadline:
-                if self.crawler.is_msync_connected():
+                if crawler.is_msync_connected():
                     return True
                 app = QApplication.instance()
                 if app is not None:
@@ -119,37 +127,41 @@ class StudentMessageDialog(QDialog):
             return False
         return False
 
+    @classmethod
+    def send_student_message(cls, crawler, student: dict, content: str):
+        content = str(content or "").strip()
+        if not content:
+            return {"status": "fail", "msg": "请输入要发送的消息"}
+
+        if not hasattr(crawler, "send_message"):
+            return {"status": "fail", "msg": "当前环境不支持发送消息"}
+
+        if not cls._ensure_connected(crawler):
+            return {"status": "fail", "msg": "实时消息连接未建立，请先打开消息模块后重试"}
+
+        student = dict(student or {})
+        target_id = str(student.get("tuid") or student.get("person_id") or "")
+        target_name = str(student.get("name") or "")
+        if not target_id:
+            return {"status": "fail", "msg": "无法识别发送对象"}
+
+        return crawler.send_message(
+            target_user_id=target_id,
+            content=content,
+            target_name=target_name,
+            history_chat_id=target_id,
+        )
+
     def _on_send_clicked(self):
         content = self.message_input.toPlainText().strip()
         if not content:
             QMessageBox.warning(self, "消息为空", "请输入要发送的消息")
             return
 
-        if not hasattr(self.crawler, "send_message"):
-            QMessageBox.warning(self, "发送失败", "当前环境不支持发送消息")
-            return
-        
-        self.status_label.setText("正在建立实时连接...")
-        if not self._ensure_connected():
-            self.status_label.setText("发送失败")
-            QMessageBox.warning(self, "发送失败", "实时消息连接未建立，请先打开消息模块后重试")
-            return
-
-        target_id = str(self.student.get("tuid") or self.student.get("person_id") or "")
-        target_name = str(self.student.get("name") or "")
-        if not target_id:
-            QMessageBox.warning(self, "发送失败", "无法识别发送对象")
-            return
-
         self.send_btn.setEnabled(False)
-        self.status_label.setText("正在发送...")
+        self.status_label.setText("正在建立实时连接...")
         try:
-            result = self.crawler.send_message(
-                target_user_id=target_id,
-                content=content,
-                target_name=target_name,
-                history_chat_id=target_id,
-            )
+            result = self.send_student_message(self.crawler, self.student, content)
         finally:
             self.send_btn.setEnabled(True)
 

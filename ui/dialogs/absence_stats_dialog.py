@@ -2,12 +2,13 @@
 from core.group_members_cache import resolve_student_from_group_cache
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
-    QHeaderView, QPushButton, QHBoxLayout, QFileDialog, QMessageBox, QApplication, QWidget
+    QHeaderView, QPushButton, QHBoxLayout, QFileDialog, QMessageBox, QApplication, QWidget, QProgressDialog
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QShortcut, QColor
 from core.communication_manager import CommunicationManager
 from core.exporters.absence_stats_exporter import build_absence_stats_filename
+from ui.dialogs.homework_reminder_dialog import DEFAULT_ABSENCE_REMINDER_TEMPLATE, HomeworkReminderDialog
 from ui.dialogs.student_message_dialog import StudentMessageDialog
 from ui.workers import AbsenceStatsExportWorker
 
@@ -38,6 +39,9 @@ class AbsenceStatsDialog(QDialog):
         self.table = None
         self.export_worker = None
         self.export_btn = None
+        self.reminder_btn = None
+        self._reminder_threshold = 1
+        self._reminder_template = DEFAULT_ABSENCE_REMINDER_TEMPLATE
         self.setup_ui()
     
     def setup_ui(self):
@@ -199,6 +203,10 @@ class AbsenceStatsDialog(QDialog):
         
         # 操作按钮
         btn_layout = QHBoxLayout()
+        self.reminder_btn = QPushButton("🔔 一键提醒")
+        self.reminder_btn.setFixedWidth(110)
+        self.reminder_btn.clicked.connect(self._on_reminder_clicked)
+        btn_layout.addWidget(self.reminder_btn)
         self.export_btn = QPushButton("导出")
         self.export_btn.setFixedWidth(100)
         self.export_btn.clicked.connect(self._on_export_clicked)
@@ -337,6 +345,148 @@ class AbsenceStatsDialog(QDialog):
             parent=self,
         )
         dialog.exec()
+
+    @staticmethod
+    def _format_student_label(stats: dict) -> str:
+        stats = dict(stats or {})
+        student_name = str(stats.get("name") or "").strip() or "未知学生"
+        student_id = str(stats.get("username") or "").strip()
+        if student_id:
+            return f"{student_name}（{student_id}）"
+        return student_name
+
+    @staticmethod
+    def _render_reminder_message(stats: dict, template: str) -> str:
+        stats = dict(stats or {})
+        values = {
+            "student_name": str(stats.get("name") or "").strip(),
+            "student_id": str(stats.get("username") or "").strip(),
+            "class_name": str(stats.get("class_name") or "").strip(),
+            "absent_count": str(int(stats.get("absent_count", 0) or 0)),
+            "total_count": str(int(stats.get("total_count", 0) or 0)),
+        }
+        message = str(template or "").strip()
+        for key, value in values.items():
+            message = message.replace(f"{{{key}}}", value)
+        return message
+
+    @staticmethod
+    def _calculate_reminder_threshold(total_activities: int) -> int:
+        total_activities = int(total_activities or 0)
+        return max(1, (total_activities // 3) + 1)
+
+    def _set_reminder_busy(self, busy: bool):
+        if not self.reminder_btn:
+            return
+        self.reminder_btn.setEnabled(not busy)
+        self.reminder_btn.setText("发送中..." if busy else "🔔 一键提醒")
+
+    @staticmethod
+    def _create_reminder_progress_dialog(parent, total_count: int):
+        progress = QProgressDialog("正在准备发送提醒...", None, 0, max(0, int(total_count or 0)), parent)
+        progress.setWindowTitle("一键提醒")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.show()
+        return progress
+
+    def _on_reminder_clicked(self):
+        if not self.absence_stats:
+            QMessageBox.warning(self, "无数据", "当前没有可提醒的缺勤统计数据")
+            return
+
+        default_threshold = AbsenceStatsDialog._calculate_reminder_threshold(self.total_activities)
+        dialog = HomeworkReminderDialog(
+            threshold=default_threshold,
+            message_template=self._reminder_template,
+            parent=self,
+            title="缺勤一键提醒",
+            threshold_label="缺勤阈值（缺勤次数大于等于该值时发送）",
+            template_placeholder=DEFAULT_ABSENCE_REMINDER_TEMPLATE,
+            placeholders_tip=(
+                "支持占位：{student_name}、{student_id}、{class_name}、"
+                "{total_count}、{absent_count}"
+            ),
+        )
+        if dialog.exec() != 1:
+            return
+
+        self._reminder_threshold = dialog.threshold
+        self._reminder_template = dialog.message_template
+        self._send_reminders(dialog.threshold, dialog.message_template)
+
+    def _send_reminders(self, threshold: int, template: str):
+        eligible_stats = [
+            dict(stats or {})
+            for stats in self.absence_stats.values()
+            if int((stats or {}).get("absent_count", 0) or 0) >= int(threshold or 0)
+        ]
+        if not eligible_stats:
+            QMessageBox.information(self, "无需提醒", f"当前没有缺勤数达到 {threshold} 的学生")
+            return
+
+        self._set_reminder_busy(True)
+        progress = AbsenceStatsDialog._create_reminder_progress_dialog(self, len(eligible_stats))
+        success_count = 0
+        failed_messages = []
+        duplicate_messages = []
+
+        try:
+            for index, stats in enumerate(eligible_stats, start=1):
+                student_name = str(stats.get("name") or "").strip()
+                student_id = str(stats.get("username") or "").strip()
+                student_label = self._format_student_label(stats)
+                progress.setLabelText(f"正在发送第 {index}/{len(eligible_stats)} 名学生：{student_label}")
+                progress.setValue(index - 1)
+                resolved = self._resolve_student_message_target(student_name)
+
+                if resolved["status"] == "cache_missing":
+                    cache_name = f"{self.course_name}-{self.teaching_class_name}".strip("-")
+                    QMessageBox.warning(self, "未找到群成员缓存", f"未找到群成员缓存文件：\n{cache_name}.json")
+                    return
+                if resolved["status"] == "duplicate":
+                    duplicate_messages.append(
+                        f"{student_label}：因学生重名，未自动发送提醒信息，请通过消息手动发送。"
+                    )
+                    continue
+                if resolved["status"] != "success":
+                    failed_messages.append(f"{student_label}：未在群成员缓存中找到学生")
+                    continue
+
+                content = self._render_reminder_message(stats, template)
+                result = StudentMessageDialog.send_student_message(
+                    self.crawler,
+                    resolved["matches"][0],
+                    content,
+                )
+                if isinstance(result, dict) and result.get("status") == "success":
+                    success_count += 1
+                    self._mark_student_communicated(student_id)
+                else:
+                    error_message = result.get("msg") if isinstance(result, dict) else str(result or "")
+                    failed_messages.append(f"{student_label}：{error_message or '消息发送失败'}")
+
+                app = QApplication.instance()
+                if app is not None:
+                    app.processEvents()
+                progress.setValue(index)
+        finally:
+            progress.close()
+            self._set_reminder_busy(False)
+
+        summary_lines = [f"共筛选 {len(eligible_stats)} 名学生，成功发送 {success_count} 名。"]
+        if failed_messages:
+            summary_lines.append("")
+            summary_lines.append("发送失败：")
+            summary_lines.extend(failed_messages)
+        if duplicate_messages:
+            summary_lines.append("")
+            summary_lines.append("以下学生因重名未发送：")
+            summary_lines.extend(duplicate_messages)
+        QMessageBox.information(self, "提醒发送完成", "\n".join(summary_lines))
     
     def keyPressEvent(self, event):
         """处理键盘事件。"""

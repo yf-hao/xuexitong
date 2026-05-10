@@ -30,6 +30,7 @@ from core.msync_client import (
 from ui.views.chat_view import ChatView
 from ui.views.study_status_view import StudyStatusView
 from ui.dialogs.absence_stats_dialog import AbsenceStatsDialog
+from ui.dialogs.homework_reminder_dialog import DEFAULT_ABSENCE_REMINDER_TEMPLATE, DEFAULT_HOMEWORK_REMINDER_TEMPLATE
 from ui.dialogs.qrcode_dialog import QRCodeDialog
 from ui.dialogs.student_message_dialog import StudentMessageDialog
 
@@ -1551,6 +1552,208 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(view._saved, ("course-1", "class-1", "2023001001", True))
         self.assertEqual(item.text_value, "☑")
 
+    def test_study_status_renders_homework_reminder_placeholders(self):
+        stats = SimpleNamespace(
+            user_name="张三",
+            alias_name="2023001001",
+            complete_num=10,
+            work_submitted=7,
+            pending_count=1,
+            unsubmitted_count=3,
+        )
+
+        message = StudyStatusView._render_homework_reminder_message(
+            stats,
+            "{student_name} {student_id} {total_count} {submitted_count} {pending_count} {unsubmitted_count}",
+        )
+
+        self.assertEqual(message, "张三 2023001001 10 7 1 3")
+
+    def test_study_status_calculates_homework_reminder_threshold_from_total_count(self):
+        stats_list = [
+            SimpleNamespace(complete_num=10),
+            SimpleNamespace(complete_num=8),
+        ]
+
+        threshold = StudyStatusView._calculate_homework_reminder_threshold(stats_list)
+
+        self.assertEqual(threshold, 6)
+
+    def test_study_status_homework_reminders_send_only_eligible_students_and_report_duplicates(self):
+        infos = []
+        sent = []
+        marked = []
+        busy = []
+        progress_updates = []
+        stats_list = [
+            SimpleNamespace(
+                user_name="张三",
+                alias_name="2023001001",
+                complete_num=10,
+                work_submitted=7,
+                pending_count=1,
+                unsubmitted_count=3,
+            ),
+            SimpleNamespace(
+                user_name="李四",
+                alias_name="2023001002",
+                complete_num=10,
+                work_submitted=9,
+                pending_count=0,
+                unsubmitted_count=1,
+            ),
+            SimpleNamespace(
+                user_name="王五",
+                alias_name="2023001003",
+                complete_num=10,
+                work_submitted=6,
+                pending_count=1,
+                unsubmitted_count=4,
+            ),
+        ]
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(),
+            current_homework_data=stats_list,
+            current_course_name="离散数学（2025-2026-2）",
+            current_class_name="4.03计科2班、区块链1班",
+            _set_homework_reminder_busy=lambda value: busy.append(value),
+            _resolve_student_message_target=lambda student_name: {
+                "张三": {"status": "success", "matches": [{"name": "张三", "tuid": "1001", "student_id": "2023001001"}]},
+                "王五": {"status": "duplicate", "matches": [{"name": "王五", "tuid": "1003"}, {"name": "王五", "tuid": "1004"}]},
+            }.get(student_name, {"status": "not_found", "matches": []}),
+            _mark_homework_student_communicated=lambda student_id: marked.append(student_id),
+        )
+        view._format_homework_student_label = lambda stats: StudyStatusView._format_homework_student_label(stats)
+        view._render_homework_reminder_message = lambda stats, template: StudyStatusView._render_homework_reminder_message(stats, template)
+        
+        class _FakeProgressDialog:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def setWindowTitle(self, title):
+                progress_updates.append(("title", title))
+
+            def setWindowModality(self, modality):
+                progress_updates.append(("modality", modality))
+
+            def setMinimumDuration(self, duration):
+                progress_updates.append(("duration", duration))
+
+            def setAutoClose(self, value):
+                progress_updates.append(("auto_close", value))
+
+            def setAutoReset(self, value):
+                progress_updates.append(("auto_reset", value))
+
+            def setValue(self, value):
+                progress_updates.append(("value", value))
+
+            def setLabelText(self, text):
+                progress_updates.append(("label", text))
+
+            def show(self):
+                progress_updates.append(("show", True))
+
+            def close(self):
+                progress_updates.append(("close", True))
+
+        with patch("ui.views.study_status_view.StudentMessageDialog.send_student_message", side_effect=lambda crawler, student, content: sent.append((student, content)) or {"status": "success"}), patch("ui.views.study_status_view.QMessageBox.information", side_effect=lambda *args: infos.append(args[1:3])), patch("ui.views.study_status_view.QApplication.instance", return_value=None), patch("ui.views.study_status_view.QProgressDialog", _FakeProgressDialog):
+            StudyStatusView._send_homework_reminders(
+                view,
+                3,
+                "作业总数为:{total_count}，未提交为:{unsubmitted_count}",
+            )
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0]["name"], "张三")
+        self.assertEqual(sent[0][1], "作业总数为:10，未提交为:3")
+        self.assertEqual(marked, ["2023001001"])
+        self.assertEqual(busy, [True, False])
+        self.assertEqual(infos[0][0], "提醒发送完成")
+        self.assertIn("共筛选 2 名学生，成功发送 1 名。", infos[0][1])
+        self.assertIn("王五（2023001003）：因学生重名，未自动发送提醒信息，请通过消息手动发送。", infos[0][1])
+        self.assertIn(("label", "正在发送第 1/2 名学生：张三（2023001001）"), progress_updates)
+        self.assertIn(("label", "正在发送第 2/2 名学生：王五（2023001003）"), progress_updates)
+        self.assertIn(("close", True), progress_updates)
+
+    def test_study_status_homework_reminder_click_uses_dialog_values(self):
+        sent = []
+
+        created = []
+
+        class _FakeDialog:
+            def __init__(self, threshold=1, message_template="", parent=None):
+                created.append((threshold, message_template))
+                self.threshold = 2
+                self.message_template = "{student_name}"
+
+            def exec(self):
+                return 1
+
+        view = SimpleNamespace(
+            current_homework_data=[SimpleNamespace(complete_num=10)],
+            _homework_reminder_threshold=1,
+            _homework_reminder_template=DEFAULT_HOMEWORK_REMINDER_TEMPLATE,
+            _send_homework_reminders=lambda threshold, template: sent.append((threshold, template)),
+        )
+
+        with patch("ui.views.study_status_view.HomeworkReminderDialog", _FakeDialog):
+            StudyStatusView._on_homework_reminder_clicked(view)
+
+        self.assertEqual(created[0][0], 6)
+        self.assertEqual(sent, [(2, "{student_name}")])
+        self.assertEqual(view._homework_reminder_threshold, 2)
+        self.assertEqual(view._homework_reminder_template, "{student_name}")
+
+    def test_study_status_clear_content_removes_nested_layout_widgets(self):
+        deleted = []
+
+        class _FakeWidget:
+            def __init__(self, name):
+                self.name = name
+
+            def deleteLater(self):
+                deleted.append(self.name)
+
+        class _FakeItem:
+            def __init__(self, widget=None, layout=None):
+                self._widget = widget
+                self._layout = layout
+
+            def widget(self):
+                return self._widget
+
+            def layout(self):
+                return self._layout
+
+        class _FakeLayout:
+            def __init__(self, items):
+                self._items = list(items)
+
+            def count(self):
+                return len(self._items)
+
+            def takeAt(self, index):
+                return self._items.pop(index)
+
+        nested_layout = _FakeLayout([_FakeItem(widget=_FakeWidget("reminder-button"))])
+        content_layout = _FakeLayout([
+            _FakeItem(widget=_FakeWidget("table")),
+            _FakeItem(layout=nested_layout),
+        ])
+        view = SimpleNamespace(
+            content_layout=content_layout,
+            btn_homework_export=object(),
+            btn_homework_reminder=object(),
+        )
+        view._delete_layout_item = lambda item: StudyStatusView._delete_layout_item(view, item)
+
+        StudyStatusView.clear_content(view)
+
+        self.assertEqual(deleted, ["table", "reminder-button"])
+        self.assertIsNone(view.btn_homework_export)
+        self.assertIsNone(view.btn_homework_reminder)
+
     def test_absence_stats_message_click_opens_reusable_dialog_on_unique_match(self):
         opened = []
 
@@ -1612,6 +1815,129 @@ class ChatAPITests(unittest.TestCase):
 
         self.assertEqual(dialog._saved, ("course-1", "class-1", "2023001001", True))
         self.assertEqual(item.text_value, "☑")
+
+    def test_absence_stats_renders_reminder_placeholders(self):
+        message = AbsenceStatsDialog._render_reminder_message(
+            {
+                "name": "张三",
+                "username": "2023001001",
+                "class_name": "1班",
+                "absent_count": 3,
+                "total_count": 9,
+            },
+            "{student_name} {student_id} {class_name} {total_count} {absent_count}",
+        )
+
+        self.assertEqual(message, "张三 2023001001 1班 9 3")
+
+    def test_absence_stats_calculates_reminder_threshold_from_total_activities(self):
+        self.assertEqual(AbsenceStatsDialog._calculate_reminder_threshold(9), 4)
+
+    def test_absence_stats_reminders_send_only_eligible_students_and_report_duplicates(self):
+        infos = []
+        sent = []
+        marked = []
+        busy = []
+        progress_updates = []
+        dialog = SimpleNamespace(
+            absence_stats={
+                "1001": {"name": "张三", "username": "2023001001", "class_name": "1班", "absent_count": 3, "total_count": 9},
+                "1002": {"name": "李四", "username": "2023001002", "class_name": "1班", "absent_count": 1, "total_count": 9},
+                "1003": {"name": "王五", "username": "2023001003", "class_name": "1班", "absent_count": 4, "total_count": 9},
+            },
+            crawler=SimpleNamespace(),
+            course_name="离散数学（2025-2026-2）",
+            teaching_class_name="4.03计科2班、区块链1班",
+            _set_reminder_busy=lambda value: busy.append(value),
+            _resolve_student_message_target=lambda student_name: {
+                "张三": {"status": "success", "matches": [{"name": "张三", "tuid": "1001", "student_id": "2023001001"}]},
+                "王五": {"status": "duplicate", "matches": [{"name": "王五", "tuid": "1003"}, {"name": "王五", "tuid": "1004"}]},
+            }.get(student_name, {"status": "not_found", "matches": []}),
+            _mark_student_communicated=lambda student_id: marked.append(student_id),
+        )
+        dialog._format_student_label = lambda stats: AbsenceStatsDialog._format_student_label(stats)
+        dialog._render_reminder_message = lambda stats, template: AbsenceStatsDialog._render_reminder_message(stats, template)
+
+        class _FakeProgressDialog:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def setWindowTitle(self, title):
+                progress_updates.append(("title", title))
+
+            def setWindowModality(self, modality):
+                progress_updates.append(("modality", modality))
+
+            def setMinimumDuration(self, duration):
+                progress_updates.append(("duration", duration))
+
+            def setAutoClose(self, value):
+                progress_updates.append(("auto_close", value))
+
+            def setAutoReset(self, value):
+                progress_updates.append(("auto_reset", value))
+
+            def setValue(self, value):
+                progress_updates.append(("value", value))
+
+            def setLabelText(self, text):
+                progress_updates.append(("label", text))
+
+            def show(self):
+                progress_updates.append(("show", True))
+
+            def close(self):
+                progress_updates.append(("close", True))
+
+        with patch("ui.dialogs.absence_stats_dialog.StudentMessageDialog.send_student_message", side_effect=lambda crawler, student, content: sent.append((student, content)) or {"status": "success"}), patch("ui.dialogs.absence_stats_dialog.QMessageBox.information", side_effect=lambda *args: infos.append(args[1:3])), patch("ui.dialogs.absence_stats_dialog.QApplication.instance", return_value=None), patch("ui.dialogs.absence_stats_dialog.QProgressDialog", _FakeProgressDialog):
+            AbsenceStatsDialog._send_reminders(
+                dialog,
+                3,
+                "总签到次数为:{total_count}，缺勤为:{absent_count}",
+            )
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0]["name"], "张三")
+        self.assertEqual(sent[0][1], "总签到次数为:9，缺勤为:3")
+        self.assertEqual(marked, ["2023001001"])
+        self.assertEqual(busy, [True, False])
+        self.assertEqual(infos[0][0], "提醒发送完成")
+        self.assertIn("共筛选 2 名学生，成功发送 1 名。", infos[0][1])
+        self.assertIn("王五（2023001003）：因学生重名，未自动发送提醒信息，请通过消息手动发送。", infos[0][1])
+        self.assertIn(("label", "正在发送第 1/2 名学生：张三（2023001001）"), progress_updates)
+        self.assertIn(("label", "正在发送第 2/2 名学生：王五（2023001003）"), progress_updates)
+        self.assertIn(("close", True), progress_updates)
+
+    def test_absence_stats_reminder_click_uses_dialog_values(self):
+        sent = []
+
+        created = []
+
+        class _FakeDialog:
+            def __init__(self, threshold=1, message_template="", parent=None, **kwargs):
+                created.append((threshold, message_template, kwargs))
+                self.threshold = 2
+                self.message_template = "{student_name}"
+                self.kwargs = kwargs
+
+            def exec(self):
+                return 1
+
+        dialog = SimpleNamespace(
+            absence_stats={"1001": {"name": "张三", "username": "2023001001", "absent_count": 1, "total_count": 3}},
+            total_activities=9,
+            _reminder_threshold=1,
+            _reminder_template=DEFAULT_ABSENCE_REMINDER_TEMPLATE,
+            _send_reminders=lambda threshold, template: sent.append((threshold, template)),
+        )
+
+        with patch("ui.dialogs.absence_stats_dialog.HomeworkReminderDialog", _FakeDialog):
+            AbsenceStatsDialog._on_reminder_clicked(dialog)
+
+        self.assertEqual(created[0][0], 4)
+        self.assertEqual(sent, [(2, "{student_name}")])
+        self.assertEqual(dialog._reminder_threshold, 2)
+        self.assertEqual(dialog._reminder_template, "{student_name}")
 
     def test_study_status_show_absence_stats_passes_message_dependencies(self):
         created = []
