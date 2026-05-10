@@ -1,12 +1,14 @@
 """缺勤统计对话框。"""
+from core.group_members_cache import resolve_student_from_group_cache
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
-    QHeaderView, QPushButton, QHBoxLayout, QFileDialog, QMessageBox, QApplication
+    QHeaderView, QPushButton, QHBoxLayout, QFileDialog, QMessageBox, QApplication, QWidget
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QShortcut, QColor
 from core.communication_manager import CommunicationManager
 from core.exporters.absence_stats_exporter import build_absence_stats_filename
+from ui.dialogs.student_message_dialog import StudentMessageDialog
 from ui.workers import AbsenceStatsExportWorker
 
 
@@ -19,7 +21,9 @@ class AbsenceStatsDialog(QDialog):
         total_activities: int,
         course_id: str,
         class_id: str,
+        course_name: str = "",
         teaching_class_name: str = "",
+        crawler=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -27,7 +31,9 @@ class AbsenceStatsDialog(QDialog):
         self.total_activities = total_activities
         self.course_id = course_id
         self.class_id = class_id
+        self.course_name = course_name
         self.teaching_class_name = teaching_class_name
+        self.crawler = crawler
         self.communication_manager = CommunicationManager()
         self.table = None
         self.export_worker = None
@@ -91,8 +97,8 @@ class AbsenceStatsDialog(QDialog):
         
         # 缺勤学生表格
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["姓名", "学号", "班级", "缺勤次数", "总签到次数", "沟通情况"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["姓名", "学号", "班级", "缺勤次数", "总签到次数", "沟通情况", "发送消息"])
         
         # 按缺勤次数降序排序
         sorted_stats = sorted(
@@ -108,12 +114,14 @@ class AbsenceStatsDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
 
         self.table.setColumnWidth(0, 100)  # 姓名
         self.table.setColumnWidth(1, 140)  # 学号
         self.table.setColumnWidth(3, 100)  # 缺勤次数
         self.table.setColumnWidth(4, 100)  # 总签到次数
         self.table.setColumnWidth(5, 80)   # 沟通情况
+        self.table.setColumnWidth(6, 100)  # 发送消息
         self._apply_table_style(self.table)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -125,11 +133,12 @@ class AbsenceStatsDialog(QDialog):
         self.copy_shortcut.activated.connect(self._copy_current_row)
         
         for row, (uid, stats) in enumerate(sorted_stats):
+            student_id = str(stats.get("username", "") or "").strip()
             # 姓名
             self.table.setItem(row, 0, QTableWidgetItem(stats['name']))
             
             # 学号
-            self.table.setItem(row, 1, QTableWidgetItem(stats['username']))
+            self.table.setItem(row, 1, QTableWidgetItem(student_id))
 
             # 班级
             self.table.setItem(row, 2, QTableWidgetItem(stats.get('class_name', '')))
@@ -146,21 +155,45 @@ class AbsenceStatsDialog(QDialog):
             self.table.setItem(row, 4, total_item)
             
             # 沟通情况 - 从文件加载已保存的状态
-            person_id = int(uid)
             communicated = self.communication_manager.get_status(
                 self.course_id, 
                 self.class_id, 
-                person_id
+                student_id
             )
             comm_item = QTableWidgetItem("☑" if communicated else "☐")
             comm_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            # 存储 person_id 到单元格数据中
-            comm_item.setData(Qt.ItemDataRole.UserRole, person_id)
+            # 存储学号到单元格数据中
+            comm_item.setData(Qt.ItemDataRole.UserRole, student_id)
             if communicated:
                 comm_item.setForeground(QColor("#4caf50"))
             else:
                 comm_item.setForeground(QColor("#b8b8b8"))
             self.table.setItem(row, 5, comm_item)
+
+            message_btn = QPushButton("发送消息")
+            message_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            message_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: #007acc;
+                    border: 1px solid #007acc;
+                    border-radius: 3px;
+                    padding: 4px 12px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background-color: #007acc;
+                    color: white;
+                }
+            """)
+            message_btn.clicked.connect(lambda checked=False, s=dict(stats): self._on_message_clicked(s))
+
+            btn_widget = QWidget()
+            btn_layout = QHBoxLayout(btn_widget)
+            btn_layout.addWidget(message_btn)
+            btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            btn_layout.setContentsMargins(5, 2, 5, 2)
+            self.table.setCellWidget(row, 6, btn_widget)
         
         layout.addWidget(self.table)
         
@@ -224,20 +257,20 @@ class AbsenceStatsDialog(QDialog):
         if column != 5:
             return
         
-        # 从单元格数据中获取 person_id
+        # 从单元格数据中获取学号
         comm_item = self.table.item(row, 5)
         if not comm_item:
             return
         
-        person_id = comm_item.data(Qt.ItemDataRole.UserRole)
-        if not person_id:
+        student_id = str(comm_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        if not student_id:
             return
         
         # 切换沟通状态
         new_status = self.communication_manager.toggle_status(
             self.course_id,
             self.class_id,
-            person_id
+            student_id
         )
         
         # 更新表格显示
@@ -246,6 +279,64 @@ class AbsenceStatsDialog(QDialog):
             comm_item.setForeground(QColor("#4caf50"))
         else:
             comm_item.setForeground(QColor("#b8b8b8"))
+
+    def _resolve_student_message_target(self, student_name: str) -> dict:
+        return resolve_student_from_group_cache(
+            self.course_name,
+            self.teaching_class_name,
+            student_name,
+        )
+
+    def _mark_student_communicated(self, student_id: str):
+        student_id = str(student_id or "").strip()
+        if not student_id:
+            return
+
+        self.communication_manager.set_status(
+            self.course_id,
+            self.class_id,
+            student_id,
+            True,
+        )
+
+        if not self.table:
+            return
+
+        for row in range(self.table.rowCount()):
+            comm_item = self.table.item(row, 5)
+            if not comm_item:
+                continue
+            if str(comm_item.data(Qt.ItemDataRole.UserRole) or "").strip() != student_id:
+                continue
+            comm_item.setText("☑")
+            comm_item.setForeground(QColor("#4caf50"))
+
+    def _on_message_clicked(self, stats: dict):
+        student_name = str((stats or {}).get("name") or "").strip()
+        student_id = str((stats or {}).get("username") or "").strip()
+        if not student_name:
+            QMessageBox.warning(self, "发送失败", "无法识别当前学生姓名")
+            return
+
+        resolved = self._resolve_student_message_target(student_name)
+        if resolved["status"] == "cache_missing":
+            cache_name = f"{self.course_name}-{self.teaching_class_name}".strip("-")
+            QMessageBox.warning(self, "未找到群成员缓存", f"未找到群成员缓存文件：\n{cache_name}.json")
+            return
+        if resolved["status"] == "duplicate":
+            QMessageBox.information(self, "存在重名学生", f"{student_name} 在群成员缓存中存在重名，请到“消息”模块中手动发送。")
+            return
+        if resolved["status"] != "success":
+            QMessageBox.warning(self, "未找到学生", f"未在群成员缓存中找到学生：{student_name}")
+            return
+
+        dialog = StudentMessageDialog(
+            self.crawler,
+            resolved["matches"][0],
+            on_send_success=lambda sent_student, sid=student_id: self._mark_student_communicated(sid),
+            parent=self,
+        )
+        dialog.exec()
     
     def keyPressEvent(self, event):
         """处理键盘事件。"""

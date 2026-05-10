@@ -5,7 +5,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
+from core.group_members_cache import resolve_student_from_group_cache
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE
+from ui.dialogs.student_message_dialog import StudentMessageDialog
 from ui.workers import (
     AttendanceWorker, AttendanceDetailWorker, AbsenceStatsWorker, HomeworkWorker,
     HomeworkStatsExportWorker,
@@ -28,6 +30,7 @@ class StudyStatusView(QWidget):
         self.current_attendance_data = None  # 保存当前考勤数据
         self.current_homework_data = None    # 保存当前作业统计数据
         self.current_course_id = None        # 当前课程 ID
+        self.current_course_name = ""        # 当前课程名
         self.current_class_id = None         # 当前班级 ID
         self.current_class_name = ""         # 当前授课班级名
         self.communication_manager = CommunicationManager()  # 沟通状态管理器
@@ -145,6 +148,93 @@ class StudyStatusView(QWidget):
             self.btn_absence_stats.setEnabled(not busy)
             self.btn_absence_stats.setText("统计中..." if busy else "📊 缺勤统计")
 
+    def _create_inline_action_button(self, text: str, handler):
+        btn = QPushButton(text)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #007acc;
+                border: 1px solid #007acc;
+                border-radius: 3px;
+                padding: 4px 12px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #007acc;
+                color: white;
+            }
+        """)
+        btn.clicked.connect(handler)
+        return btn
+
+    def _build_table_action_widget(self, button: QPushButton):
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.addWidget(button)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setContentsMargins(5, 2, 5, 2)
+        return widget
+
+    def _resolve_student_message_target(self, student_name: str) -> dict:
+        return resolve_student_from_group_cache(
+            self.current_course_name,
+            self.current_class_name,
+            student_name,
+        )
+
+    def _mark_homework_student_communicated(self, student_id: str):
+        student_id = str(student_id or "").strip()
+        if not student_id:
+            return
+
+        self.communication_manager.set_status(
+            self.current_course_id,
+            self.current_class_id,
+            student_id,
+            True,
+        )
+
+        table = getattr(self, "homework_table", None)
+        if not table:
+            return
+
+        for row in range(table.rowCount()):
+            comm_item = table.item(row, 9)
+            if not comm_item:
+                continue
+            if str(comm_item.data(Qt.ItemDataRole.UserRole) or "").strip() != student_id:
+                continue
+            comm_item.setText("☑")
+            comm_item.setForeground(QColor("#4caf50"))
+
+    def _on_homework_message_clicked(self, stats):
+        student_name = str(getattr(stats, "user_name", "") or "").strip()
+        student_id = str(getattr(stats, "alias_name", "") or "").strip()
+        if not student_name:
+            QMessageBox.warning(self, "发送失败", "无法识别当前学生姓名")
+            return
+
+        resolved = self._resolve_student_message_target(student_name)
+        if resolved["status"] == "cache_missing":
+            cache_name = f"{self.current_course_name}-{self.current_class_name}".strip("-")
+            QMessageBox.warning(self, "未找到群成员缓存", f"未找到群成员缓存文件：\n{cache_name}.json")
+            return
+        if resolved["status"] == "duplicate":
+            QMessageBox.information(self, "存在重名学生", f"{student_name} 在群成员缓存中存在重名，请到“消息”模块中手动发送。")
+            return
+        if resolved["status"] != "success":
+            QMessageBox.warning(self, "未找到学生", f"未在群成员缓存中找到学生：{student_name}")
+            return
+
+        dialog = StudentMessageDialog(
+            self.crawler,
+            resolved["matches"][0],
+            on_send_success=lambda sent_student, sid=student_id: self._mark_homework_student_communicated(sid),
+            parent=self,
+        )
+        dialog.exec()
+
     def _show_placeholder(self, message: str):
         """显示占位提示"""
         self.clear_content()
@@ -169,6 +259,7 @@ class StudyStatusView(QWidget):
             class_id = main_window.clazz_box.currentData()
             if course and class_id:
                 self.current_course_id = str(course.id)
+                self.current_course_name = main_window.course_box.currentText().strip()
                 self.current_class_id = str(class_id)
                 self.current_class_name = main_window.clazz_box.currentText().strip()
         
@@ -406,7 +497,9 @@ class StudyStatusView(QWidget):
             len(self.current_attendance_data),
             self.current_course_id,
             self.current_class_id,
+            self.current_course_name,
             self.current_class_name,
+            self.crawler,
             self
         )
         self._absence_dialog_open = True
@@ -444,6 +537,7 @@ class StudyStatusView(QWidget):
         
         # 保存当前课程和班级 ID
         self.current_course_id = str(course.id)
+        self.current_course_name = main_window.course_box.currentText().strip()
         self.current_class_id = str(class_id)
         self.current_class_name = main_window.clazz_box.currentText().strip()
         
@@ -476,8 +570,8 @@ class StudyStatusView(QWidget):
         # 创建表格显示学生作业统计数据
         self.current_homework_data = result
         self.homework_table = QTableWidget()
-        self.homework_table.setColumnCount(10)
-        self.homework_table.setHorizontalHeaderLabels(["学号", "姓名", "作业数", "已提交", "待批", "未提交", "平均分", "最低分", "最高分", "沟通情况"])
+        self.homework_table.setColumnCount(11)
+        self.homework_table.setHorizontalHeaderLabels(["学号", "姓名", "作业数", "已提交", "待批", "未提交", "平均分", "最低分", "最高分", "沟通情况", "发送消息"])
         self.homework_table.setRowCount(len(result))
         self._apply_stats_table_style(self.homework_table)
         self.homework_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -497,6 +591,7 @@ class StudyStatusView(QWidget):
         self.homework_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)         # 最低分
         self.homework_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)         # 最高分
         self.homework_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Fixed)         # 沟通情况
+        self.homework_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.ResizeMode.Fixed)        # 发送消息
         
         self.homework_table.setColumnWidth(0, 120)  # 学号
         self.homework_table.setColumnWidth(1, 100)  # 姓名
@@ -508,13 +603,15 @@ class StudyStatusView(QWidget):
         self.homework_table.setColumnWidth(7, 70)   # 最低分
         self.homework_table.setColumnWidth(8, 70)   # 最高分
         self.homework_table.setColumnWidth(9, 80)   # 沟通情况
+        self.homework_table.setColumnWidth(10, 96)  # 发送消息
         
         # 连接单元格点击事件
         self.homework_table.cellClicked.connect(self._on_homework_cell_clicked)
         
         for row, stats in enumerate(result):
+            student_id = str(getattr(stats, "alias_name", "") or "").strip()
             # 学号
-            self.homework_table.setItem(row, 0, QTableWidgetItem(stats.alias_name))
+            self.homework_table.setItem(row, 0, QTableWidgetItem(student_id))
             
             # 姓名
             self.homework_table.setItem(row, 1, QTableWidgetItem(stats.user_name))
@@ -566,18 +663,21 @@ class StudyStatusView(QWidget):
             communicated = self.communication_manager.get_status(
                 self.current_course_id, 
                 self.current_class_id, 
-                stats.person_id
+                student_id
             )
             # 未沟通显示空心方框，已沟通显示打勾方框
             comm_item = QTableWidgetItem("☑" if communicated else "☐")
             comm_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            # 存储 person_id 到单元格数据中，确保排序后仍能正确关联
-            comm_item.setData(Qt.ItemDataRole.UserRole, stats.person_id)
+            # 存储学号到单元格数据中，确保排序后仍能正确关联
+            comm_item.setData(Qt.ItemDataRole.UserRole, student_id)
             if communicated:
                 comm_item.setForeground(QColor("#4caf50"))
             else:
                 comm_item.setForeground(QColor("#b8b8b8"))
             self.homework_table.setItem(row, 9, comm_item)
+
+            message_btn = self._create_inline_action_button("发送消息", lambda checked=False, s=stats: self._on_homework_message_clicked(s))
+            self.homework_table.setCellWidget(row, 10, self._build_table_action_widget(message_btn))
         
         # 数据填充完成，启用排序功能
         self.homework_table.setSortingEnabled(True)
@@ -615,20 +715,20 @@ class StudyStatusView(QWidget):
         if column != 9:
             return
         
-        # 从单元格数据中获取 person_id
+        # 从单元格数据中获取学号
         comm_item = self.homework_table.item(row, 9)
         if not comm_item:
             return
         
-        person_id = comm_item.data(Qt.ItemDataRole.UserRole)
-        if not person_id:
+        student_id = str(comm_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        if not student_id:
             return
         
         # 切换沟通状态
         new_status = self.communication_manager.toggle_status(
             self.current_course_id,
             self.current_class_id,
-            person_id
+            student_id
         )
         
         # 更新表格显示

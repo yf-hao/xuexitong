@@ -943,6 +943,24 @@ class MSyncClient:
                     return username
         return ""
 
+    def _extract_jid_resource(self, value):
+        item = self._first(value)
+        if isinstance(item, list):
+            for part in item:
+                resource = self._extract_jid_resource(part)
+                if resource:
+                    return resource
+        if isinstance(item, dict):
+            resource = self._first(item.get(4))
+            if isinstance(resource, str):
+                return resource
+            nested = self._first(item.get(1))
+            if isinstance(nested, dict):
+                resource = self._first(nested.get(4))
+                if isinstance(resource, str):
+                    return resource
+        return ""
+
     def _iter_dict_nodes(self, value, ancestors=None):
         ancestors = ancestors or []
         if isinstance(value, dict):
@@ -1132,12 +1150,16 @@ class MSyncClient:
 
                 route_from = self._extract_jid_username(entry.get(2))
                 route_to = self._extract_jid_username(entry.get(3))
+                route_from_resource = self._extract_jid_resource(entry.get(2))
+                route_to_resource = self._extract_jid_resource(entry.get(3))
                 body_from = self._extract_jid_username(body.get(2))
                 body_to = self._extract_jid_username(body.get(3))
                 peer_id = self._resolve_peer_from_users(route_from, route_to, body_from, body_to)
                 message = {
                     "from": route_from or body_from,
                     "to": route_to or body_to,
+                    "from_resource": route_from_resource,
+                    "to_resource": route_to_resource,
                     "peer_id": peer_id,
                     "content": text,
                     "timestamp": self._select_timestamp(entry.get(4), meta_timestamp),
@@ -1342,12 +1364,16 @@ class MSyncClient:
 
                 from_user = self._extract_jid_username(node.get(2)) or self._extract_jid_username(body.get(2))
                 to_user = self._extract_jid_username(node.get(3)) or self._extract_jid_username(body.get(3))
+                from_resource = self._extract_jid_resource(node.get(2)) or self._extract_jid_resource(body.get(2))
+                to_resource = self._extract_jid_resource(node.get(3)) or self._extract_jid_resource(body.get(3))
                 if not (from_user or to_user):
                     continue
 
                 push = {
                     "from": from_user,
                     "to": to_user,
+                    "from_resource": from_resource,
+                    "to_resource": to_resource,
                     "content": text,
                     "timestamp": self._select_timestamp(
                         node.get(1),

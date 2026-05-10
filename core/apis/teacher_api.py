@@ -283,6 +283,52 @@ class TeacherAPI:
         except Exception as e:
             return False, f"网络请求失败: {e}"
 
+    def assign_clazz_to_teachers(self, course_id: str, clazz_id: str, teacher_ids: list) -> tuple[bool, str]:
+        """将班级分配给指定教师。"""
+        params = self.session_manager.course_params
+        cpi = params.get("cpi", "")
+
+        url = "https://mooc2-gray.chaoxing.com/mooc2-ans/tcm/update-classassign"
+        assigneds_str = ",".join(str(teacher_id) for teacher_id in teacher_ids if str(teacher_id or "").strip())
+        if assigneds_str:
+            assigneds_str = f"{assigneds_str},"
+
+        req_params = {
+            "courseid": course_id,
+            "clazzid": clazz_id,
+            "cpi": cpi,
+            "assigneds": assigneds_str,
+        }
+
+        headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"https://mooc2-gray.chaoxing.com/mooc2-ans/tcm/course-manage?courseid={course_id}&clazzid={clazz_id}",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "sec-ch-ua": '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+        }
+
+        try:
+            resp = self.session.get(url, params=req_params, headers=headers, timeout=10)
+            resp.raise_for_status()
+            res_text = resp.text
+            try:
+                res_data = resp.json()
+            except Exception:
+                res_data = {}
+
+            if res_data.get("status") is True or res_data.get("result") == 1:
+                return True, f"成功分配班级给 {len(teacher_ids)} 名教师"
+            return False, res_data.get("msg", res_text[:200] or "分配失败")
+        except Exception as e:
+            return False, f"网络请求失败: {e}"
+
     def remove_team_teacher(self, course_id: str, teacher_ids: list) -> tuple[bool, str]:
         """移除教学团队中的教师。"""
         params = self.session_manager.course_params

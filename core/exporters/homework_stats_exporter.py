@@ -94,7 +94,7 @@ def _build_rows(
         communicated = False
         if communication_status_getter:
             try:
-                communicated = bool(communication_status_getter(course_id, class_id, int(stats.person_id)))
+                communicated = bool(communication_status_getter(course_id, class_id, str(stats.alias_name)))
             except Exception:
                 communicated = False
 

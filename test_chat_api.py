@@ -6,8 +6,13 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from PyQt6.QtCore import Qt
 
 from core.apis.chat_api import ChatAPI
+from core.apis.activity_api import ActivityAPI
+from core.apis.teacher_api import TeacherAPI
+from core.communication_manager import CommunicationManager
+from core.group_members_cache import build_group_members_cache_path, resolve_student_from_group_cache
 from core.msync_client import (
     MSyncClient,
     build_conversation_read,
@@ -25,6 +30,8 @@ from core.msync_client import (
 from ui.views.chat_view import ChatView
 from ui.views.study_status_view import StudyStatusView
 from ui.dialogs.absence_stats_dialog import AbsenceStatsDialog
+from ui.dialogs.qrcode_dialog import QRCodeDialog
+from ui.dialogs.student_message_dialog import StudentMessageDialog
 
 
 class _FakeResponse:
@@ -36,15 +43,20 @@ class _FakeResponse:
     def json(self):
         return self._payload
 
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
 
 class _FakeSession:
     def __init__(self, response):
         self.response = response
         self.calls = []
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None):
         self.calls.append({
             "url": url,
+            "params": params or {},
             "headers": headers or {},
             "timeout": timeout,
             "method": "GET",
@@ -53,9 +65,10 @@ class _FakeSession:
             return self.response.pop(0)
         return self.response
 
-    def post(self, url, headers=None, data=None, timeout=None):
+    def post(self, url, params=None, headers=None, data=None, timeout=None):
         self.calls.append({
             "url": url,
+            "params": params or {},
             "headers": headers or {},
             "data": data or {},
             "timeout": timeout,
@@ -68,6 +81,10 @@ class _FakeSession:
 
 class _FakeChatAPI(ChatAPI):
     def __init__(self, session, course_params=None):
+        self.__class__._msync = None
+        self.__class__._msync_message_listeners = {}
+        self.__class__._msync_error_listeners = {}
+        self.__class__._msync_close_listeners = {}
         self._session = session
         self.session_manager = SimpleNamespace(course_params=course_params or {})
         self._connected = False
@@ -95,7 +112,7 @@ class _FakeCrawlerForView:
     def is_msync_connected(self):
         return self.connected
 
-    def connect_msync(self, on_message=None, on_error=None, on_close=None):
+    def connect_msync(self, on_message=None, on_error=None, on_close=None, listener_key=None):
         self.connect_calls += 1
         return SimpleNamespace()
 
@@ -1107,7 +1124,7 @@ class ChatAPITests(unittest.TestCase):
             [{
                 "person_id": "25278974",
                 "name": "郝玉锋",
-                "student_id": "30047383",
+                "student_id": "",
                 "avatar_url": "http://photo.example/avatar.png",
                 "tuid": "25278974",
                 "puid": "30047383",
@@ -1127,7 +1144,7 @@ class ChatAPITests(unittest.TestCase):
         members = [{
             "person_id": "25278974",
             "name": "郝玉锋",
-            "student_id": "30047383",
+            "student_id": "",
             "avatar_url": "http://photo.example/avatar.png",
             "tuid": "25278974",
             "puid": "30047383",
@@ -1173,7 +1190,7 @@ class ChatAPITests(unittest.TestCase):
         members = [{
             "person_id": "25278974",
             "name": "郝玉锋",
-            "student_id": "30047383",
+            "student_id": "",
             "avatar_url": "http://photo.example/avatar.png",
             "tuid": "25278974",
             "puid": "30047383",
@@ -1399,6 +1416,329 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(table.header.default_size, 36)
         self.assertEqual(table.header.minimum_size, 32)
 
+    def test_resolve_student_from_group_cache_returns_unique_match(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = build_group_members_cache_path("离散数学（2025-2026-2）", "4.03计科2班、区块链1班", cache_dir=cache_dir)
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    [
+                        {"name": "张三", "tuid": "1001", "puid": "3001"},
+                        {"name": "李四", "tuid": "1002", "puid": "3002"},
+                    ],
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+            resolved = resolve_student_from_group_cache("离散数学（2025-2026-2）", "4.03计科2班、区块链1班", "张三", cache_dir=cache_dir)
+
+            self.assertEqual(resolved["status"], "success")
+            self.assertEqual(resolved["matches"][0]["tuid"], "1001")
+            self.assertEqual(resolved["cache_path"], cache_file)
+
+    def test_resolve_student_from_group_cache_detects_duplicate_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = build_group_members_cache_path("离散数学（2025-2026-2）", "4.03计科2班、区块链1班", cache_dir=cache_dir)
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    [
+                        {"name": "张三", "tuid": "1001", "puid": "3001"},
+                        {"name": "张三", "tuid": "1003", "puid": "3003"},
+                    ],
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+            resolved = resolve_student_from_group_cache("离散数学（2025-2026-2）", "4.03计科2班、区块链1班", "张三", cache_dir=cache_dir)
+
+            self.assertEqual(resolved["status"], "duplicate")
+            self.assertEqual(len(resolved["matches"]), 2)
+
+    def test_group_members_cache_normalization_keeps_puid_separate_from_student_id(self):
+        from core.group_members_cache import _normalize_members
+
+        members = _normalize_members([{"name": "张三", "tuid": "1001", "puid": "488064870"}])
+
+        self.assertEqual(
+            members,
+            [{
+                "person_id": "1001",
+                "name": "张三",
+                "student_id": "",
+                "avatar_url": "",
+                "tuid": "1001",
+                "puid": "488064870",
+            }],
+        )
+
+    def test_study_status_homework_message_click_opens_reusable_dialog_on_unique_match(self):
+        opened = []
+
+        class _FakeDialog:
+            def __init__(self, crawler, student, on_send_success=None, parent=None):
+                opened.append((crawler, student, on_send_success, parent))
+
+            def exec(self):
+                opened.append("exec")
+
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(),
+            _resolve_student_message_target=lambda student_name: {
+                "status": "success",
+                "matches": [{"name": student_name, "tuid": "1001", "student_id": "3001"}],
+            },
+            _mark_homework_student_communicated=lambda student_id: opened.append(("marked", student_id)),
+        )
+
+        with patch("ui.views.study_status_view.StudentMessageDialog", _FakeDialog):
+            StudyStatusView._on_homework_message_clicked(view, SimpleNamespace(user_name="张三", alias_name="2023001001"))
+
+        self.assertEqual(opened[0][1]["name"], "张三")
+        self.assertTrue(callable(opened[0][2]))
+        self.assertEqual(opened[1], "exec")
+        opened[0][2]({"name": "张三"})
+        self.assertEqual(opened[2], ("marked", "2023001001"))
+
+    def test_study_status_homework_message_click_warns_on_duplicate_names(self):
+        infos = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(),
+            _resolve_student_message_target=lambda student_name: {
+                "status": "duplicate",
+                "matches": [{"name": student_name, "tuid": "1001"}, {"name": student_name, "tuid": "1002"}],
+            },
+        )
+
+        with patch("ui.views.study_status_view.QMessageBox.information", side_effect=lambda *args: infos.append(args[1:3])):
+            StudyStatusView._on_homework_message_clicked(view, SimpleNamespace(user_name="张三"))
+
+        self.assertEqual(infos, [("存在重名学生", "张三 在群成员缓存中存在重名，请到“消息”模块中手动发送。")])
+
+    def test_study_status_mark_homework_student_communicated_updates_storage_and_row(self):
+        class _FakeItem:
+            def __init__(self, student_id):
+                self._student_id = student_id
+                self.text_value = "☐"
+                self.foreground = None
+
+            def data(self, role):
+                return self._student_id if role == Qt.ItemDataRole.UserRole else None
+
+            def setText(self, value):
+                self.text_value = value
+
+            def setForeground(self, value):
+                self.foreground = value
+
+        item = _FakeItem("2023001001")
+        view = SimpleNamespace(
+            current_course_id="course-1",
+            current_class_id="class-1",
+            communication_manager=SimpleNamespace(set_status=lambda course_id, class_id, student_id, status: setattr(view, "_saved", (course_id, class_id, student_id, status))),
+            homework_table=SimpleNamespace(
+                rowCount=lambda: 1,
+                item=lambda row, column: item if (row, column) == (0, 9) else None,
+            ),
+        )
+
+        StudyStatusView._mark_homework_student_communicated(view, "2023001001")
+
+        self.assertEqual(view._saved, ("course-1", "class-1", "2023001001", True))
+        self.assertEqual(item.text_value, "☑")
+
+    def test_absence_stats_message_click_opens_reusable_dialog_on_unique_match(self):
+        opened = []
+
+        class _FakeDialog:
+            def __init__(self, crawler, student, on_send_success=None, parent=None):
+                opened.append((crawler, student, on_send_success, parent))
+
+            def exec(self):
+                opened.append("exec")
+
+        dialog = SimpleNamespace(
+            crawler=SimpleNamespace(),
+            course_name="离散数学（2025-2026-2）",
+            teaching_class_name="4.03计科2班、区块链1班",
+            _resolve_student_message_target=lambda student_name: {
+                "status": "success",
+                "matches": [{"name": student_name, "tuid": "1001", "student_id": "3001"}],
+            },
+            _mark_student_communicated=lambda student_id: opened.append(("marked", student_id)),
+        )
+
+        with patch("ui.dialogs.absence_stats_dialog.StudentMessageDialog", _FakeDialog):
+            AbsenceStatsDialog._on_message_clicked(dialog, {"name": "张三", "username": "2023001001"})
+
+        self.assertEqual(opened[0][1]["name"], "张三")
+        self.assertTrue(callable(opened[0][2]))
+        self.assertEqual(opened[1], "exec")
+        opened[0][2]({"name": "张三"})
+        self.assertEqual(opened[2], ("marked", "2023001001"))
+
+    def test_absence_stats_mark_student_communicated_updates_storage_and_row(self):
+        class _FakeItem:
+            def __init__(self, student_id):
+                self._student_id = student_id
+                self.text_value = "☐"
+                self.foreground = None
+
+            def data(self, role):
+                return self._student_id if role == Qt.ItemDataRole.UserRole else None
+
+            def setText(self, value):
+                self.text_value = value
+
+            def setForeground(self, value):
+                self.foreground = value
+
+        item = _FakeItem("2023001001")
+        dialog = SimpleNamespace(
+            course_id="course-1",
+            class_id="class-1",
+            communication_manager=SimpleNamespace(set_status=lambda course_id, class_id, student_id, status: setattr(dialog, "_saved", (course_id, class_id, student_id, status))),
+            table=SimpleNamespace(
+                rowCount=lambda: 1,
+                item=lambda row, column: item if (row, column) == (0, 5) else None,
+            ),
+        )
+
+        AbsenceStatsDialog._mark_student_communicated(dialog, "2023001001")
+
+        self.assertEqual(dialog._saved, ("course-1", "class-1", "2023001001", True))
+        self.assertEqual(item.text_value, "☑")
+
+    def test_study_status_show_absence_stats_passes_message_dependencies(self):
+        created = []
+
+        class _FakeDialog:
+            def __init__(self, absence_stats, total_activities, course_id, class_id, course_name="", teaching_class_name="", crawler=None, parent=None):
+                created.append((absence_stats, total_activities, course_id, class_id, course_name, teaching_class_name, crawler, parent))
+
+            def exec(self):
+                created.append("exec")
+
+        view = SimpleNamespace(
+            _absence_dialog_open=False,
+            current_course_id="course-1",
+            current_class_id="class-1",
+            current_course_name="离散数学（2025-2026-2）",
+            current_class_name="4.03计科2班、区块链1班",
+            current_attendance_data=[object(), object()],
+            crawler=SimpleNamespace(),
+            _set_absence_stats_busy=lambda busy: created.append(("busy", busy)),
+            status_update=SimpleNamespace(emit=lambda text: created.append(("status", text))),
+        )
+
+        with patch("ui.dialogs.absence_stats_dialog.AbsenceStatsDialog", _FakeDialog):
+            StudyStatusView._show_absence_stats(view, {"488064870": {"name": "张三", "username": "2023001001"}})
+
+        self.assertEqual(created[0][2:7], ("course-1", "class-1", "离散数学（2025-2026-2）", "4.03计科2班、区块链1班", view.crawler))
+        self.assertEqual(created[1], "exec")
+
+    def test_student_message_dialog_waits_for_msync_connection(self):
+        class _FakeCrawler:
+            def __init__(self):
+                self.connect_calls = 0
+                self._checks = 0
+
+            def is_msync_connected(self):
+                self._checks += 1
+                return self._checks >= 3
+
+            def connect_msync(self, listener_key=None):
+                self.connect_calls += 1
+                return SimpleNamespace()
+
+        dialog = SimpleNamespace(crawler=_FakeCrawler())
+
+        with patch("ui.dialogs.student_message_dialog.time.sleep", lambda _: None), patch("ui.dialogs.student_message_dialog.QApplication.instance", return_value=None):
+            self.assertTrue(StudentMessageDialog._ensure_connected(dialog, timeout=0.3, interval=0.01))
+
+        self.assertEqual(dialog.crawler.connect_calls, 1)
+
+    def test_student_message_dialog_fails_when_msync_never_connects(self):
+        class _FakeCrawler:
+            def __init__(self):
+                self.connect_calls = 0
+
+            def is_msync_connected(self):
+                return False
+
+            def connect_msync(self, listener_key=None):
+                self.connect_calls += 1
+                return SimpleNamespace()
+
+        dialog = SimpleNamespace(crawler=_FakeCrawler())
+
+        with patch("ui.dialogs.student_message_dialog.time.sleep", lambda _: None), patch("ui.dialogs.student_message_dialog.QApplication.instance", return_value=None):
+            self.assertFalse(StudentMessageDialog._ensure_connected(dialog, timeout=0.05, interval=0.01))
+
+        self.assertEqual(dialog.crawler.connect_calls, 1)
+
+    def test_student_message_dialog_uses_puid_label_instead_of_student_id_label(self):
+        lines = StudentMessageDialog._build_info_lines(
+            {"name": "张三", "student_id": "", "puid": "488064870", "tuid": "1001"}
+        )
+
+        self.assertIn("PUID：488064870", lines)
+        self.assertNotIn("学号：488064870", lines)
+
+    def test_communication_manager_stores_status_by_real_student_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = CommunicationManager(data_dir=tmpdir)
+
+            manager.set_status("course-1", "class-1", "2023001001", True)
+
+            self.assertTrue(manager.get_status("course-1", "class-1", "2023001001"))
+            with open(Path(tmpdir) / "communication_status.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data, {"course-1_class-1": {"2023001001": True}})
+
+    def test_homework_export_rows_use_alias_name_for_communication_lookup(self):
+        from core.exporters.homework_stats_exporter import _build_rows
+
+        calls = []
+        rows = list(_build_rows(
+            stats_list=[SimpleNamespace(
+                alias_name="2023001001",
+                user_name="张三",
+                complete_num=10,
+                work_submitted=8,
+                pending_count=1,
+                unsubmitted_count=2,
+                real_avg_score=88.5,
+                min_score=60.0,
+                max_score=99.0,
+            )],
+            course_id="course-1",
+            class_id="class-1",
+            communication_status_getter=lambda course_id, class_id, student_id: calls.append((course_id, class_id, student_id)) or False,
+        ))
+
+        self.assertEqual(calls, [("course-1", "class-1", "2023001001")])
+        self.assertEqual(rows[0][0], "2023001001")
+
+    def test_absence_export_rows_use_username_for_communication_lookup(self):
+        from core.exporters.absence_stats_exporter import _build_rows
+
+        calls = []
+        rows = list(_build_rows(
+            absence_stats={"488064870": {"name": "张三", "username": "2023001001", "class_name": "1班", "absent_count": 2, "total_count": 5}},
+            total_activities=5,
+            course_id="course-1",
+            class_id="class-1",
+            communication_status_getter=lambda course_id, class_id, student_id: calls.append((course_id, class_id, student_id)) or False,
+        ))
+
+        self.assertEqual(calls, [("course-1", "class-1", "2023001001")])
+        self.assertEqual(rows[0][1], "2023001001")
+
     def test_study_status_absence_stats_ignores_rapid_repeat_clicks(self):
         started = []
 
@@ -1449,6 +1789,131 @@ class ChatAPITests(unittest.TestCase):
         self.assertTrue(view._absence_stats_loading)
         self.assertIn(("enabled", False), button_states)
         self.assertIn(("text", "统计中..."), button_states)
+
+    def test_study_status_attendance_click_stores_course_name_for_absence_messaging(self):
+        class _FakeCourse:
+            id = "course-1"
+
+        class _FakeMainWindow:
+            class _Box:
+                def __init__(self, data, text):
+                    self._data = data
+                    self._text = text
+
+                def currentData(self):
+                    return self._data
+
+                def currentText(self):
+                    return self._text
+
+            def __init__(self):
+                self.course_box = self._Box(_FakeCourse(), "离散数学（2025-2026-2）")
+                self.clazz_box = self._Box("class-1", "4.01计科3班、4班")
+
+        view = SimpleNamespace(
+            _highlight_button=lambda button: None,
+            btn_attendance=object(),
+            status_update=SimpleNamespace(emit=lambda text: None),
+            _show_loading=lambda text: None,
+            _display_attendance=lambda result: None,
+            window=lambda: _FakeMainWindow(),
+            crawler=SimpleNamespace(),
+        )
+
+        with patch("ui.main_window.MainWindow", _FakeMainWindow), patch("ui.views.study_status_view.AttendanceWorker", lambda crawler: SimpleNamespace(attendance_ready=SimpleNamespace(connect=lambda callback: None), start=lambda: None)):
+            StudyStatusView.on_attendance_clicked(view)
+
+        self.assertEqual(view.current_course_id, "course-1")
+        self.assertEqual(view.current_course_name, "离散数学（2025-2026-2）")
+        self.assertEqual(view.current_class_id, "class-1")
+        self.assertEqual(view.current_class_name, "4.01计科3班、4班")
+
+    def test_assign_clazz_to_teachers_uses_update_classassign_endpoint(self):
+        class _FakeTeacherAPI(TeacherAPI):
+            def __init__(self):
+                self._session = _FakeSession(_FakeResponse(payload={"status": True}))
+                self.session_manager = SimpleNamespace(course_params={"cpi": "888"})
+
+            @property
+            def session(self):
+                return self._session
+
+        api = _FakeTeacherAPI()
+
+        success, message = api.assign_clazz_to_teachers("course-1", "class-1", ["1001", "1002"])
+
+        self.assertTrue(success)
+        self.assertEqual(message, "成功分配班级给 2 名教师")
+        self.assertEqual(api.session.calls[0]["url"], "https://mooc2-gray.chaoxing.com/mooc2-ans/tcm/update-classassign")
+        self.assertEqual(
+            api.session.calls[0]["params"],
+            {
+                "courseid": "course-1",
+                "clazzid": "class-1",
+                "cpi": "888",
+                "assigneds": "1001,1002,",
+            },
+        )
+
+    def test_refresh_qrcode_parses_enc_and_sign_code(self):
+        class _FakeActivityAPI(ActivityAPI):
+            def __init__(self):
+                self._session = _FakeSession(_FakeResponse(payload={"result": 1, "data": {"enc": "ENC123", "signCode": "ABCDE"}}))
+
+            @property
+            def session(self):
+                return self._session
+
+        api = _FakeActivityAPI()
+
+        success, message, enc, sign_code = api.refresh_qrcode("active-1")
+
+        self.assertTrue(success)
+        self.assertEqual(message, "获取成功")
+        self.assertEqual(enc, "ENC123")
+        self.assertEqual(sign_code, "ABCDE")
+        self.assertEqual(api.session.calls[0]["params"]["activeId"], "active-1")
+
+    def test_qrcode_dialog_builds_chaoxing_sign_url(self):
+        self.assertEqual(
+            QRCodeDialog._build_qr_url("12345", "ENC123", "ABCDE"),
+            "https://mobilelearn.chaoxing.com/widget/sign/e?id=12345&c=ABCDE&enc=ENC123&DB_STRATEGY=PRIMARY_KEY&STRATEGY_PARA=id",
+        )
+        self.assertEqual(
+            QRCodeDialog._build_qr_url("12345", "ENC123", ""),
+            "https://mobilelearn.chaoxing.com/widget/sign/e?id=12345&c=12345&enc=ENC123&DB_STRATEGY=PRIMARY_KEY&STRATEGY_PARA=id",
+        )
+
+    def test_msync_batch_message_keeps_device_resources(self):
+        frame = base64.b64decode(
+            "CABAAErCAwoCCAAingMI3JiA0sr3u8AVElEKDmN4LWRldiNjeHN0dWR5EggyNTI3ODk3NBoLZWFzZW1vYi5jb20iKGlvc19lN2UyMzdjZS0wOTBkLTBhNDAtMGExZC0wYjVjNjg2NmUzOWMaPAoOY3gtZGV2I2N4c3R1ZHkSCDI1Mjc4OTc0GgtlYXNlbW9iLmNvbSITd2ViaW1fMTc3ODMzNjExOTUyOSCJ+uro4DMoATKhAQgBEgoSCDI1Mjc4OTc0GgoSCDI1Mjc4OTc0IgoIABIG5L2g5aW9Kl0KC2VtX2FwbnNfZXh0EAgyTHsiZW1faHVhd2VpX3B1c2hfYmFkZ2VfY2xhc3MiOiJjb20uY2hhb3hpbmcubW9iaWxlLmFjdGl2aXR5LlNwbGFzaEFjdGl2aXR5In0qFgoIZnJvbVB1aWQQBzIIMzAwNDczODNKAnt9QisKEWNoYXRfcm91dGVfdGFyZ2V0EAcyFHNlbGZfc3BlY2lmaWNfZGV2aWNlQhYKCWNsaWVudF9pZBAEGNvXuaP+u8sfSg97ImlzX29ubGluZSI6MX0o3JiA0sr3u8AVMgoSCDI1Mjc4OTc0QMn/6ujgMw=="
+        )
+        client = MSyncClient(app_key="cx-dev#cxstudy", domain="easemob.com")
+        client._username = "25278974"
+
+        messages = client._extract_batch_messages(decode_message(frame))
+
+        self.assertEqual(messages[0]["content"], "你好")
+        self.assertTrue(messages[0]["from_resource"].startswith("ios_"))
+        self.assertTrue(messages[0]["to_resource"].startswith("webim_"))
+
+    def test_chat_view_treats_same_account_other_device_message_as_incoming(self):
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(get_msync_resource=lambda: "webim_1778336119529"),
+        )
+
+        self.assertTrue(
+            ChatView._is_remote_self_device_message(
+                view,
+                {
+                    "from": "25278974",
+                    "to": "25278974",
+                    "from_resource": "ios_e7e237ce-090d-0a40-0a1d-0b5c6866e39c",
+                    "to_resource": "webim_1778336119529",
+                },
+                "25278974",
+            )
+        )
 
     def test_extract_class_chat_map_from_me_html(self):
         html = (
@@ -1586,20 +2051,52 @@ class ChatAPITests(unittest.TestCase):
     def test_connect_msync_reuses_running_client(self):
         session = _FakeSession(_FakeResponse(payload={}))
         api = _FakeChatAPI(session, course_params={"im_tuid": "100", "im_token": "token-1"})
+        _FakeChatAPI._msync_message_listeners = {}
+        _FakeChatAPI._msync_error_listeners = {}
+        _FakeChatAPI._msync_close_listeners = {}
         running_client = SimpleNamespace(
             is_running=lambda: True,
             on_message=None,
             on_error=None,
             on_close=None,
         )
-        api._msync = running_client
+        _FakeChatAPI._msync = running_client
 
         result = api.connect_msync(on_message="msg", on_error="err", on_close="close")
 
         self.assertIs(result, running_client)
-        self.assertEqual(running_client.on_message, "msg")
-        self.assertEqual(running_client.on_error, "err")
-        self.assertEqual(running_client.on_close, "close")
+        self.assertIs(running_client.on_message.__func__, _FakeChatAPI._dispatch_msync_message.__func__)
+        self.assertIs(running_client.on_error.__func__, _FakeChatAPI._dispatch_msync_error.__func__)
+        self.assertIs(running_client.on_close.__func__, _FakeChatAPI._dispatch_msync_close.__func__)
+        self.assertEqual(list(_FakeChatAPI._msync_message_listeners.values()), ["msg"])
+        self.assertEqual(list(_FakeChatAPI._msync_error_listeners.values()), ["err"])
+        self.assertEqual(list(_FakeChatAPI._msync_close_listeners.values()), ["close"])
+
+    def test_connect_msync_dispatches_to_multiple_registered_message_listeners(self):
+        session = _FakeSession(_FakeResponse(payload={}))
+        api = _FakeChatAPI(session, course_params={"im_tuid": "100", "im_token": "token-1"})
+        _FakeChatAPI._msync_message_listeners = {}
+        _FakeChatAPI._msync_error_listeners = {}
+        _FakeChatAPI._msync_close_listeners = {}
+        _FakeChatAPI._msync = SimpleNamespace(
+            is_running=lambda: True,
+            on_message=None,
+            on_error=None,
+            on_close=None,
+        )
+        received = []
+
+        cb1 = lambda payload: received.append(("cb1", payload))
+        cb2 = lambda payload: received.append(("cb2", payload))
+
+        api.connect_msync(on_message=cb1, listener_key="listener-1")
+        api.connect_msync(on_message=cb2, listener_key="listener-2")
+        _FakeChatAPI._dispatch_msync_message({"type": "message"})
+
+        self.assertEqual(
+            received,
+            [("cb1", {"type": "message"}), ("cb2", {"type": "message"})],
+        )
 
     def test_chat_view_ensure_msync_connected_starts_single_background_connect(self):
         crawler = _FakeCrawlerForView()
@@ -1625,7 +2122,7 @@ class ChatAPITests(unittest.TestCase):
             def is_msync_connected(self):
                 return False
 
-            def connect_msync(self, on_message=None, on_error=None, on_close=None):
+            def connect_msync(self, on_message=None, on_error=None, on_close=None, listener_key=None):
                 return SimpleNamespace()
 
             def request_history_summary_msync(self, peer_ids):

@@ -16,6 +16,7 @@ class QRCodeDialog(QDialog):
         self.crawler = crawler
         self.active_id = active_id
         self._current_enc = ""
+        self._current_sign_code = ""
         self._workers = []
         self._request_counter = 0
         self._last_processed_request = 0
@@ -124,7 +125,9 @@ class QRCodeDialog(QDialog):
 
         worker = RefreshQRCodeWorker(self.crawler, self.active_id)
         self._workers.append(worker)
-        worker.qrcode_ready.connect(lambda success, message, enc, rid=request_id: self._on_qrcode_ready(success, message, enc, rid))
+        worker.qrcode_ready.connect(
+            lambda success, message, enc, sign_code, rid=request_id: self._on_qrcode_ready(success, message, enc, sign_code, rid)
+        )
         worker.finished.connect(self._cleanup_finished_worker)
         worker.start()
 
@@ -134,7 +137,7 @@ class QRCodeDialog(QDialog):
             self._workers.remove(sender)
         self._poll_in_progress = False
 
-    def _on_qrcode_ready(self, success, message, enc, request_id):
+    def _on_qrcode_ready(self, success, message, enc, sign_code, request_id):
         # 忽略过期的请求结果，只处理最新的
         if request_id < self._last_processed_request:
             return
@@ -146,29 +149,43 @@ class QRCodeDialog(QDialog):
 
         # 去除空白，严格比较 enc 是否真正变化
         enc_clean = str(enc).strip() if enc else ""
+        sign_code_clean = str(sign_code).strip() if sign_code else ""
         current_clean = str(self._current_enc).strip() if self._current_enc else ""
+        current_sign_code = str(self._current_sign_code).strip() if self._current_sign_code else ""
 
         if not enc_clean:
             self.status_lbl.setText("❌ 获取到的 enc 为空")
             return
 
-        if enc_clean == current_clean:
-            # enc 未变化，不重新生成
+        if not sign_code_clean:
+            sign_code_clean = str(self.active_id).strip()
+
+        if enc_clean == current_clean and sign_code_clean == current_sign_code:
             self.status_lbl.setText("二维码有效")
             return
 
-        # enc 真正变化，重新生成二维码
         self._current_enc = enc_clean
-        self._generate_qr_image(enc_clean)
+        self._current_sign_code = sign_code_clean
+        self._generate_qr_image(enc_clean, sign_code_clean)
 
-    def _generate_qr_image(self, enc: str):
+    @staticmethod
+    def _build_qr_url(active_id: str, enc: str, sign_code: str) -> str:
+        active_id = str(active_id or "").strip()
+        enc = str(enc or "").strip()
+        sign_code = str(sign_code or "").strip() or active_id
+        return (
+            "https://mobilelearn.chaoxing.com/widget/sign/e"
+            f"?id={active_id}&c={sign_code}&enc={enc}"
+            "&DB_STRATEGY=PRIMARY_KEY&STRATEGY_PARA=id"
+        )
+
+    def _generate_qr_image(self, enc: str, sign_code: str):
         """用 qrcode 库生成二维码并显示。"""
         try:
             import qrcode
             from datetime import datetime
 
-            # 生成二维码内容：签到 URL
-            qr_url = f"https://mobilelearn.chaoxing.com/widget/sign/pcTeaSignController/signIn?enc={enc}"
+            qr_url = self._build_qr_url(self.active_id, enc, sign_code)
 
             qr = qrcode.QRCode(
                 version=5,

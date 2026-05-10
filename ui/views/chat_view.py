@@ -4,7 +4,6 @@
 from html import escape
 from datetime import datetime
 import json
-import re
 import threading
 import time
 from pathlib import Path
@@ -20,6 +19,7 @@ from PyQt6.QtGui import QFont, QPixmap, QKeyEvent
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 from core.config import DATA_DIR
+from core.group_members_cache import build_group_members_cache_path, load_group_members_cache, sanitize_group_cache_filename
 from ui.workers import ChatMessageListWorker, ChatHistoryWorker, ChatGroupMembersWorker
 from core.logger import get_logger
 
@@ -112,6 +112,25 @@ CHAT_STYLE = """
     }
     QLineEdit#student_search:focus {
         border: 1px solid #007acc;
+    }
+    QPushButton#group_refresh_btn {
+        background-color: #2d2d2d;
+        color: #dcdcdc;
+        border: 1px solid #3d3d3d;
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-size: 13px;
+        font-weight: bold;
+        margin: 8px 8px 4px 0;
+    }
+    QPushButton#group_refresh_btn:hover {
+        background-color: #3a3a3a;
+        border: 1px solid #4a4a4a;
+    }
+    QPushButton#group_refresh_btn:disabled {
+        color: #777777;
+        background-color: #252526;
+        border: 1px solid #333333;
     }
     QLineEdit#msg_input {
         background-color: #1e1e1e;
@@ -337,13 +356,14 @@ class ChatView(QWidget):
         student_header_layout.setSpacing(6)
         self.student_search = StudentSearchLineEdit()
         self.student_search.setObjectName("student_search")
+        self.student_search.setFixedHeight(50)
         self.student_search.setPlaceholderText("搜索学生...")
         self.student_search.textChanged.connect(self._on_student_search_changed)
         student_header_layout.addWidget(self.student_search, stretch=1)
         self.group_refresh_btn = QPushButton("刷新")
         self.group_refresh_btn.setObjectName("group_refresh_btn")
-        self.group_refresh_btn.setFixedHeight(28)
-        self.group_refresh_btn.setFixedWidth(52)
+        self.group_refresh_btn.setFixedHeight(50)
+        self.group_refresh_btn.setFixedWidth(64)
         self.group_refresh_btn.setEnabled(False)
         self.group_refresh_btn.clicked.connect(self._refresh_current_group_members)
         student_header_layout.addWidget(self.group_refresh_btn)
@@ -1152,10 +1172,7 @@ class ChatView(QWidget):
         return room_name or class_name
 
     def _sanitize_group_cache_filename(self, room_name: str, room_id: str = "") -> str:
-        normalized_name = re.sub(r'[\\/:*?"<>|]+', "_", str(room_name or "").strip())
-        normalized_name = normalized_name.strip().strip(".")
-        normalized_name = re.sub(r"\s+", " ", normalized_name)
-        return normalized_name or str(room_id or "").strip()
+        return sanitize_group_cache_filename(room_name, fallback=room_id)
 
     def _legacy_group_members_cache_file(self, room_id: str) -> Path:
         cache_dir = Path(getattr(self, "_group_members_cache_dir", Path(DATA_DIR) / "data" / "group_members"))
@@ -1163,55 +1180,33 @@ class ChatView(QWidget):
 
     def _group_members_cache_file(self, room_id: str, cache_name: str = "") -> Path:
         cache_dir = Path(getattr(self, "_group_members_cache_dir", Path(DATA_DIR) / "data" / "group_members"))
-        file_stem = ChatView._sanitize_group_cache_filename(self, cache_name or getattr(self, "_current_group_cache_name", ""), room_id)
-        return cache_dir / f"{file_stem}.json"
+        return build_group_members_cache_path(
+            cache_name or getattr(self, "_current_group_cache_name", ""),
+            "",
+            fallback=room_id,
+            cache_dir=cache_dir,
+        )
 
     def _load_persisted_group_members(self, room_id: str, cache_name: str = "", room_name: str = ""):
         room_id = str(room_id or "").strip()
         if not room_id:
             return None
 
-        candidate_files = []
-        for candidate_name in (cache_name, room_name):
-            candidate_name = str(candidate_name or "").strip()
-            if not candidate_name:
-                continue
-            candidate_file = ChatView._group_members_cache_file(self, room_id, candidate_name)
-            if candidate_file not in candidate_files:
-                candidate_files.append(candidate_file)
-        legacy_cache_file = ChatView._legacy_group_members_cache_file(self, room_id)
-        if legacy_cache_file not in candidate_files:
-            candidate_files.append(legacy_cache_file)
-
-        target_file = next((path for path in candidate_files if path.exists()), None)
+        members, target_file = load_group_members_cache(
+            cache_name,
+            "",
+            fallback=room_id,
+            cache_dir=Path(getattr(self, "_group_members_cache_dir", Path(DATA_DIR) / "data" / "group_members")),
+        )
+        if target_file is None and room_name:
+            members, target_file = load_group_members_cache(
+                room_name,
+                "",
+                fallback=room_id,
+                cache_dir=Path(getattr(self, "_group_members_cache_dir", Path(DATA_DIR) / "data" / "group_members")),
+            )
         if target_file is None:
             return None
-
-        try:
-            with open(target_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.warning(f"ChatView: 读取群成员缓存失败 room_id={room_id}, error={e}")
-            return None
-
-        if not isinstance(payload, list):
-            logger.warning(f"ChatView: 群成员缓存格式异常 room_id={room_id}, type={type(payload).__name__}")
-            return None
-
-        members = []
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            member = dict(item)
-            member["person_id"] = str(member.get("person_id") or member.get("tuid") or "")
-            member["name"] = str(member.get("name") or "未知")
-            member["student_id"] = str(member.get("student_id") or member.get("puid") or "")
-            member["avatar_url"] = str(member.get("avatar_url") or "")
-            if member.get("tuid") not in (None, "") or member["person_id"]:
-                member["tuid"] = str(member.get("tuid") or member["person_id"])
-            if member.get("puid") not in (None, "") or member["student_id"]:
-                member["puid"] = str(member.get("puid") or member["student_id"])
-            members.append(member)
 
         logger.info(f"ChatView: 已加载群成员缓存 room_id={room_id}, file={target_file.name}, count={len(members)}")
         return members
@@ -1752,6 +1747,7 @@ class ChatView(QWidget):
                     on_message=lambda msg: self.msync_message_received.emit(msg),
                     on_error=lambda e: logger.error(f"MSync error: {e}"),
                     on_close=lambda c, m: logger.info(f"MSync closed: {c} {m}"),
+                    listener_key=self,
                 )
                 if self._raw_sessions:
                     self._request_unread_summary(self._raw_sessions)
@@ -1839,6 +1835,26 @@ class ChatView(QWidget):
         to_user = str(msg.get("to", "") or "")
         return self._current_target_id in {from_user, to_user}
 
+    def _is_remote_self_device_message(self, msg: dict, current_tuid: str) -> bool:
+        from_user = str(msg.get("from", "") or "")
+        to_user = str(msg.get("to", "") or "")
+        if from_user != current_tuid or to_user != current_tuid:
+            return False
+
+        current_resource = ""
+        if hasattr(self.crawler, "get_msync_resource"):
+            current_resource = str(self.crawler.get_msync_resource() or "")
+        if not current_resource:
+            return False
+
+        from_resource = str(msg.get("from_resource", "") or "")
+        to_resource = str(msg.get("to_resource", "") or "")
+        return bool(
+            to_resource == current_resource
+            and from_resource
+            and from_resource != current_resource
+        )
+
     def _on_msync_message(self, msg: dict):
         """MSync 收到实时消息回调"""
         if msg.get("event") == "read_ack":
@@ -1861,7 +1877,7 @@ class ChatView(QWidget):
         content = msg.get("content", "")
         timestamp = msg.get("timestamp", 0)
         current_tuid = str(self.crawler.session_manager.course_params.get("im_tuid", "") or "")
-        is_self = from_user == current_tuid
+        is_self = from_user == current_tuid and not ChatView._is_remote_self_device_message(self, msg, current_tuid)
         sender_name = "我" if is_self else (
             self._current_target_name if self._is_current_conversation_message(peer_id, msg) else (peer_id or from_user)
         )

@@ -22,6 +22,11 @@ class ChatAPI:
     """聊天 API 接口，依赖宿主提供 session、session_manager。"""
 
     _msync = None  # 类属性，避免 __init__ 未被调用的问题
+    _msync_lock = threading.Lock()
+    _msync_listener_lock = threading.Lock()
+    _msync_message_listeners = {}
+    _msync_error_listeners = {}
+    _msync_close_listeners = {}
 
     @staticmethod
     def _extract_class_chat_map(html: str):
@@ -69,62 +74,129 @@ class ChatAPI:
 
     # ── MSync 实时连接 ──
 
-    def connect_msync(self, on_message=None, on_error=None, on_close=None):
+    @classmethod
+    def _dispatch_msync_message(cls, message):
+        listeners = []
+        with cls._msync_listener_lock:
+            listeners = list(cls._msync_message_listeners.values())
+        for callback in listeners:
+            if not callable(callback):
+                continue
+            try:
+                callback(message)
+            except Exception as e:
+                logger.warning(f"ChatAPI._dispatch_msync_message: listener failed - {e}")
+
+    @classmethod
+    def _dispatch_msync_error(cls, error):
+        listeners = []
+        with cls._msync_listener_lock:
+            listeners = list(cls._msync_error_listeners.values())
+        for callback in listeners:
+            if not callable(callback):
+                continue
+            try:
+                callback(error)
+            except Exception as e:
+                logger.warning(f"ChatAPI._dispatch_msync_error: listener failed - {e}")
+
+    @classmethod
+    def _dispatch_msync_close(cls, code, message):
+        listeners = []
+        with cls._msync_listener_lock:
+            listeners = list(cls._msync_close_listeners.values())
+        for callback in listeners:
+            if not callable(callback):
+                continue
+            try:
+                callback(code, message)
+            except Exception as e:
+                logger.warning(f"ChatAPI._dispatch_msync_close: listener failed - {e}")
+
+    @classmethod
+    def _register_msync_listener(cls, store_name: str, callback, listener_key=None):
+        if callback is None:
+            return
+        key = listener_key if listener_key is not None else callback
+        with cls._msync_listener_lock:
+            getattr(cls, store_name)[key] = callback
+
+    @classmethod
+    def _attach_msync_dispatchers(cls):
+        if not cls._msync:
+            return
+        if hasattr(cls._msync, "on_message"):
+            cls._msync.on_message = cls._dispatch_msync_message
+        if hasattr(cls._msync, "on_error"):
+            cls._msync.on_error = cls._dispatch_msync_error
+        if hasattr(cls._msync, "on_close"):
+            cls._msync.on_close = cls._dispatch_msync_close
+
+    def connect_msync(self, on_message=None, on_error=None, on_close=None, listener_key=None):
         """
         建立 MSync WebSocket 实时连接。
 
         Returns:
             MSyncClient 实例，失败返回 None
         """
-        if self._msync and hasattr(self._msync, "is_running") and self._msync.is_running():
-            if on_message is not None:
-                self._msync.on_message = on_message
-            if on_error is not None:
-                self._msync.on_error = on_error
-            if on_close is not None:
-                self._msync.on_close = on_close
-            return self._msync
+        cls = self.__class__
+        cls._register_msync_listener("_msync_message_listeners", on_message, listener_key=listener_key)
+        cls._register_msync_listener("_msync_error_listeners", on_error, listener_key=listener_key)
+        cls._register_msync_listener("_msync_close_listeners", on_close, listener_key=listener_key)
 
-        token = self.session_manager.course_params.get("im_token")
-        tuid = self.session_manager.course_params.get("im_tuid")
+        with cls._msync_lock:
+            if cls._msync and hasattr(cls._msync, "is_running") and cls._msync.is_running():
+                cls._attach_msync_dispatchers()
+                return cls._msync
 
-        if not all([tuid, token]):
-            creds = self.get_im_credentials()
-            if not creds:
+            token = self.session_manager.course_params.get("im_token")
+            tuid = self.session_manager.course_params.get("im_tuid")
+
+            if not all([tuid, token]):
+                creds = self.get_im_credentials()
+                if not creds:
+                    return None
+                tuid = creds["tuid"]
+                token = creds["token"]
+
+            try:
+                # 提取 requests session 的 cookie 供 WebSocket 使用
+                cookie_dict = self.session.cookies.get_dict()
+                cookie_str = "; ".join(f"{k}={v}" for k, v in cookie_dict.items())
+                logger.info(f"ChatAPI.connect_msync: cookies_count={len(cookie_dict)}, keys={list(cookie_dict.keys())}")
+
+                cls._msync = MSyncClient(
+                    app_key="cx-dev#cxstudy",
+                    domain="easemob.com",
+                    platform=3,
+                    on_message=cls._dispatch_msync_message,
+                    on_error=cls._dispatch_msync_error,
+                    on_close=cls._dispatch_msync_close,
+                    cookies=cookie_str,
+                )
+                cls._msync.connect(token=token, username=tuid)
+                return cls._msync
+            except Exception as e:
+                logger.exception(f"ChatAPI.connect_msync: 连接失败 - {e}")
                 return None
-            tuid = creds["tuid"]
-            token = creds["token"]
-
-        try:
-            # 提取 requests session 的 cookie 供 WebSocket 使用
-            cookie_dict = self.session.cookies.get_dict()
-            cookie_str = "; ".join(f"{k}={v}" for k, v in cookie_dict.items())
-            logger.info(f"ChatAPI.connect_msync: cookies_count={len(cookie_dict)}, keys={list(cookie_dict.keys())}")
-
-            self._msync = MSyncClient(
-                app_key="cx-dev#cxstudy",
-                domain="easemob.com",
-                platform=3,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close,
-                cookies=cookie_str,
-            )
-            self._msync.connect(token=token, username=tuid)
-            return self._msync
-        except Exception as e:
-            logger.exception(f"ChatAPI.connect_msync: 连接失败 - {e}")
-            return None
 
     def disconnect_msync(self):
         """断开 MSync 连接。"""
-        if self._msync:
-            self._msync.disconnect()
-            self._msync = None
+        cls = self.__class__
+        with cls._msync_lock:
+            if cls._msync:
+                cls._msync.disconnect()
+                cls._msync = None
 
     def is_msync_connected(self) -> bool:
         """MSync 是否已连接。"""
-        return self._msync is not None and self._msync.is_connected()
+        cls = self.__class__
+        return cls._msync is not None and cls._msync.is_connected()
+
+    def get_msync_resource(self) -> str:
+        """返回当前 MSync 连接的 resource 标识。"""
+        cls = self.__class__
+        return str(getattr(cls._msync, "_resource", "") or "")
 
     def send_message_msync(self, target_user_id: str, content: str):
         """
@@ -137,10 +209,11 @@ class ChatAPI:
         Returns:
             bool: 是否发送成功
         """
-        if not self._msync or not self._msync.is_connected():
+        cls = self.__class__
+        if not cls._msync or not cls._msync.is_connected():
             return False
         try:
-            self._msync.send_message(to_user=target_user_id, content=content)
+            cls._msync.send_message(to_user=target_user_id, content=content)
             return True
         except Exception as e:
             print(f"ChatAPI.send_message_msync: 发送失败 - {e}")
@@ -148,30 +221,33 @@ class ChatAPI:
 
     def request_history_msync(self, target_user_id: str):
         """通过 MSync 请求会话历史。"""
-        if not self._msync:
+        cls = self.__class__
+        if not cls._msync:
             return False
         try:
-            return bool(self._msync.request_history(target_user_id))
+            return bool(cls._msync.request_history(target_user_id))
         except Exception as e:
             logger.warning(f"ChatAPI.request_history_msync: 请求失败 - {e}")
             return False
 
     def request_history_summary_msync(self, target_user_ids: list[str]):
         """通过 MSync 请求会话列表的历史汇总，用于未读计数。"""
-        if not self._msync:
+        cls = self.__class__
+        if not cls._msync:
             return False
         try:
-            return bool(self._msync.request_history_summary(target_user_ids))
+            return bool(cls._msync.request_history_summary(target_user_ids))
         except Exception as e:
             logger.warning(f"ChatAPI.request_history_summary_msync: 请求失败 - {e}")
             return False
 
     def request_conversation_read_msync(self, target_user_id: str, message_id: str | int):
         """通过 MSync 同步会话已读位置。"""
-        if not self._msync:
+        cls = self.__class__
+        if not cls._msync:
             return False
         try:
-            return bool(self._msync.request_conversation_read(target_user_id, message_id))
+            return bool(cls._msync.request_conversation_read(target_user_id, message_id))
         except Exception as e:
             logger.warning(f"ChatAPI.request_conversation_read_msync: 请求失败 - {e}")
             return False
@@ -233,7 +309,7 @@ class ChatAPI:
                 normalized.append({
                     "person_id": str(member.get("tuid", "") or ""),
                     "name": member.get("name", "未知"),
-                    "student_id": str(member.get("puid", "") or ""),
+                    "student_id": str(member.get("studentId", "") or member.get("student_id", "") or ""),
                     "avatar_url": member.get("pic", "") or "",
                     "tuid": str(member.get("tuid", "") or ""),
                     "puid": str(member.get("puid", "") or ""),

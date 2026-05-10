@@ -18,9 +18,9 @@ class CommunicationManager:
             data_dir: 数据存储目录（默认为配置中的 DATA_DIR）
         """
         if data_dir is None:
-            data_dir = DATA_DIR
+            data_dir = Path(DATA_DIR) / "data"
         self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.data_file = self.data_dir / "communication_status.json"
         self.data: Dict[str, Dict[str, bool]] = {}
         self._load()
@@ -51,14 +51,14 @@ class CommunicationManager:
         """生成存储键。"""
         return f"{course_id}_{class_id}"
     
-    def get_status(self, course_id: str, class_id: str, person_id: int) -> bool:
+    def get_status(self, course_id: str, class_id: str, student_id: str | int) -> bool:
         """
         获取学生的沟通状态。
         
         Args:
             course_id: 课程 ID
             class_id: 班级 ID
-            person_id: 学生 ID
+            student_id: 学号
         
         Returns:
             沟通状态（True: 已沟通, False: 未沟通）
@@ -67,42 +67,46 @@ class CommunicationManager:
         if key not in self.data:
             return False
         
-        person_id_str = str(person_id)
-        return self.data[key].get(person_id_str, False)
+        student_id_str = str(student_id or "").strip()
+        if not student_id_str:
+            return False
+        return self.data[key].get(student_id_str, False)
     
-    def set_status(self, course_id: str, class_id: str, person_id: int, status: bool):
+    def set_status(self, course_id: str, class_id: str, student_id: str | int, status: bool):
         """
         设置学生的沟通状态。
         
         Args:
             course_id: 课程 ID
             class_id: 班级 ID
-            person_id: 学生 ID
+            student_id: 学号
             status: 沟通状态（True: 已沟通, False: 未沟通）
         """
         key = self._get_key(course_id, class_id)
         if key not in self.data:
             self.data[key] = {}
         
-        person_id_str = str(person_id)
-        self.data[key][person_id_str] = status
+        student_id_str = str(student_id or "").strip()
+        if not student_id_str:
+            return
+        self.data[key][student_id_str] = status
         self._save()
     
-    def toggle_status(self, course_id: str, class_id: str, person_id: int) -> bool:
+    def toggle_status(self, course_id: str, class_id: str, student_id: str | int) -> bool:
         """
         切换学生的沟通状态。
         
         Args:
             course_id: 课程 ID
             class_id: 班级 ID
-            person_id: 学生 ID
+            student_id: 学号
         
         Returns:
             切换后的状态
         """
-        current = self.get_status(course_id, class_id, person_id)
+        current = self.get_status(course_id, class_id, student_id)
         new_status = not current
-        self.set_status(course_id, class_id, person_id, new_status)
+        self.set_status(course_id, class_id, student_id, new_status)
         return new_status
     
     def get_all_status(self, course_id: str, class_id: str) -> Dict[str, bool]:

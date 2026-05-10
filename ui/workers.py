@@ -778,9 +778,9 @@ class StartActiveWorker(QThread):
 
 
 class RefreshQRCodeWorker(QThread):
-    """Worker thread to refresh QR code enc string."""
+    """Worker thread to refresh QR code enc/signCode."""
 
-    qrcode_ready = pyqtSignal(bool, str, str)  # success, message, enc
+    qrcode_ready = pyqtSignal(bool, str, str, str)  # success, message, enc, sign_code
 
     def __init__(self, crawler, active_id: str):
         super().__init__()
@@ -789,14 +789,14 @@ class RefreshQRCodeWorker(QThread):
 
     def run(self):
         try:
-            success, message, enc = self.crawler.refresh_qrcode(self.active_id)
-            # 确保 enc 是字符串，避免 pyqtSignal 类型错误
+            success, message, enc, sign_code = self.crawler.refresh_qrcode(self.active_id)
             enc = str(enc) if enc is not None else ""
-            self.qrcode_ready.emit(bool(success), str(message), enc)
+            sign_code = str(sign_code) if sign_code is not None else ""
+            self.qrcode_ready.emit(bool(success), str(message), enc, sign_code)
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
-            self.qrcode_ready.emit(False, f"获取二维码失败: {e}\n{tb}", "")
+            self.qrcode_ready.emit(False, f"获取二维码失败: {e}\n{tb}", "", "")
 
 
 class EndActiveWorker(QThread):

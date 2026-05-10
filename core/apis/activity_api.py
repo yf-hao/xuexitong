@@ -78,19 +78,20 @@ class ActivityAPI:
         """获取投票活动列表。"""
         return self.get_activity_list(activity_type="4")
     
-    def refresh_qrcode(self, active_id: str) -> tuple[bool, str, str]:
+    def refresh_qrcode(self, active_id: str) -> tuple[bool, str, str, str]:
         """
-        刷新签到二维码，获取 enc 字符串。
+        刷新签到二维码，获取 enc 和 signCode。
         
         Args:
             active_id: 活动ID
         
         Returns:
-            (success, message, enc) 元组，enc 用于生成二维码
+            (success, message, enc, sign_code) 元组，用于生成签到二维码
         """
         url = "https://mobilelearn.chaoxing.com/v2/apis/sign/refreshQRCode"
         params = {
             "activeId": active_id,
+            "time": "",
         }
         
         headers = {
@@ -107,12 +108,18 @@ class ActivityAPI:
             
             data = resp.json()
             if data.get("result") == 1:
-                enc = data.get("data") or ""
-                return True, "获取成功", str(enc)
+                payload = data.get("data") or {}
+                if isinstance(payload, dict):
+                    enc = payload.get("enc") or ""
+                    sign_code = payload.get("signCode") or payload.get("signcode") or ""
+                else:
+                    enc = payload or ""
+                    sign_code = ""
+                return True, "获取成功", str(enc), str(sign_code)
             else:
-                return False, data.get("msg", "获取二维码失败"), ""
+                return False, data.get("msg", "获取二维码失败"), "", ""
         except Exception as e:
-            return False, f"网络请求失败: {e}", ""
+            return False, f"网络请求失败: {e}", "", ""
     
     def start_active(self, active_id: str, course_id: str, class_id: str, active_type: int = 2) -> tuple[bool, str, dict]:
         """
