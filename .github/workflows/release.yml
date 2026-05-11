@@ -235,7 +235,7 @@ jobs:
       - name: Build Windows Installer (Inno Setup)
         if: matrix.os == 'windows-latest'
         run: |
-          iscc /dMyAppVersion=${{ needs.check-version.outputs.version }} scripts/setup.iss
+          iscc "-dMyAppVersion=${{ needs.check-version.outputs.version }}" scripts/setup.iss
         shell: bash
 
       - name: Build macOS DMG
