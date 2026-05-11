@@ -52,7 +52,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='XuexitongManager',
+    name='XHelper',
     debug=False,
     strip=False,
     upx=False,              # ← 关键

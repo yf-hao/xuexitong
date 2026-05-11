@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=XuexitongManager
-Comment=学习通教学辅助系统
-Exec=XuexitongManager
+Name=XHelper
+Comment=学习通教学辅助系统 (XHelper)
+Exec=XHelper
 Icon=xuexitong
 Categories=Education;
 Terminal=false

@@ -65,7 +65,10 @@ class KaTeXSnapshotRenderer:
     _KATEX_DIR = os.path.join(BASE_DIR, "assets", "katex")
     _CAPTURE_SCALE = 2
     _shared_view = None
+    _page_ready = False
     _is_initializing = False
+    _render_in_progress = False
+    _render_lock = threading.RLock()
 
     @classmethod
     def _looks_blank(cls, image) -> bool:
@@ -138,12 +141,22 @@ class KaTeXSnapshotRenderer:
     <script src="katex.min.js"></script>
     <script>
         window.checkReady = () => {{
-            return typeof katex !== "undefined";
+            return typeof katex !== "undefined" && !window.__renderBusy;
+        }};
+        window.resetFormula = () => {{
+            const root = document.getElementById("formula");
+            if (root) {{
+                root.innerHTML = "";
+            }}
+            window.__renderError = "";
+            window.__renderBusy = false;
+            return true;
         }};
         window.renderFormula = (expr, displayMode) => {{
             const root = document.getElementById("formula");
             root.innerHTML = "";
             window.__renderError = "";
+            window.__renderBusy = true;
             try {{
                 if (typeof katex === "undefined") {{
                     throw new Error("KaTeX not loaded");
@@ -167,6 +180,8 @@ class KaTeXSnapshotRenderer:
             }} catch (error) {{
                 window.__renderError = error.message || String(error);
                 return {{ ok: false, error: window.__renderError }};
+            }} finally {{
+                window.__renderBusy = false;
             }}
         }};
     </script>
@@ -212,64 +227,130 @@ class KaTeXSnapshotRenderer:
             app = QApplication(argv)
             app.setQuitOnLastWindowClosed(False)
 
-        # 1. Try Shared View (Singleton)
-        try:
-            if cls._shared_view is None:
-                cls._shared_view = QWebEngineView()
-                cls._shared_view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-                cls._shared_view.setZoomFactor(cls._CAPTURE_SCALE)
-                cls._shared_view.page().setBackgroundColor(QColor(255, 255, 255, 255))
-                cls._shared_view.show()
-                cls._is_initializing = True
+        with cls._render_lock:
+            if not cls._ensure_shared_view_ready():
+                return None
 
-                # Load base environment
-                base_html = cls._build_base_html()
-                
-                loop = QEventLoop()
-                cls._shared_view.loadFinished.connect(lambda: loop.quit())
-                # Use setHtml with baseUrl
-                cls._shared_view.setHtml(base_html, QUrl.fromLocalFile(cls._KATEX_DIR + os.sep))
-                QTimer.singleShot(10000, loop.quit)
-                loop.exec()
-                
-                # Additional check for JS readiness
-                for _ in range(50):
-                    if cls._perform_js_check(cls._shared_view, "window.checkReady && window.checkReady()"):
-                        break
-                    loop = QEventLoop()
-                    QTimer.singleShot(200, loop.quit)
-                    loop.exec()
-                
-                cls._is_initializing = False
-
-            # Try rendering with shared view
-            result = cls._perform_render(cls._shared_view, expr, display_mode)
-            if result:
+            result = cls._render_with_shared_view(expr, display_mode)
+            if result is not None:
                 return result
-        except Exception as e:
-            print(f"Shared renderer failed: {e}")
 
-        # 2. Fallback to One-off View (More robust for CI)
+            cls._page_ready = False
+            if not cls._ensure_shared_view_ready():
+                return None
+
+            return cls._render_with_shared_view(expr, display_mode)
+
+    @classmethod
+    def _create_shared_view(cls):
+        view = QWebEngineView()
+        view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        view.setZoomFactor(cls._CAPTURE_SCALE)
+        view.page().setBackgroundColor(QColor(255, 255, 255, 255))
+        view.show()
+        return view
+
+    @classmethod
+    def _reset_shared_view(cls):
+        view = cls._shared_view
+        cls._shared_view = None
+        cls._page_ready = False
+        cls._is_initializing = False
+        cls._render_in_progress = False
+        if view is None:
+            return
         try:
-            temp_view = QWebEngineView()
-            temp_view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-            temp_view.setZoomFactor(cls._CAPTURE_SCALE)
-            temp_view.page().setBackgroundColor(QColor(255, 255, 255, 255))
-            temp_view.show()
-            
-            base_html = cls._build_base_html()
-            loop = QEventLoop()
-            temp_view.loadFinished.connect(lambda: loop.quit())
-            temp_view.setHtml(base_html, QUrl.fromLocalFile(cls._KATEX_DIR + os.sep))
-            QTimer.singleShot(10000, loop.quit)
+            view.hide()
+        except Exception:
+            pass
+        try:
+            view.deleteLater()
+        except Exception:
+            pass
+
+    @classmethod
+    def _wait_for_load_finished(cls, view, timeout_ms: int = 10000, load_action=None) -> bool:
+        loop = QEventLoop()
+        state = {"finished": False}
+
+        def on_finished(_ok=True):
+            state["finished"] = True
+            loop.quit()
+
+        view.loadFinished.connect(on_finished)
+        try:
+            if load_action is not None:
+                load_action()
+            QTimer.singleShot(timeout_ms, loop.quit)
             loop.exec()
-            
-            result = cls._perform_render(temp_view, expr, display_mode)
-            temp_view.deleteLater()
-            return result
-        except Exception as e:
-            print(f"Fallback renderer failed: {e}")
-            return None
+        finally:
+            try:
+                view.loadFinished.disconnect(on_finished)
+            except Exception:
+                pass
+        return state["finished"]
+
+    @classmethod
+    def _load_base_environment(cls, view) -> bool:
+        cls._is_initializing = True
+        try:
+            base_html = cls._build_base_html()
+            if not cls._wait_for_load_finished(
+                view,
+                load_action=lambda: view.setHtml(base_html, QUrl.fromLocalFile(cls._KATEX_DIR + os.sep)),
+            ):
+                return False
+
+            for _ in range(50):
+                if cls._is_view_ready(view):
+                    return True
+                loop = QEventLoop()
+                QTimer.singleShot(200, loop.quit)
+                loop.exec()
+            return False
+        finally:
+            cls._is_initializing = False
+
+    @classmethod
+    def _is_view_ready(cls, view) -> bool:
+        return bool(cls._perform_js_check(view, "window.checkReady && window.checkReady()"))
+
+    @classmethod
+    def _ensure_shared_view_ready(cls) -> bool:
+        if cls._shared_view is None:
+            cls._shared_view = cls._create_shared_view()
+
+        if cls._page_ready and cls._is_view_ready(cls._shared_view):
+            return True
+
+        cls._page_ready = False
+        if not cls._load_base_environment(cls._shared_view):
+            cls._reset_shared_view()
+            return False
+
+        cls._page_ready = cls._is_view_ready(cls._shared_view)
+        if not cls._page_ready:
+            cls._reset_shared_view()
+        return cls._page_ready
+
+    @classmethod
+    def _finalize_shared_render(cls, keep_ready: bool):
+        cls._render_in_progress = False
+        if cls._shared_view is None:
+            cls._page_ready = False
+            return
+
+        cls._perform_js_check(cls._shared_view, "window.resetFormula && window.resetFormula()")
+        if not keep_ready or not cls._is_view_ready(cls._shared_view):
+            cls._page_ready = False
+
+    @classmethod
+    def _render_with_shared_view(cls, expr: str, display_mode: bool = False) -> tuple[bytes, int, int] | None:
+        cls._render_in_progress = True
+        try:
+            return cls._perform_render(cls._shared_view, expr, display_mode)
+        finally:
+            cls._finalize_shared_render(keep_ready=True)
 
     @classmethod
     def _perform_js_check(cls, view, script):

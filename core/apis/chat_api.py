@@ -467,12 +467,7 @@ class ChatAPI:
 
     # ── 发送消息 ──
 
-    def _get_im_profile(self, tuid: str, puid: str, token: str):
-        """获取当前 IM 用户资料，至少包含 name/icon。"""
-        cached = self.session_manager.course_params.get("im_my_info")
-        if isinstance(cached, dict) and cached.get("name"):
-            return cached
-
+    def _fetch_im_user_info(self, target_tuid: str, puid: str, token: str):
         try:
             url = "https://im.chaoxing.com/webim/user/getUserInfoByTuid"
             headers = {
@@ -486,7 +481,7 @@ class ChatAPI:
                 "X-Requested-With": "XMLHttpRequest",
             }
             data = {
-                "tuid": tuid,
+                "tuid": target_tuid,
                 "puid": puid,
                 "token": token,
             }
@@ -498,17 +493,46 @@ class ChatAPI:
             info = result.get("data", result) if isinstance(result, dict) else {}
             if not isinstance(info, dict):
                 return {}
-
-            profile = {
-                "name": info.get("name") or info.get("userName") or info.get("nickName") or "",
-                "icon": info.get("icon") or info.get("pic") or info.get("picUrl") or "",
-            }
-            if profile["name"] or profile["icon"]:
-                self.session_manager.course_params["im_my_info"] = profile
-            return profile
         except Exception as e:
-            logger.warning(f"ChatAPI._get_im_profile: 获取失败 - {e}")
+            logger.warning(f"ChatAPI._fetch_im_user_info: 获取失败 - {e}")
             return {}
+
+        return {
+            "name": info.get("name") or info.get("userName") or info.get("nickName") or "",
+            "icon": info.get("icon") or info.get("pic") or info.get("picUrl") or "",
+        }
+
+    def _get_im_profile(self, tuid: str, puid: str, token: str):
+        """获取当前 IM 用户资料，至少包含 name/icon。"""
+        cached = self.session_manager.course_params.get("im_my_info")
+        if isinstance(cached, dict) and cached.get("name"):
+            return cached
+
+        profile = self._fetch_im_user_info(tuid, puid, token)
+        if profile.get("name") or profile.get("icon"):
+            self.session_manager.course_params["im_my_info"] = profile
+        return profile
+
+    def get_im_user_info_by_tuid(self, target_tuid: str, puid=None, token=None):
+        """按 tuid 获取任意 IM 用户资料，结果会缓存在当前会话。"""
+        target_tuid = str(target_tuid or "").strip()
+        if not target_tuid:
+            return {}
+
+        params = self._resolve_im_params(tuid=None, puid=puid, token=token)
+        if not params:
+            return {}
+
+        course_params = self.session_manager.course_params
+        cache = course_params.setdefault("im_user_info_cache", {})
+        cached = cache.get(target_tuid)
+        if isinstance(cached, dict) and (cached.get("name") or cached.get("icon")):
+            return cached
+
+        profile = self._fetch_im_user_info(target_tuid, params["puid"], params["token"])
+        if profile.get("name") or profile.get("icon"):
+            cache[target_tuid] = profile
+        return profile
 
     def _build_hx_msg_id(self) -> str:
         """构造浏览器风格的纯数字 hxMsgId。"""
@@ -766,3 +790,40 @@ class ChatAPI:
         except Exception as e:
             logger.exception(f"ChatAPI.get_message_list: 获取失败 - {e}")
             return []
+
+    def refresh_msync_info(self):
+        """请求 SockJS ws/info 握手信息。"""
+        try:
+            url = "https://im-api-vip6-v2.easecdn.com/ws/info"
+            headers = {
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
+                "Cache-Control": "no-cache",
+                "Origin": "https://im.chaoxing.com",
+                "Pragma": "no-cache",
+                "Priority": "u=1, i",
+                "Referer": "https://im.chaoxing.com/",
+                "Sec-CH-UA": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+                "Sec-CH-UA-Mobile": "?0",
+                "Sec-CH-UA-Platform": '"macOS"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site",
+                "Sec-Fetch-Storage-Access": "active",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+            }
+            resp = self.session.get(
+                url,
+                params={"t": str(int(time.time() * 1000))},
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                logger.warning("ChatAPI.refresh_msync_info: status=%s", resp.status_code)
+                return {}
+            result = resp.json()
+            return result if isinstance(result, dict) else {}
+        except Exception as e:
+            logger.warning(f"ChatAPI.refresh_msync_info: 请求失败 - {e}")
+            return {}

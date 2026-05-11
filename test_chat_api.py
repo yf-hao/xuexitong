@@ -10,9 +10,11 @@ from PyQt6.QtCore import Qt
 
 from core.apis.chat_api import ChatAPI
 from core.apis.activity_api import ActivityAPI
+from core.apis.question_bank_api import QuestionBankAPI
 from core.apis.teacher_api import TeacherAPI
 from core.communication_manager import CommunicationManager
 from core.group_members_cache import build_group_members_cache_path, resolve_student_from_group_cache
+from core.rendering.katex_snapshot import KaTeXSnapshotRenderer
 from core.msync_client import (
     MSyncClient,
     build_conversation_read,
@@ -29,7 +31,7 @@ from core.msync_client import (
 )
 from ui.views.chat_view import ChatView
 from ui.views.activities_view import ActivitiesView
-from ui.views.study_status_view import StudyStatusView
+from ui.views.study_status_view import StudyStatusView, NumericTableWidgetItem
 from ui.dialogs.absence_stats_dialog import AbsenceStatsDialog
 from ui.dialogs.homework_reminder_dialog import DEFAULT_ABSENCE_REMINDER_TEMPLATE, DEFAULT_HOMEWORK_REMINDER_TEMPLATE
 from ui.dialogs.qrcode_dialog import QRCodeDialog
@@ -103,6 +105,19 @@ class _FakeChatAPI(ChatAPI):
     def send_message_msync(self, target_chat_id: str, content: str):
         self._last_msync_target = target_chat_id
         return self._send_ok
+
+
+class _FakeQuestionBankAPI(QuestionBankAPI):
+    def __init__(self, session, course_params=None):
+        self._session = session
+        self.session_manager = SimpleNamespace(course_params=course_params or {})
+
+    @property
+    def session(self):
+        return self._session
+
+    def upload_cover_image(self, path, upload_variant="question"):
+        return {"success": True, "url": f"https://img.example/{Path(path).name}"}
 
 
 class _FakeCrawlerForView:
@@ -783,6 +798,41 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(row_updates[0][0], "306927744647171")
         self.assertEqual(row_updates[0][1], "306927744647171")
 
+    def test_chat_view_store_class_info_metadata_can_skip_avatar_updates(self):
+        row_updates = []
+        view = SimpleNamespace(
+            _session_meta_by_peer={},
+            _history_id_by_peer={},
+            _unread_count_by_peer={},
+            _raw_sessions=[{
+                "chatId": "358566558",
+                "chatName": "离散数学（2025-2026-2）",
+                "chatIco": "https://photo.example/original.png",
+            }],
+        )
+        view._resolve_session_peer_id = lambda session: str(session.get("chatId", "") or "")
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._merge_session_metadata = lambda session: ChatView._merge_session_metadata(view, session)
+        view._update_session_row = lambda peer_id="", history_id="", session=None: row_updates.append((peer_id, history_id, session))
+
+        changed = ChatView._store_class_info_metadata(
+            view,
+            "358566558",
+            {
+                "chat_id": "306927744647171",
+                "class_name": "4.01计科3班、4班",
+                "course_name": "离散数学（2025-2026-2）",
+                "image_url": "https://photo.example/group.png",
+            },
+            allow_avatar_update=False,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(view._raw_sessions[0]["chatIco"], "https://photo.example/original.png")
+        self.assertNotIn("chatIco", view._session_meta_by_peer["358566558"])
+
     def test_chat_view_store_class_info_metadata_carries_unread_count_to_chat_id(self):
         view = SimpleNamespace(
             _session_meta_by_peer={},
@@ -886,6 +936,99 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(view._unread_count_by_peer["358566558"], 0)
         self.assertEqual(row_updates, [])
 
+    def test_chat_view_realtime_row_update_preserves_existing_avatar_widget(self):
+        class _FakeItem:
+            def __init__(self):
+                self._data = {}
+                self.size_hint = None
+
+            def data(self, role):
+                return self._data.get(role)
+
+            def setData(self, role, value):
+                self._data[role] = value
+
+            def setSizeHint(self, size_hint):
+                self.size_hint = size_hint
+
+        class _FakeWidget:
+            def __init__(self):
+                self.updated = []
+
+            def update_display(self, name, time_str="", subtitle="", unread_count=0, session=None):
+                self.updated.append({
+                    "name": name,
+                    "time_str": time_str,
+                    "subtitle": subtitle,
+                    "unread_count": unread_count,
+                    "session": session,
+                })
+
+            def sizeHint(self):
+                return "existing-size"
+
+        class _FakeListWidget:
+            def __init__(self, item, widget):
+                self._item = item
+                self._widget = widget
+                self.replaced = []
+
+            def count(self):
+                return 1
+
+            def item(self, index):
+                return self._item if index == 0 else None
+
+            def itemWidget(self, item):
+                return self._widget if item is self._item else None
+
+            def setItemWidget(self, item, widget):
+                self.replaced.append((item, widget))
+
+        item = _FakeItem()
+        item.setData(Qt.ItemDataRole.UserRole, "peer-1")
+        item.setData(Qt.ItemDataRole.UserRole + 3, "history-1")
+        existing_widget = _FakeWidget()
+        list_widget = _FakeListWidget(item, existing_widget)
+        built_widget = SimpleNamespace(
+            time_label=SimpleNamespace(text=lambda: "15:43"),
+            sizeHint=lambda: "built-size",
+        )
+        built_session = {"chatId": "history-1", "chatName": "张三", "subtitle": "4.01计科3班", "updateTime": 123}
+        view = SimpleNamespace(
+            chat_list=list_widget,
+            _suppress_avatar_refresh=True,
+        )
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._build_session_item_components = lambda session: (
+            built_session,
+            built_widget,
+            "peer-1",
+            "张三",
+            "history-1",
+            2,
+            "https://photo.example/avatar.png",
+        )
+
+        updated = ChatView._update_session_row(view, "peer-1", "history-1", session=built_session)
+
+        self.assertTrue(updated)
+        self.assertEqual(item.data(Qt.ItemDataRole.UserRole + 1), "张三")
+        self.assertEqual(item.data(Qt.ItemDataRole.UserRole + 2), built_session)
+        self.assertEqual(item.data(Qt.ItemDataRole.UserRole + 4), 2)
+        self.assertEqual(item.size_hint, "existing-size")
+        self.assertEqual(list_widget.replaced, [])
+        self.assertEqual(
+            existing_widget.updated,
+            [{
+                "name": "张三",
+                "time_str": "15:43",
+                "subtitle": "4.01计科3班",
+                "unread_count": 2,
+                "session": built_session,
+            }],
+        )
+
     def test_chat_view_resolve_session_peer_id_uses_history_mapping_for_groups(self):
         view = SimpleNamespace(
             _history_id_by_peer={"358566558": "306927744647171"},
@@ -945,7 +1088,24 @@ class ChatAPITests(unittest.TestCase):
 
         self.assertEqual(history_id, "306927744647171")
 
-    def test_chat_view_on_read_ack_updates_unread_count(self):
+    def test_chat_view_resolve_history_key_candidates_prefers_history_keys_before_peer(self):
+        view = SimpleNamespace(
+            _history_id_by_peer={"358566558": "306927744647171"},
+            _session_meta_by_peer={"358566558": {"chatId": "306927744647171"}},
+        )
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._resolve_peer_id_by_history_id = lambda history_id: ChatView._resolve_peer_id_by_history_id(view, history_id)
+
+        candidates = ChatView._resolve_history_key_candidates(
+            view,
+            session={"chatId": "358566558", "_historyKey": "100+chat-1"},
+            peer_id="358566558",
+            history_id="358566558",
+        )
+
+        self.assertEqual(candidates, ["100+chat-1", "306927744647171", "358566558"])
+
+    def test_chat_view_on_read_ack_does_not_update_unread_count(self):
         row_updates = []
         view = SimpleNamespace(
             _pending_read_acks={},
@@ -970,8 +1130,52 @@ class ChatAPITests(unittest.TestCase):
         )
 
         self.assertEqual(view._pending_read_acks["1549287205527104536"], 1778286337275)
-        self.assertEqual(view._unread_count_by_peer["25278974"], 1)
-        self.assertEqual(row_updates, [("25278974/webim_1778286327053", "25278974", 1)])
+        self.assertEqual(view._unread_count_by_peer, {})
+        self.assertEqual(row_updates, [])
+
+    def test_chat_view_on_read_ack_marks_self_messages_read_by_conversation_when_id_differs(self):
+        rendered = []
+        view = SimpleNamespace(
+            _pending_read_acks={},
+            _history_id_by_peer={"358572378": "history-1"},
+            _unread_count_by_peer={},
+            _message_cache={
+                "history-1": [
+                    {
+                        "sender_id": "25278974",
+                        "sender_name": "我",
+                        "content": "hello",
+                        "is_self": True,
+                        "timestamp": 1000,
+                        "message_id": "",
+                        "read_state": "unread",
+                        "read_at": 0,
+                    }
+                ]
+            },
+            _current_target_id="358572378",
+            _current_history_id="history-1",
+            _current_target_name="张三",
+            _current_session_display_name="张三",
+        )
+        view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._mark_previous_self_messages_read = lambda conversation_key, read_at=0: ChatView._mark_previous_self_messages_read(view, conversation_key, read_at)
+        view._render_cached_messages = lambda conversation_key=None: rendered.append(conversation_key)
+        view._update_session_unread_row = lambda peer_id="", history_id="", unread_count=0: None
+
+        ChatView._on_read_ack(
+            view,
+            {
+                "message_id": "1549287205527104536",
+                "timestamp": 1778286337275,
+                "peer_id": "358572378",
+            },
+        )
+
+        self.assertEqual(view._message_cache["history-1"][0]["read_state"], "read")
+        self.assertEqual(view._message_cache["history-1"][0]["read_at"], 1778286337275)
+        self.assertEqual(rendered, ["history-1"])
 
     def test_chat_view_clear_current_unread_count_updates_row_without_refresh(self):
         row_updates = []
@@ -1087,6 +1291,109 @@ class ChatAPITests(unittest.TestCase):
                 "limit": "20",
             },
         )
+
+    def test_add_question_renders_sum_formula_option_without_float_resize_error(self):
+        session = _FakeSession(_FakeResponse(payload={"status": True, "msg": "ok", "id": "q1"}))
+        api = _FakeQuestionBankAPI(
+            session,
+            course_params={"courseid": "course-1", "clazzid": "class-1", "cpi": "cpi-1"},
+        )
+
+        with patch("core.rendering.katex_snapshot.KaTeXSnapshotRenderer.render_to_png", return_value=None):
+            result = api.add_question(
+                "folder-1",
+                {
+                    "content": "在无向图中，握手定理的公式是？",
+                    "q_type": 0,
+                    "options": [
+                        {"key": "A", "value": "$∑d(v_i)=m$"},
+                        {"key": "B", "value": "$∑d(v_i)=2m$"},
+                    ],
+                    "answer": "B",
+                    "analysis": "",
+                },
+            )
+
+        self.assertTrue(result["success"])
+        self.assertIn("<img", session.calls[0]["data"]["A"])
+        self.assertNotIn("$", session.calls[0]["data"]["A"])
+
+    def test_katex_snapshot_reset_shared_view_clears_renderer_state(self):
+        class _FakeView:
+            def __init__(self):
+                self.hidden = 0
+                self.deleted = 0
+
+            def hide(self):
+                self.hidden += 1
+
+            def deleteLater(self):
+                self.deleted += 1
+
+        fake_view = _FakeView()
+        old_state = (
+            KaTeXSnapshotRenderer._shared_view,
+            KaTeXSnapshotRenderer._page_ready,
+            KaTeXSnapshotRenderer._is_initializing,
+            KaTeXSnapshotRenderer._render_in_progress,
+        )
+        try:
+            KaTeXSnapshotRenderer._shared_view = fake_view
+            KaTeXSnapshotRenderer._page_ready = True
+            KaTeXSnapshotRenderer._is_initializing = True
+            KaTeXSnapshotRenderer._render_in_progress = True
+
+            KaTeXSnapshotRenderer._reset_shared_view()
+
+            self.assertIsNone(KaTeXSnapshotRenderer._shared_view)
+            self.assertFalse(KaTeXSnapshotRenderer._page_ready)
+            self.assertFalse(KaTeXSnapshotRenderer._is_initializing)
+            self.assertFalse(KaTeXSnapshotRenderer._render_in_progress)
+            self.assertEqual(fake_view.hidden, 1)
+            self.assertEqual(fake_view.deleted, 1)
+        finally:
+            (
+                KaTeXSnapshotRenderer._shared_view,
+                KaTeXSnapshotRenderer._page_ready,
+                KaTeXSnapshotRenderer._is_initializing,
+                KaTeXSnapshotRenderer._render_in_progress,
+            ) = old_state
+
+    def test_katex_snapshot_renderer_reloads_shared_page_after_failed_render(self):
+        old_state = (
+            KaTeXSnapshotRenderer._shared_view,
+            KaTeXSnapshotRenderer._page_ready,
+            KaTeXSnapshotRenderer._is_initializing,
+            KaTeXSnapshotRenderer._render_in_progress,
+        )
+        try:
+            KaTeXSnapshotRenderer._shared_view = object()
+            KaTeXSnapshotRenderer._page_ready = True
+            KaTeXSnapshotRenderer._is_initializing = False
+            KaTeXSnapshotRenderer._render_in_progress = False
+
+            fake_app = SimpleNamespace(processEvents=lambda: None)
+            def _ensure_ready():
+                KaTeXSnapshotRenderer._page_ready = True
+                return True
+
+            with patch("core.rendering.katex_snapshot.QApplication.instance", return_value=fake_app), \
+                 patch.object(KaTeXSnapshotRenderer, "_ensure_shared_view_ready", side_effect=_ensure_ready) as ensure_mock, \
+                 patch.object(KaTeXSnapshotRenderer, "_render_with_shared_view", side_effect=[None, (b'png', 12, 8)]) as render_mock:
+                result = KaTeXSnapshotRenderer._render_to_png_in_gui_thread("x^2", display_mode=False)
+
+            self.assertEqual(result, (b'png', 12, 8))
+            self.assertEqual(ensure_mock.call_count, 2)
+            self.assertEqual(render_mock.call_count, 2)
+            self.assertTrue(KaTeXSnapshotRenderer._page_ready)
+            self.assertFalse(KaTeXSnapshotRenderer._render_in_progress)
+        finally:
+            (
+                KaTeXSnapshotRenderer._shared_view,
+                KaTeXSnapshotRenderer._page_ready,
+                KaTeXSnapshotRenderer._is_initializing,
+                KaTeXSnapshotRenderer._render_in_progress,
+            ) = old_state
 
     def test_get_history_messages_returns_empty_on_api_error(self):
         response = _FakeResponse(payload={"status": "fail", "msg": "bad token"})
@@ -2155,6 +2462,51 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(view.current_class_id, "class-1")
         self.assertEqual(view.current_class_name, "4.01计科3班、4班")
 
+    def test_numeric_table_widget_item_sorts_by_number_not_text(self):
+        high = NumericTableWidgetItem("100.00", 100.0)
+        low = NumericTableWidgetItem("9.50", 9.5)
+
+        self.assertFalse(high < low)
+        self.assertTrue(low < high)
+
+    def test_study_status_quiz_shows_development_placeholder(self):
+        placeholders = []
+        statuses = []
+        highlighted = []
+        button = object()
+        view = SimpleNamespace(
+            _highlight_button=lambda current: highlighted.append(current),
+            btn_quiz=button,
+            status_update=SimpleNamespace(emit=lambda text: statuses.append(text)),
+            _show_placeholder=lambda text: placeholders.append(text),
+        )
+
+        StudyStatusView.on_quiz_clicked(view)
+
+        self.assertEqual(view.last_sub, "quiz")
+        self.assertEqual(highlighted, [button])
+        self.assertEqual(statuses, ["测验情况功能开发中"])
+        self.assertEqual(placeholders, ["🚧 测验情况功能开发中，敬请期待"])
+
+    def test_study_status_midterm_shows_development_placeholder(self):
+        placeholders = []
+        statuses = []
+        highlighted = []
+        button = object()
+        view = SimpleNamespace(
+            _highlight_button=lambda current: highlighted.append(current),
+            btn_midterm=button,
+            status_update=SimpleNamespace(emit=lambda text: statuses.append(text)),
+            _show_placeholder=lambda text: placeholders.append(text),
+        )
+
+        StudyStatusView.on_midterm_clicked(view)
+
+        self.assertEqual(view.last_sub, "midterm")
+        self.assertEqual(highlighted, [button])
+        self.assertEqual(statuses, ["期中考试功能开发中"])
+        self.assertEqual(placeholders, ["🚧 期中考试功能开发中，敬请期待"])
+
     def test_assign_clazz_to_teachers_uses_update_classassign_endpoint(self):
         class _FakeTeacherAPI(TeacherAPI):
             def __init__(self):
@@ -2338,6 +2690,85 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(sessions[0]["courseName"], "离散数学（2025-2026-2）")
         self.assertNotIn("subtitle", sessions[1])
 
+    def test_refresh_msync_info_calls_ws_info_endpoint(self):
+        response = _FakeResponse(payload={"websocket": True, "cookie_needed": False})
+        session = _FakeSession(response)
+        api = _FakeChatAPI(session)
+
+        with patch("core.apis.chat_api.time.time", return_value=1778483983.012):
+            result = api.refresh_msync_info()
+
+        self.assertEqual(result, {"websocket": True, "cookie_needed": False})
+        self.assertEqual(session.calls[0]["url"], "https://im-api-vip6-v2.easecdn.com/ws/info")
+        self.assertEqual(session.calls[0]["params"], {"t": "1778483983012"})
+
+    def test_chat_view_refresh_message_tab_calls_ws_info_and_reload(self):
+        calls = []
+        view = SimpleNamespace(
+            _message_refreshing=False,
+            crawler=SimpleNamespace(refresh_msync_info=lambda: calls.append("ws_info")),
+            message_refresh_btn=SimpleNamespace(
+                setEnabled=lambda enabled: calls.append(("enabled", enabled)),
+                setText=lambda text: calls.append(("text", text)),
+            ),
+            loading_hint=SimpleNamespace(
+                setText=lambda text: calls.append(("hint", text)),
+                show=lambda: calls.append("show_hint"),
+            ),
+            _load_message_list=lambda: calls.append("load_list"),
+            _ensure_msync_connected=lambda: calls.append("ensure_msync"),
+        )
+
+        ChatView._refresh_message_tab(view)
+
+        self.assertEqual(
+            calls,
+            [
+                ("enabled", False),
+                ("text", "刷新中"),
+                ("hint", "正在刷新消息连接..."),
+                "show_hint",
+                "ws_info",
+                ("enabled", True),
+                ("text", "刷新"),
+                "load_list",
+                "ensure_msync",
+            ],
+        )
+
+    def test_chat_view_auto_refresh_message_tab_skips_loading_hint(self):
+        calls = []
+        view = SimpleNamespace(
+            _message_refreshing=False,
+            crawler=SimpleNamespace(refresh_msync_info=lambda: calls.append("ws_info")),
+            message_refresh_btn=SimpleNamespace(
+                setEnabled=lambda enabled: calls.append(("enabled", enabled)),
+                setText=lambda text: calls.append(("text", text)),
+            ),
+            loading_hint=SimpleNamespace(
+                setText=lambda text: calls.append(("hint", text)),
+                show=lambda: calls.append("show_hint"),
+            ),
+            _load_message_list=lambda: calls.append("load_list"),
+            _ensure_msync_connected=lambda: calls.append("ensure_msync"),
+        )
+
+        ChatView._refresh_message_tab(view, auto_triggered=True)
+
+        self.assertEqual(calls, ["ws_info", "ensure_msync"])
+
+    def test_chat_view_refresh_message_tab_after_realtime_retries_when_busy(self):
+        calls = []
+        view = SimpleNamespace(
+            _message_refreshing=True,
+            _message_worker=SimpleNamespace(isRunning=lambda: False),
+            _message_auto_refresh_timer=SimpleNamespace(start=lambda delay: calls.append(("timer", delay))),
+        )
+
+        ChatView._refresh_message_tab_after_realtime(view)
+
+        self.assertEqual(calls, [("timer", 400)])
+
     def test_add_message_history_matches_browser_payload_shape(self):
         response = [
             _FakeResponse(payload={"data": {"name": "郝玉锋", "icon": "http://photo.example/avatar.png"}}),
@@ -2412,6 +2843,21 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(api._last_msync_target, "peer-123")
         self.assertEqual(session.calls[1]["data"]["chatManId"], "chat-456")
+
+    def test_get_im_user_info_by_tuid_uses_cache_after_first_lookup(self):
+        session = _FakeSession(_FakeResponse(payload={"data": {"name": "张三", "icon": "http://photo.example/a.png"}}))
+        api = _FakeChatAPI(
+            session,
+            course_params={"im_tuid": "100", "im_puid": "200", "im_token": "token-1"},
+        )
+
+        first = api.get_im_user_info_by_tuid("358572378")
+        second = api.get_im_user_info_by_tuid("358572378")
+
+        self.assertEqual(first["name"], "张三")
+        self.assertEqual(second["name"], "张三")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(api.session_manager.course_params["im_user_info_cache"]["358572378"]["name"], "张三")
 
     def test_connect_msync_reuses_running_client(self):
         session = _FakeSession(_FakeResponse(payload={}))
@@ -2516,6 +2962,43 @@ class ChatAPITests(unittest.TestCase):
 
         self.assertEqual(requested, [["358566558", "358574049"]])
 
+    def test_chat_view_startup_badge_gate_waits_for_messages_and_msync(self):
+        enabled = []
+        refreshed = []
+        stopped = []
+        view = SimpleNamespace(
+            _startup_badge_gate_active=True,
+            _startup_badge_gate_completed=False,
+            _startup_messages_loaded=True,
+            _startup_msync_ready=False,
+            _raw_sessions=[{"chatId": "358566558"}],
+            chat_list=SimpleNamespace(setEnabled=lambda value: enabled.append(value)),
+            _startup_badge_gate_timer=SimpleNamespace(stop=lambda: stopped.append(True)),
+        )
+        view._refresh_session_list = lambda sessions=None: refreshed.append(sessions)
+
+        first = ChatView._finish_startup_badge_gate(view)
+        view._startup_msync_ready = True
+        second = ChatView._finish_startup_badge_gate(view)
+
+        self.assertFalse(first)
+        self.assertTrue(second)
+        self.assertFalse(view._startup_badge_gate_active)
+        self.assertTrue(view._startup_badge_gate_completed)
+        self.assertEqual(enabled, [True])
+        self.assertEqual(refreshed, [None])
+        self.assertEqual(stopped, [True])
+
+    def test_chat_view_display_unread_count_hides_badge_until_startup_gate_finishes(self):
+        view = SimpleNamespace(_startup_badge_gate_active=True)
+
+        hidden = ChatView._display_unread_count(view, 3)
+        view._startup_badge_gate_active = False
+        shown = ChatView._display_unread_count(view, 3)
+
+        self.assertEqual(hidden, 0)
+        self.assertEqual(shown, 3)
+
     def test_chat_view_sync_conversation_read_state_uses_latest_cached_message(self):
         requested = []
         view = SimpleNamespace(
@@ -2599,6 +3082,435 @@ class ChatAPITests(unittest.TestCase):
         self.assertTrue(created[0].started)
         self.assertIs(view._history_worker, created[0])
 
+    def test_chat_view_history_load_waits_for_msync_before_showing_empty(self):
+        ensured = []
+        cleared = []
+        placeholders = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(is_msync_connected=lambda: False),
+            _current_target_id="358566558",
+            _current_target_name="张三",
+            _current_history_id="bad-chat",
+            _current_history_candidates=["bad-chat"],
+            _history_attempted_keys={"bad-chat"},
+            _message_cache={},
+            _last_send_error="",
+            _msync_connecting=True,
+            _current_history_empty_retry_done=False,
+            _current_history_post_connect_retry_done=False,
+            _pending_history_retry_after_connect=False,
+            chat_messages=SimpleNamespace(
+                clear=lambda: cleared.append(True),
+                setPlaceholderText=lambda text: placeholders.append(text),
+            ),
+        )
+        view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+        view._normalize_history_messages = lambda messages: []
+        view._try_fallback_history_key = lambda failed_history_id, limit=200: False
+        view._delay_empty_history_resolution = lambda history_id, limit=200: ChatView._delay_empty_history_resolution(view, history_id, limit)
+        view._ensure_msync_connected = lambda: ensured.append(True)
+        view.append_message = lambda sender, text, is_self=False, status_text="": None
+
+        ChatView._on_history_loaded(view, "bad-chat", [])
+
+        self.assertEqual(cleared, [])
+        self.assertEqual(placeholders, [])
+        self.assertEqual(ensured, [True])
+        self.assertTrue(view._pending_history_retry_after_connect)
+
+    def test_chat_view_ignores_stale_history_response_from_previous_open_generation(self):
+        cleared = []
+        placeholders = []
+        rendered = []
+        view = SimpleNamespace(
+            _current_target_id="358566558",
+            _current_target_name="张三",
+            _current_history_id="same-chat",
+            _current_history_candidates=["same-chat"],
+            _history_attempted_keys={"same-chat"},
+            _history_load_generation=3,
+            _message_cache={},
+            _last_send_error="",
+            chat_messages=SimpleNamespace(
+                clear=lambda: cleared.append(True),
+                setPlaceholderText=lambda text: placeholders.append(text),
+            ),
+        )
+        view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+        view._normalize_history_messages = lambda messages: []
+        view._try_fallback_history_key = lambda failed_history_id, limit=200: False
+        view._delay_empty_history_resolution = lambda history_id, limit=200: False
+        view._render_cached_messages = lambda conversation_key=None: rendered.append(conversation_key)
+        view._sync_conversation_read_state = lambda peer_id=None, history_id=None, message_id="": None
+        view.append_message = lambda sender, text, is_self=False, status_text="": None
+
+        ChatView._on_history_loaded(view, "same-chat", [], load_generation=2)
+
+        self.assertEqual(cleared, [])
+        self.assertEqual(placeholders, [])
+        self.assertEqual(rendered, [])
+
+    def test_chat_view_history_load_falls_back_to_next_candidate_when_primary_is_empty(self):
+        loads = []
+        cleared = []
+        placeholders = []
+        view = SimpleNamespace(
+            _current_target_id="358566558",
+            _current_target_name="张三",
+            _current_history_id="bad-chat",
+            _current_history_candidates=["bad-chat", "good-chat"],
+            _history_attempted_keys={"bad-chat"},
+            _message_cache={},
+            _last_send_error="",
+            chat_messages=SimpleNamespace(
+                clear=lambda: cleared.append(True),
+                setPlaceholderText=lambda text: placeholders.append(text),
+            ),
+        )
+        view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+        view._normalize_history_messages = lambda messages: []
+        view._try_fallback_history_key = lambda failed_history_id, limit=200: ChatView._try_fallback_history_key(view, failed_history_id, limit)
+        view._load_current_chat_history = lambda limit=200, history_id=None: loads.append((limit, history_id or view._current_history_id))
+        view.append_message = lambda sender, text, is_self=False, status_text="": None
+
+        ChatView._on_history_loaded(view, "bad-chat", [])
+
+        self.assertEqual(view._current_history_id, "good-chat")
+        self.assertEqual(loads, [(200, "good-chat")])
+        self.assertEqual(cleared, [])
+        self.assertEqual(placeholders, [])
+
+    def test_chat_view_ensure_msync_connected_retries_current_history_after_connect(self):
+        requested = []
+        retried = []
+
+        class _Crawler:
+            def __init__(self):
+                self.connected = False
+
+            def is_msync_connected(self):
+                return self.connected
+
+            def connect_msync(self, on_message=None, on_error=None, on_close=None, listener_key=None):
+                self.connected = True
+                return SimpleNamespace()
+
+            def request_history_summary_msync(self, peer_ids):
+                return True
+
+            def request_history_msync(self, peer_id):
+                requested.append(peer_id)
+                return True
+
+        def _make_thread(target=None, name=None, daemon=None):
+            return SimpleNamespace(start=lambda: target())
+
+        with patch("ui.views.chat_view.threading.Thread", side_effect=_make_thread), \
+             patch.object(ChatView, "_retry_current_chat_history", side_effect=lambda view, limit=200, force=False, request_realtime=True: retried.append((limit, force, request_realtime)) or True):
+            view = SimpleNamespace(
+                crawler=_Crawler(),
+                _msync_connecting=False,
+                _msync_connect_lock=threading.Lock(),
+                _current_target_id="358566558",
+                _current_history_id="bad-chat",
+                _current_history_post_connect_retry_done=False,
+                _pending_history_retry_after_connect=True,
+                _raw_sessions=[],
+            )
+            view.msync_message_received = SimpleNamespace(emit=lambda msg: None)
+            view._request_unread_summary = lambda sessions: None
+            view._sync_conversation_read_state = lambda: None
+
+            ChatView._ensure_msync_connected(view)
+
+        self.assertEqual(requested, ["358566558"])
+        self.assertEqual(retried, [(200, True, False)])
+        self.assertTrue(view._current_history_post_connect_retry_done)
+        self.assertFalse(view._pending_history_retry_after_connect)
+
+    def test_chat_view_request_history_sync_throttles_same_target_briefly(self):
+        requested = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(request_history_msync=lambda peer_id: requested.append(peer_id) or True),
+            _history_id_by_peer={},
+            _last_history_request_at={},
+        )
+        view._resolve_active_peer_id = lambda peer_id="", history_id="": ChatView._resolve_active_peer_id(view, peer_id, history_id)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._resolve_peer_id_by_history_id = lambda history_id: ChatView._resolve_peer_id_by_history_id(view, history_id)
+
+        with patch("ui.views.chat_view.time.monotonic", side_effect=[100.0, 100.2, 101.3]):
+            first = ChatView._request_history_sync(view, "358566558")
+            second = ChatView._request_history_sync(view, "358566558")
+            third = ChatView._request_history_sync(view, "358566558")
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertTrue(third)
+        self.assertEqual(requested, ["358566558", "358566558"])
+
+    def test_chat_view_ensure_msync_connected_skips_duplicate_recent_history_request(self):
+        requested = []
+
+        class _Crawler:
+            def __init__(self):
+                self.connected = False
+
+            def is_msync_connected(self):
+                return self.connected
+
+            def connect_msync(self, on_message=None, on_error=None, on_close=None, listener_key=None):
+                self.connected = True
+                return SimpleNamespace()
+
+            def request_history_msync(self, peer_id):
+                requested.append(peer_id)
+                return True
+
+        def _make_thread(target=None, name=None, daemon=None):
+            return SimpleNamespace(start=lambda: target())
+
+        with patch("ui.views.chat_view.threading.Thread", side_effect=_make_thread), \
+             patch("ui.views.chat_view.time.monotonic", return_value=100.0), \
+             patch.object(ChatView, "_retry_current_chat_history", return_value=True):
+            view = SimpleNamespace(
+                crawler=_Crawler(),
+                _msync_connecting=False,
+                _msync_connect_lock=threading.Lock(),
+                _current_target_id="358566558",
+                _current_history_id="bad-chat",
+                _current_history_post_connect_retry_done=False,
+                _pending_history_retry_after_connect=True,
+                _raw_sessions=[],
+                _history_id_by_peer={},
+                _last_history_request_at={},
+            )
+            view.msync_message_received = SimpleNamespace(emit=lambda msg: None)
+            view._sync_conversation_read_state = lambda: None
+            view._resolve_active_peer_id = lambda peer_id="", history_id="": ChatView._resolve_active_peer_id(view, peer_id, history_id)
+            view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+            view._resolve_peer_id_by_history_id = lambda history_id: ChatView._resolve_peer_id_by_history_id(view, history_id)
+
+            ChatView._request_history_sync(view, "358566558", history_id="bad-chat")
+            ChatView._ensure_msync_connected(view)
+
+        self.assertEqual(requested, ["358566558"])
+
+    def test_chat_view_normalize_history_messages_does_not_leak_self_name_to_peer_messages(self):
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={
+                "im_tuid": "25278974",
+                "im_my_info": {"name": "郝玉锋"},
+            })),
+            _current_target_id="340857874",
+            _current_history_id="history-1",
+            _current_target_name="郝玉锋",
+            _all_students=[],
+            _group_members_cache={},
+            _group_members_cache_dir=Path(tempfile.mkdtemp()),
+        )
+        view._current_user_display_name = lambda: ChatView._current_user_display_name(view)
+        view._store_known_contact_name = lambda index, member: ChatView._store_known_contact_name(view, index, member)
+        view._build_known_contact_name_index = lambda: ChatView._build_known_contact_name_index(view)
+        view._resolve_known_contact_name = lambda sender_id: ChatView._resolve_known_contact_name(view, sender_id)
+        view._resolve_history_sender_name = lambda raw, sender_id, is_self: ChatView._resolve_history_sender_name(view, raw, sender_id, is_self)
+        view._message_sort_key = lambda item: ChatView._message_sort_key(view, item)
+
+        normalized = ChatView._normalize_history_messages(
+            view,
+            [
+                {"from": "340857874", "fromName": "张三", "content": "老师好", "timestamp": 1, "msgId": "m1"},
+                {"from": "25278974", "fromName": "郝玉锋", "content": "你好", "timestamp": 2, "msgId": "m2"},
+            ],
+        )
+
+        self.assertEqual(normalized[0]["sender_name"], "张三")
+        self.assertFalse(normalized[0]["is_self"])
+        self.assertEqual(normalized[1]["sender_name"], "我")
+        self.assertTrue(normalized[1]["is_self"])
+
+    def test_chat_view_normalize_history_messages_uses_group_member_cache_when_history_lacks_name(self):
+        cache_dir = Path(tempfile.mkdtemp())
+        try:
+            view = SimpleNamespace(
+                crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={
+                    "im_tuid": "25278974",
+                    "im_my_info": {"name": "郝玉锋"},
+                })),
+                _current_target_id="358572378",
+                _current_history_id="history-1",
+                _current_target_name="358572378",
+                _all_students=[],
+                _group_members_cache={"room-1": [{"person_id": "358572378", "name": "张三"}]},
+                _group_members_cache_dir=cache_dir,
+            )
+            view._current_user_display_name = lambda: ChatView._current_user_display_name(view)
+            view._store_known_contact_name = lambda index, member: ChatView._store_known_contact_name(view, index, member)
+            view._build_known_contact_name_index = lambda: ChatView._build_known_contact_name_index(view)
+            view._resolve_known_contact_name = lambda sender_id: ChatView._resolve_known_contact_name(view, sender_id)
+            view._resolve_history_sender_name = lambda raw, sender_id, is_self: ChatView._resolve_history_sender_name(view, raw, sender_id, is_self)
+            view._message_sort_key = lambda item: ChatView._message_sort_key(view, item)
+
+            normalized = ChatView._normalize_history_messages(
+                view,
+                [{"from": "358572378", "content": "老师好", "timestamp": 1, "msgId": "m1"}],
+            )
+
+            self.assertEqual(normalized[0]["sender_name"], "张三")
+        finally:
+            for path in cache_dir.glob("*"):
+                path.unlink()
+            cache_dir.rmdir()
+
+    def test_chat_view_history_load_corrects_current_target_name_from_peer_message(self):
+        render_calls = []
+        synced = []
+        merged = []
+        cache_dir = Path(tempfile.mkdtemp())
+        try:
+            view = SimpleNamespace(
+                crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={
+                    "im_tuid": "25278974",
+                    "im_my_info": {"name": "郝玉锋"},
+                })),
+                _current_target_id="340857874",
+                _current_history_id="history-1",
+                _current_target_name="郝玉锋",
+                _message_cache={},
+                _history_id_by_peer={},
+                _all_students=[],
+                _group_members_cache={},
+                _group_members_cache_dir=cache_dir,
+                chat_title_label=SimpleNamespace(setText=lambda text: render_calls.append(("title", text))),
+                chat_messages=SimpleNamespace(clear=lambda: None, setPlaceholderText=lambda text: None),
+                _last_send_error="",
+            )
+            view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+            view._current_user_display_name = lambda: ChatView._current_user_display_name(view)
+            view._store_known_contact_name = lambda index, member: ChatView._store_known_contact_name(view, index, member)
+            view._build_known_contact_name_index = lambda: ChatView._build_known_contact_name_index(view)
+            view._resolve_known_contact_name = lambda sender_id: ChatView._resolve_known_contact_name(view, sender_id)
+            view._resolve_history_sender_name = lambda raw, sender_id, is_self: ChatView._resolve_history_sender_name(view, raw, sender_id, is_self)
+            view._correct_current_target_name_from_history = lambda normalized: ChatView._correct_current_target_name_from_history(view, normalized)
+            view._normalize_history_messages = lambda messages: ChatView._normalize_history_messages(view, messages)
+            view._message_sort_key = lambda item: ChatView._message_sort_key(view, item)
+            view._merge_cached_messages = lambda conversation_key, normalized: merged.append((conversation_key, normalized))
+            view._render_cached_messages = lambda conversation_key: render_calls.append(("render", conversation_key))
+            view._sync_conversation_read_state = lambda peer_id="", history_id="": synced.append((peer_id, history_id))
+            view._try_fallback_history_key = lambda chat_id: False
+
+            ChatView._on_history_loaded(
+                view,
+                "history-1",
+                [{"from": "340857874", "fromName": "张三", "content": "老师好", "timestamp": 1, "msgId": "m1"}],
+            )
+
+            self.assertEqual(view._current_target_name, "张三")
+            self.assertIn(("title", "张三"), render_calls)
+            self.assertEqual(merged[0][1][0]["sender_name"], "张三")
+            self.assertEqual(synced, [("340857874", "history-1")])
+        finally:
+            for path in cache_dir.glob("*"):
+                path.unlink()
+            cache_dir.rmdir()
+
+    def test_chat_view_history_load_corrects_numeric_target_name_from_cached_member(self):
+        render_calls = []
+        cache_dir = Path(tempfile.mkdtemp())
+        try:
+            view = SimpleNamespace(
+                crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={
+                    "im_tuid": "25278974",
+                    "im_my_info": {"name": "郝玉锋"},
+                })),
+                _current_target_id="358572378",
+                _current_history_id="history-1",
+                _current_target_name="358572378",
+                _message_cache={},
+                _history_id_by_peer={},
+                _all_students=[],
+                _group_members_cache={"room-1": [{"person_id": "358572378", "name": "李四"}]},
+                _group_members_cache_dir=cache_dir,
+                chat_title_label=SimpleNamespace(setText=lambda text: render_calls.append(text)),
+                chat_messages=SimpleNamespace(clear=lambda: None, setPlaceholderText=lambda text: None),
+                _last_send_error="",
+            )
+            view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+            view._current_user_display_name = lambda: ChatView._current_user_display_name(view)
+            view._store_known_contact_name = lambda index, member: ChatView._store_known_contact_name(view, index, member)
+            view._build_known_contact_name_index = lambda: ChatView._build_known_contact_name_index(view)
+            view._resolve_known_contact_name = lambda sender_id: ChatView._resolve_known_contact_name(view, sender_id)
+            view._resolve_history_sender_name = lambda raw, sender_id, is_self: ChatView._resolve_history_sender_name(view, raw, sender_id, is_self)
+            view._correct_current_target_name_from_history = lambda normalized: ChatView._correct_current_target_name_from_history(view, normalized)
+            view._normalize_history_messages = lambda messages: ChatView._normalize_history_messages(view, messages)
+            view._message_sort_key = lambda item: ChatView._message_sort_key(view, item)
+            view._merge_cached_messages = lambda conversation_key, normalized: None
+            view._render_cached_messages = lambda conversation_key: None
+            view._sync_conversation_read_state = lambda peer_id="", history_id="": None
+            view._try_fallback_history_key = lambda chat_id: False
+
+            ChatView._on_history_loaded(
+                view,
+                "history-1",
+                [{"from": "358572378", "content": "收到", "timestamp": 1, "msgId": "m1"}],
+            )
+
+            self.assertEqual(view._current_target_name, "李四")
+            self.assertIn("李四", render_calls)
+        finally:
+            for path in cache_dir.glob("*"):
+                path.unlink()
+            cache_dir.rmdir()
+
+    def test_chat_view_resolve_known_contact_name_falls_back_to_im_user_lookup(self):
+        cache_dir = Path(tempfile.mkdtemp())
+        view = SimpleNamespace(
+            _all_students=[],
+            _group_members_cache={},
+            _group_members_cache_dir=cache_dir,
+            crawler=SimpleNamespace(get_im_user_info_by_tuid=lambda tuid: {"name": "王五"} if tuid == "358572378" else {}),
+        )
+        view._store_known_contact_name = lambda index, member: ChatView._store_known_contact_name(view, index, member)
+        view._build_known_contact_name_index = lambda: ChatView._build_known_contact_name_index(view)
+
+        try:
+            resolved = ChatView._resolve_known_contact_name(view, "358572378")
+            self.assertEqual(resolved, "王五")
+            self.assertEqual(view._known_contact_name_index["358572378"], "王五")
+        finally:
+            cache_dir.rmdir()
+
+    def test_chat_view_render_cached_messages_prefers_session_list_display_name(self):
+        rendered = []
+        placeholder_texts = []
+        view = SimpleNamespace(
+            _current_target_id="358572378",
+            _current_history_id="history-1",
+            _current_target_name="358572378",
+            _current_session_display_name="张三",
+            _message_cache={
+                "history-1": [
+                    {"is_self": False, "sender_name": "358572378", "content": "老师好", "timestamp": 1},
+                    {"is_self": True, "sender_name": "我", "content": "收到", "timestamp": 2},
+                ]
+            },
+            _last_send_error="",
+            chat_messages=SimpleNamespace(
+                clear=lambda: None,
+                setPlaceholderText=lambda text: placeholder_texts.append(text),
+            ),
+        )
+        view._conversation_key = lambda peer_id=None, history_id=None: ChatView._conversation_key(view, peer_id, history_id)
+        view._message_sort_key = lambda item: ChatView._message_sort_key(view, item)
+        view._message_status_text = lambda msg: ChatView._message_status_text(view, msg)
+        view.append_message = lambda sender, text, is_self=False, status_text="": rendered.append((sender, text, is_self))
+
+        ChatView._render_cached_messages(view, "history-1")
+
+        self.assertEqual(placeholder_texts, ["与 张三 的对话"])
+        self.assertEqual(rendered[0], ("张三", "老师好", False))
+        self.assertEqual(rendered[1], ("我", "收到", True))
+
     def test_chat_view_history_sync_message_refreshes_without_reloading_list(self):
         refreshed = []
         loaded = []
@@ -2610,6 +3522,7 @@ class ChatAPITests(unittest.TestCase):
             _history_id_by_peer={},
             _raw_sessions=[{"chatId": "358566558", "chatName": "离散数学"}],
             _message_cache={},
+            _pending_read_acks={},
             _unread_count_by_peer={},
         )
         view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
@@ -2644,18 +3557,17 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(len(refreshed), 1)
         self.assertEqual(loaded, [])
 
-    def test_chat_view_live_message_upserts_session_without_reloading_list(self):
+    def test_chat_view_history_sync_message_does_not_increment_unread_count(self):
         refreshed = []
-        loaded = []
         view = SimpleNamespace(
             crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
             _current_target_id="",
             _current_history_id="",
             _current_target_name="",
             _history_id_by_peer={},
-            _raw_sessions=[{"chatId": "358566558", "chatName": "离散数学", "updateTime": 1}],
+            _raw_sessions=[{"chatId": "358566558", "chatName": "离散数学"}],
             _message_cache={},
-            _unread_count_by_peer={},
+            _unread_count_by_peer={"358566558": 2},
         )
         view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
         view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
@@ -2669,6 +3581,106 @@ class ChatAPITests(unittest.TestCase):
         view._is_current_conversation_message = lambda peer_id, msg: False
         view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
         view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._refresh_session_list = lambda sessions=None: refreshed.append(sessions)
+        view._upsert_session_from_message = lambda peer_id, msg, display_name="": ChatView._upsert_session_from_message(view, peer_id, msg, display_name)
+        view._load_message_list = lambda: None
+
+        ChatView._on_msync_message(
+            view,
+            {
+                "from": "358566558",
+                "to": "25278974",
+                "peer_id": "358566558",
+                "content": "历史同步消息",
+                "timestamp": 1778311611198,
+                "message_id": "1549395756211768472",
+                "history_sync": True,
+            },
+        )
+
+        self.assertEqual(view._unread_count_by_peer["358566558"], 2)
+        self.assertEqual(len(refreshed), 1)
+
+    def test_chat_view_duplicate_live_message_only_increments_unread_once(self):
+        refreshed = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="",
+            _current_history_id="",
+            _current_target_name="",
+            _history_id_by_peer={},
+            _raw_sessions=[{"chatId": "358566558", "chatName": "离散数学"}],
+            _message_cache={},
+            _pending_read_acks={},
+            _unread_count_by_peer={},
+        )
+        view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._resolve_session_display_name = lambda peer_id, msg, fallback_name="": ChatView._resolve_session_display_name(view, peer_id, msg, fallback_name)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._store_class_info_metadata = lambda peer_id, class_info: False
+        view._conversation_key = lambda peer_id=None, history_id=None: str(history_id or peer_id or "")
+        view._append_cached_message = lambda **kwargs: ChatView._append_cached_message(view, **kwargs)
+        view._message_sort_key = lambda item: ChatView._message_sort_key(view, item)
+        view._find_cached_message = lambda cache, message: ChatView._find_cached_message(view, cache, message)
+        view._message_identity = lambda message: ChatView._message_identity(view, message)
+        view._merge_read_state = lambda old_state="", new_state="": ChatView._merge_read_state(view, old_state, new_state)
+        view._merge_cached_entry = lambda current, incoming: ChatView._merge_cached_entry(view, current, incoming)
+        view._apply_pending_read_ack = lambda message: ChatView._apply_pending_read_ack(view, message)
+        view._is_ai_assistant_conversation = lambda peer_id, msg=None: False
+        view._is_current_conversation_message = lambda peer_id, msg: False
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._refresh_session_list = lambda sessions=None: refreshed.append(sessions)
+        view._upsert_session_from_message = lambda peer_id, msg, display_name="": ChatView._upsert_session_from_message(view, peer_id, msg, display_name)
+        view._load_message_list = lambda: None
+
+        payload = {
+            "from": "358566558",
+            "to": "25278974",
+            "peer_id": "358566558",
+            "content": "重复实时消息",
+            "timestamp": 1778312000000,
+            "message_id": "1549399999999999999",
+        }
+
+        ChatView._on_msync_message(view, dict(payload))
+        ChatView._on_msync_message(view, dict(payload))
+
+        self.assertEqual(view._unread_count_by_peer["358566558"], 1)
+        self.assertEqual(len(view._message_cache["358566558"]), 1)
+        self.assertEqual(len(refreshed), 1)
+
+    def test_chat_view_live_message_upserts_session_without_reloading_list(self):
+        row_updates = []
+        refreshed = []
+        loaded = []
+        auto_refresh = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="",
+            _current_history_id="",
+            _current_target_name="",
+            _history_id_by_peer={},
+            _raw_sessions=[{"chatId": "358566558", "chatName": "离散数学", "updateTime": 1}],
+            _message_cache={},
+            _unread_count_by_peer={},
+            _message_auto_refresh_timer=SimpleNamespace(start=lambda delay: auto_refresh.append(delay)),
+        )
+        view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._resolve_session_display_name = lambda peer_id, msg, fallback_name="": ChatView._resolve_session_display_name(view, peer_id, msg, fallback_name)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._extract_session_unread_count = lambda session: ChatView._extract_session_unread_count(view, session)
+        view._store_class_info_metadata = lambda peer_id, class_info: False
+        view._conversation_key = lambda peer_id=None, history_id=None: str(history_id or peer_id or "")
+        view._append_cached_message = lambda **kwargs: None
+        view._is_ai_assistant_conversation = lambda peer_id, msg=None: False
+        view._is_current_conversation_message = lambda peer_id, msg: False
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: ChatView._get_unread_count(view, peer_id, history_id, session)
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": ChatView._set_unread_count(view, peer_id, unread_count, history_id)
+        view._update_session_row = lambda peer_id="", history_id="", session=None: row_updates.append((peer_id, history_id, session))
         view._refresh_session_list = lambda sessions=None: refreshed.append(sessions)
         view._upsert_session_from_message = lambda peer_id, msg, display_name="": ChatView._upsert_session_from_message(view, peer_id, msg, display_name)
         view._load_message_list = lambda: loaded.append(True)
@@ -2685,8 +3697,10 @@ class ChatAPITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(len(row_updates), 1)
+        self.assertEqual(refreshed, [])
         self.assertEqual(loaded, [])
+        self.assertEqual(auto_refresh, [400])
 
     def test_chat_view_self_message_does_not_leak_current_chat_name_into_group_session(self):
         refreshed = []
@@ -2780,6 +3794,60 @@ class ChatAPITests(unittest.TestCase):
         updated = refreshed[0][0]
         self.assertEqual(updated["isGroup"], 1)
         self.assertTrue(updated["isPrivate"])
+
+    def test_chat_view_existing_private_session_keeps_private_type_even_if_message_has_class_info(self):
+        row_updates = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _history_id_by_peer={"3001": "student-history-id"},
+            _session_meta_by_peer={},
+            _raw_sessions=[{"chatId": "student-history-id", "chatName": "张三", "updateTime": 1, "isGroup": 1, "isPrivate": True}],
+        )
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._resolve_session_display_name = lambda peer_id, msg, fallback_name="": ChatView._resolve_session_display_name(view, peer_id, msg, fallback_name)
+        view._update_session_row = lambda peer_id="", history_id="", session=None: row_updates.append((peer_id, history_id, session))
+        view._refresh_session_list = lambda sessions=None: None
+        view._upsert_session_from_message = lambda peer_id, msg, display_name="": ChatView._upsert_session_from_message(view, peer_id, msg, display_name)
+
+        changed = ChatView._upsert_session_from_message(
+            view,
+            "3001",
+            {
+                "peer_id": "3001",
+                "content": "老师好",
+                "timestamp": 1778312000003,
+                "class_info": {"chat_id": "306927744647171", "course_name": "离散数学（2025-2026-2）"},
+            },
+            display_name="张三",
+        )
+
+        self.assertTrue(changed)
+        updated = row_updates[0][2]
+        self.assertEqual(updated["isGroup"], 1)
+        self.assertTrue(updated["isPrivate"])
+        self.assertEqual(updated["content"], "老师好")
+
+    def test_chat_view_realtime_upsert_suppresses_avatar_refresh(self):
+        row_updates = []
+        view = SimpleNamespace(
+            _history_id_by_peer={},
+            _session_meta_by_peer={},
+            _raw_sessions=[{"chatId": "3001", "chatName": "张三", "chatIco": "https://photo.example/avatar.png", "updateTime": 1, "isGroup": 1, "isPrivate": True}],
+        )
+        view._resolve_session_peer_id = lambda session: ChatView._resolve_session_peer_id(view, session)
+        view._resolve_session_display_name = lambda peer_id, msg, fallback_name="": ChatView._resolve_session_display_name(view, peer_id, msg, fallback_name)
+        view._update_session_row = lambda peer_id="", history_id="", session=None: row_updates.append((peer_id, history_id, getattr(view, "_suppress_avatar_refresh", False)))
+        view._refresh_session_list = lambda sessions=None: None
+
+        changed = ChatView._upsert_session_from_message(
+            view,
+            "3001",
+            {"peer_id": "3001", "content": "新消息", "timestamp": 1778312000004},
+            display_name="张三",
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(row_updates, [("3001", "3001", True)])
 
 
 if __name__ == "__main__":

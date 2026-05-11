@@ -75,22 +75,22 @@ jobs:
           - os: macos-latest
             platform: macos-arm
             spec: xuexitong_mac.spec
-            executable: XuexitongManager
+            executable: XHelper
             arch: arm64
           - os: macos-15-intel    # 使用 macos-15-intel 作为标准免费的 Intel (x64) 计算节点
             platform: macos-intel
             spec: xuexitong_mac.spec
-            executable: XuexitongManager
+            executable: XHelper
             arch: ''
           - os: ubuntu-22.04
             platform: linux
             spec: xuexitong_linux.spec
-            executable: XuexitongManager
+            executable: XHelper
             arch: ''
           - os: windows-latest
             platform: windows
             spec: xuexitong_win.spec
-            executable: XuexitongManager.exe
+            executable: XHelper.exe
             arch: ''
 
     runs-on: ${{ matrix.os }}
@@ -195,7 +195,7 @@ jobs:
           cd dist
           chmod +x ${{ matrix.executable }}
           # 创建免安装包
-          tar -czvf XuexitongManager-${{ matrix.platform }}.tar.gz ${{ matrix.executable }}
+          tar -czvf XHelper-${{ matrix.platform }}.tar.gz ${{ matrix.executable }}
 
           # 创建 .deb 安装包
           mkdir -p deb_root/usr/bin
@@ -207,17 +207,15 @@ jobs:
           cp ../assets/xuexitong.desktop deb_root/usr/share/applications/
           cp ../assets/icon.png deb_root/usr/share/icons/hicolor/256x256/apps/xuexitong.png
 
-          cat <<EOF > deb_root/DEBIAN/control
-Package: xuexitongmanager
-Version: ${{ needs.check-version.outputs.version }}
-Section: utils
-Priority: optional
-Architecture: amd64
-Maintainer: Hao Yufeng <hao@example.com>
-Description: 学习通教学辅助系统
- 这是一个用于管理学习通课程和作业的教学辅助工具。
-EOF
-          dpkg-deb --build deb_root XuexitongManager-${{ needs.check-version.outputs.version }}.deb
+          echo "Package: xhelper" > deb_root/DEBIAN/control
+          echo "Version: ${{ needs.check-version.outputs.version }}" >> deb_root/DEBIAN/control
+          echo "Section: utils" >> deb_root/DEBIAN/control
+          echo "Priority: optional" >> deb_root/DEBIAN/control
+          echo "Architecture: amd64" >> deb_root/DEBIAN/control
+          echo "Maintainer: Hao Yufeng <hao@example.com>" >> deb_root/DEBIAN/control
+          echo "Description: XHelper - 学习通教学辅助系统" >> deb_root/DEBIAN/control
+          echo " 这是一个用于管理学习通课程和作业的教学辅助工具。" >> deb_root/DEBIAN/control
+          dpkg-deb --build deb_root XHelper-${{ needs.check-version.outputs.version }}.deb
           mv *.deb ..
           cd ..
 
@@ -226,13 +224,13 @@ EOF
         run: |
           cd dist
           # 压缩生成的 .app 文件夹
-          tar -czvf XuexitongManager-${{ matrix.platform }}.tar.gz XuexitongManager.app
+          tar -czvf XHelper-${{ matrix.platform }}.tar.gz XHelper.app
 
       - name: Package artifact (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           cd dist
-          7z a XuexitongManager-${{ matrix.platform }}.zip ${{ matrix.executable }}
+          7z a XHelper-${{ matrix.platform }}.zip ${{ matrix.executable }}
 
       - name: Build Windows Installer (Inno Setup)
         if: matrix.os == 'windows-latest'
@@ -246,28 +244,28 @@ EOF
           brew install create-dmg
           cd dist
           create-dmg \
-            --volname "XuexitongManager" \
+            --volname "XHelper" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
-            --icon "XuexitongManager.app" 175 190 \
-            --hide-extension "XuexitongManager.app" \
+            --icon "XHelper.app" 175 190 \
+            --hide-extension "XHelper.app" \
             --app-drop-link 425 190 \
-            "XuexitongManager-${{ matrix.platform }}.dmg" \
-            "XuexitongManager.app"
+            "XHelper-${{ matrix.platform }}.dmg" \
+            "XHelper.app"
 
       - name: Create Release
         if: matrix.os == 'ubuntu-22.04'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
-          name: XuexitongManager v${{ needs.check-version.outputs.version }}
+          name: XHelper v${{ needs.check-version.outputs.version }}
           body: ${{ needs.check-version.outputs.changelog }}
           files: |
-             dist/XuexitongManager-*.tar.gz
-             dist/XuexitongManager-*.zip
-             dist/XuexitongManager-*.dmg
-             dist/XuexitongManager-Setup.exe
+             dist/XHelper-*.tar.gz
+             dist/XHelper-*.zip
+             dist/XHelper-*.dmg
+             dist/XHelper-Setup.exe
              *.deb
           generate_release_notes: false
 
@@ -277,8 +275,8 @@ EOF
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
           files: |
-             dist/XuexitongManager-*.tar.gz
-             dist/XuexitongManager-*.zip
-             dist/XuexitongManager-*.dmg
-             dist/XuexitongManager-Setup.exe
+             dist/XHelper-*.tar.gz
+             dist/XHelper-*.zip
+             dist/XHelper-*.dmg
+             dist/XHelper-Setup.exe
              *.deb

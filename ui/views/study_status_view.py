@@ -18,6 +18,22 @@ from core.communication_manager import CommunicationManager
 from core.exporters.homework_stats_exporter import build_homework_stats_filename
 
 
+class NumericTableWidgetItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts by numeric value instead of display text."""
+
+    def __init__(self, display_text: str, numeric_value):
+        super().__init__(display_text)
+        try:
+            self._numeric_value = float(numeric_value)
+        except Exception:
+            self._numeric_value = 0.0
+
+    def __lt__(self, other):
+        if isinstance(other, NumericTableWidgetItem):
+            return self._numeric_value < other._numeric_value
+        return super().__lt__(other)
+
+
 class StudyStatusView(QWidget):
     """学情视图 - 显示学生学习情况"""
     
@@ -774,24 +790,24 @@ class StudyStatusView(QWidget):
             self.homework_table.setItem(row, 1, QTableWidgetItem(stats.user_name))
             
             # 作业数 - 居中对齐
-            complete_item = QTableWidgetItem(str(stats.complete_num))
+            complete_item = NumericTableWidgetItem(str(stats.complete_num), stats.complete_num)
             complete_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.homework_table.setItem(row, 2, complete_item)
             
             # 已提交 - 居中对齐
-            submitted_item = QTableWidgetItem(str(stats.work_submitted))
+            submitted_item = NumericTableWidgetItem(str(stats.work_submitted), stats.work_submitted)
             submitted_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.homework_table.setItem(row, 3, submitted_item)
             
             # 待批 - 居中对齐
-            pending_item = QTableWidgetItem(str(stats.pending_count))
+            pending_item = NumericTableWidgetItem(str(stats.pending_count), stats.pending_count)
             pending_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if stats.pending_count > 0:
                 pending_item.setForeground(Qt.GlobalColor.red)
             self.homework_table.setItem(row, 4, pending_item)
             
             # 未提交 - 居中对齐
-            unsubmitted_item = QTableWidgetItem(str(stats.unsubmitted_count))
+            unsubmitted_item = NumericTableWidgetItem(str(stats.unsubmitted_count), stats.unsubmitted_count)
             unsubmitted_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if stats.unsubmitted_count > 0:
                 unsubmitted_item.setForeground(Qt.GlobalColor.red)
@@ -799,7 +815,7 @@ class StudyStatusView(QWidget):
             
             # 平均分 - 显示真实平均分（未交作业按0分计算）
             real_avg = stats.real_avg_score
-            avg_item = QTableWidgetItem(f"{real_avg:.2f}")
+            avg_item = NumericTableWidgetItem(f"{real_avg:.2f}", real_avg)
             avg_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             # 真实平均分低于60分标红
             if real_avg < 60:
@@ -807,12 +823,12 @@ class StudyStatusView(QWidget):
             self.homework_table.setItem(row, 6, avg_item)
             
             # 最低分
-            min_item = QTableWidgetItem(f"{stats.min_score:.1f}")
+            min_item = NumericTableWidgetItem(f"{stats.min_score:.1f}", stats.min_score)
             min_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.homework_table.setItem(row, 7, min_item)
             
             # 最高分
-            max_item = QTableWidgetItem(f"{stats.max_score:.1f}")
+            max_item = NumericTableWidgetItem(f"{stats.max_score:.1f}", stats.max_score)
             max_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.homework_table.setItem(row, 8, max_item)
             
@@ -977,25 +993,15 @@ class StudyStatusView(QWidget):
         """测验情况"""
         self.last_sub = "quiz"
         self._highlight_button(self.btn_quiz)
-        self.status_update.emit("正在加载测验情况...")
-        
-        self._show_loading("正在同步测验情况数据，请稍候...")
-        
-        # TODO: 调用API获取测验数据
-        
-        self.status_update.emit("测验情况加载完成")
+        self.status_update.emit("测验情况功能开发中")
+        self._show_placeholder("🚧 测验情况功能开发中，敬请期待")
 
     def on_midterm_clicked(self):
         """期中考试"""
         self.last_sub = "midterm"
         self._highlight_button(self.btn_midterm)
-        self.status_update.emit("正在加载期中考试...")
-        
-        self._show_loading("正在同步期中考试数据，请稍候...")
-        
-        # TODO: 调用API获取期中考试数据
-        
-        self.status_update.emit("期中考试加载完成")
+        self.status_update.emit("期中考试功能开发中")
+        self._show_placeholder("🚧 期中考试功能开发中，敬请期待")
 
     def _highlight_button(self, active_btn):
         """高亮选中的按钮"""

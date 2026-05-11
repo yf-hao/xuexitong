@@ -820,10 +820,10 @@ class QuestionBankAPI:
 
                     im = Image.open(BytesIO(png_bytes))
                     original_w, original_h = im.width, im.height
-                    target_height = max(actual_line_count, 1) * 24 * pixel_density
+                    target_height = max(int(round(max(actual_line_count, 1) * 24 * pixel_density)), 1)
                     has_integral_symbols = bool(re2.search(r'\\int|\\iint|\\iiint|\\oint', expr_for_scale))
                     has_tall_symbols = bool(re2.search(r'\\int|\\sum|\\prod|\\sqrt|\\frac|\^|\_', expr_for_scale))
-                    tall_symbol_max_height = (48 if has_integral_symbols else 36) * pixel_density
+                    tall_symbol_max_height = max(int(round((48 if has_integral_symbols else 36) * pixel_density)), 1)
 
                     if has_tall_symbols:
                         if im.height > tall_symbol_max_height:
