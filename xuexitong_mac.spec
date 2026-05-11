@@ -36,7 +36,7 @@ a = Analysis(
         'Crypto.Cipher.AES',
         'qrcode',
         'qrcode.image.pil',
-        'qrcode.image.svg',
+        'qrcode.image.svg', 'websocket',
         'core.rendering.katex_snapshot',
     ],
     excludes=[
