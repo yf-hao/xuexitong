@@ -165,6 +165,8 @@ class ActivitiesView(QWidget):
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setMinimumHeight(35)
         self.start_date_edit.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px; padding-left: 5px;")
+        self._signin_primary_field_width = max(self.start_date_edit.sizeHint().width(), 240)
+        self.start_date_edit.setFixedWidth(self._signin_primary_field_width)
         config_layout.addWidget(self.start_date_edit, 0, 1)
 
         lbl_group = QLabel("👥 活动分组")
@@ -201,38 +203,50 @@ class ActivitiesView(QWidget):
         self.group_combo.addItem("正在加载分组...", None)
         config_layout.addWidget(self.group_combo, 0, 3, 1, 3)
 
-        lbl_weeks = QLabel("🗓️ 总周数")
+        lbl_weeks = QLabel("🗓️ 周次配置")
         lbl_weeks.setStyleSheet("font-size: 14px; color: #ffffff;")
         config_layout.addWidget(lbl_weeks, 1, 0)
         self.total_weeks = QSpinBox()
         self.total_weeks.setRange(1, 52)
         self.total_weeks.setValue(16)
         self.total_weeks.setMinimumHeight(35)
-        self.total_weeks.setFixedWidth(60)
+        self.total_weeks.setFixedWidth(64)
         self.total_weeks.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px;")
-        config_layout.addWidget(self.total_weeks, 1, 1)
-
-        lbl_odd = QLabel("🔢 单周次数")
-        lbl_odd.setStyleSheet("font-size: 14px; color: #ffffff; margin-left: 10px;")
-        config_layout.addWidget(lbl_odd, 1, 2)
         self.odd_times = QSpinBox()
         self.odd_times.setRange(0, 10)
         self.odd_times.setValue(2)
         self.odd_times.setMinimumHeight(35)
-        self.odd_times.setFixedWidth(60)
+        self.odd_times.setFixedWidth(64)
         self.odd_times.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px;")
-        config_layout.addWidget(self.odd_times, 1, 3)
-
-        lbl_even = QLabel("🔠 双周次数")
-        lbl_even.setStyleSheet("font-size: 14px; color: #ffffff; margin-left: 10px;")
-        config_layout.addWidget(lbl_even, 1, 4)
         self.even_times = QSpinBox()
         self.even_times.setRange(0, 10)
         self.even_times.setValue(2)
         self.even_times.setMinimumHeight(35)
-        self.even_times.setFixedWidth(60)
+        self.even_times.setFixedWidth(64)
         self.even_times.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px;")
-        config_layout.addWidget(self.even_times, 1, 5)
+
+        counts_container = QWidget()
+        counts_container.setFixedWidth(self._signin_primary_field_width)
+        counts_layout = QHBoxLayout(counts_container)
+        counts_layout.setContentsMargins(0, 0, 0, 0)
+        counts_layout.setSpacing(8)
+
+        for title, spinbox in (
+            ("总周数", self.total_weeks),
+            ("单周次数", self.odd_times),
+            ("双周次数", self.even_times),
+        ):
+            field_layout = QVBoxLayout()
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.setSpacing(4)
+            field_label = QLabel(title)
+            field_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            field_label.setStyleSheet("font-size: 12px; color: #d0d0d0;")
+            field_layout.addWidget(field_label)
+            field_layout.addWidget(spinbox, alignment=Qt.AlignmentFlag.AlignCenter)
+            counts_layout.addLayout(field_layout)
+
+        config_layout.addWidget(counts_container, 1, 1)
 
         # === 位置签到配置 ===
         self.chk_enable_location = QCheckBox("启用位置签到")
@@ -259,7 +273,7 @@ class ActivitiesView(QWidget):
                 image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
             }
         """)
-        config_layout.addWidget(self.chk_enable_location, 2, 0)
+        config_layout.addWidget(self.chk_enable_location, 1, 2)
         
         # 位置下拉框
         self.combo_location = QComboBox()
@@ -295,7 +309,7 @@ class ActivitiesView(QWidget):
             }
         """)
         self.combo_location.addItem("暂无位置数据", None)
-        config_layout.addWidget(self.combo_location, 2, 1)
+        config_layout.addWidget(self.combo_location, 1, 3, 1, 2)
         
         # 位置配置按钮
         self.btn_config_location = QPushButton("位置模板")
@@ -323,7 +337,7 @@ class ActivitiesView(QWidget):
                 color: #888888;
             }
         """)
-        config_layout.addWidget(self.btn_config_location, 2, 2)
+        config_layout.addWidget(self.btn_config_location, 1, 5)
         
         # 验证码勾选框
         self.chk_need_vcode = QCheckBox("需要验证码")
@@ -346,7 +360,57 @@ class ActivitiesView(QWidget):
                 image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
             }
         """)
-        config_layout.addWidget(self.chk_need_vcode, 2, 3)
+        config_layout.addWidget(self.chk_need_vcode, 3, 0)
+
+        self.chk_need_face = QCheckBox("人脸识别")
+        self.chk_need_face.setChecked(True)
+        self.chk_need_face.setStyleSheet("""
+            QCheckBox {
+                font-size: 13px;
+                color: #ffffff;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border-color: #0078d4;
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
+            }
+        """)
+        config_layout.addWidget(self.chk_need_face, 3, 1)
+
+        self.lbl_refresh_time = QLabel("更新频率")
+        self.lbl_refresh_time.setStyleSheet("font-size: 13px; color: #ffffff; margin-left: 10px;")
+        config_layout.addWidget(self.lbl_refresh_time, 3, 2)
+
+        self.combo_refresh_time = QComboBox()
+        self.combo_refresh_time.setMinimumHeight(35)
+        self.combo_refresh_time.setFixedWidth(90)
+        self.combo_refresh_time.setStyleSheet("""
+            QComboBox {
+                background: #252526;
+                color: white;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding-left: 8px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #ffffff;
+                border: 1px solid #444444;
+                selection-background-color: #007acc;
+                outline: none;
+            }
+        """)
+        for seconds in (10, 20, 30):
+            self.combo_refresh_time.addItem(str(seconds), seconds)
+        self.combo_refresh_time.setCurrentIndex(2)
+        config_layout.addWidget(self.combo_refresh_time, 3, 3)
         
         # 连接信号
         self.chk_enable_location.stateChanged.connect(self._on_location_enable_changed)
@@ -631,9 +695,13 @@ class ActivitiesView(QWidget):
             "otherId": item.get('otherId', 2),
             "ifNeedVCode": 1 if self.chk_need_vcode.isChecked() else 0,
             "openCheckWeChatFlag": item.get('openCheckWeChatFlag', 1),
-            "openCheckFaceFlag": item.get('openCheckFaceFlag', 0),
+            "openCheckFaceFlag": 1 if getattr(self, 'chk_need_face', None) and self.chk_need_face.isChecked() else 0,
             "ifrefreshewm": item.get('ifrefreshewm', 1),
-            "ewmRefreshTime": item.get('ewmRefreshTime', 10),
+            "ewmRefreshTime": (
+                int(self.combo_refresh_time.currentData())
+                if getattr(self, 'combo_refresh_time', None) and self.combo_refresh_time.currentData() is not None
+                else item.get('ewmRefreshTime', 30)
+            ),
             "now": item.get('now', 0)
         }
         

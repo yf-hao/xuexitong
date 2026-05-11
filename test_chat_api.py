@@ -28,6 +28,7 @@ from core.msync_client import (
     sockjs_decode_all,
 )
 from ui.views.chat_view import ChatView
+from ui.views.activities_view import ActivitiesView
 from ui.views.study_status_view import StudyStatusView
 from ui.dialogs.absence_stats_dialog import AbsenceStatsDialog
 from ui.dialogs.homework_reminder_dialog import DEFAULT_ABSENCE_REMINDER_TEMPLATE, DEFAULT_HOMEWORK_REMINDER_TEMPLATE
@@ -2180,6 +2181,44 @@ class ChatAPITests(unittest.TestCase):
                 "assigneds": "1001,1002,",
             },
         )
+
+    def test_activities_view_build_publish_params_uses_face_checkbox_state(self):
+        class _FakeCheckBox:
+            def __init__(self, checked):
+                self._checked = checked
+
+            def isChecked(self):
+                return self._checked
+
+        class _FakeComboBox:
+            def __init__(self, data):
+                self._data = data
+
+            def currentData(self):
+                return self._data
+
+        view = SimpleNamespace(
+            chk_need_vcode=_FakeCheckBox(False),
+            chk_need_face=_FakeCheckBox(True),
+            chk_enable_location=_FakeCheckBox(False),
+            combo_refresh_time=_FakeComboBox(30),
+        )
+
+        params = ActivitiesView._build_publish_params(
+            view,
+            {
+                "name": "1-1",
+                "courseId": "course-1",
+                "classId": "class-1",
+                "planId": "plan-1",
+                "signcode": "ABCDE",
+            },
+        )
+
+        self.assertEqual(params["ifNeedVCode"], 0)
+        self.assertEqual(params["openCheckFaceFlag"], 1)
+        self.assertEqual(params["ewmRefreshTime"], 30)
+        self.assertEqual(params["ifopenAddress"], "0")
 
     def test_refresh_qrcode_parses_enc_and_sign_code(self):
         class _FakeActivityAPI(ActivityAPI):

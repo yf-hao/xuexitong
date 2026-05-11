@@ -194,7 +194,32 @@ jobs:
         run: |
           cd dist
           chmod +x ${{ matrix.executable }}
+          # 创建免安装包
           tar -czvf XuexitongManager-${{ matrix.platform }}.tar.gz ${{ matrix.executable }}
+
+          # 创建 .deb 安装包
+          mkdir -p deb_root/usr/bin
+          mkdir -p deb_root/usr/share/applications
+          mkdir -p deb_root/usr/share/icons/hicolor/256x256/apps
+          mkdir -p deb_root/DEBIAN
+
+          cp ${{ matrix.executable }} deb_root/usr/bin/
+          cp ../assets/xuexitong.desktop deb_root/usr/share/applications/
+          cp ../assets/icon.png deb_root/usr/share/icons/hicolor/256x256/apps/xuexitong.png
+
+          cat <<EOF > deb_root/DEBIAN/control
+Package: xuexitongmanager
+Version: ${{ needs.check-version.outputs.version }}
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Hao Yufeng <hao@example.com>
+Description: 学习通教学辅助系统
+ 这是一个用于管理学习通课程和作业的教学辅助工具。
+EOF
+          dpkg-deb --build deb_root XuexitongManager-${{ needs.check-version.outputs.version }}.deb
+          mv *.deb ..
+          cd ..
 
       - name: Package artifact (macOS)
         if: contains(matrix.platform, 'macos')
@@ -209,6 +234,28 @@ jobs:
           cd dist
           7z a XuexitongManager-${{ matrix.platform }}.zip ${{ matrix.executable }}
 
+      - name: Build Windows Installer (Inno Setup)
+        if: matrix.os == 'windows-latest'
+        run: |
+          iscc /dMyAppVersion="${{ needs.check-version.outputs.version }}" scripts/setup.iss
+        shell: bash
+
+      - name: Build macOS DMG
+        if: contains(matrix.platform, 'macos')
+        run: |
+          brew install create-dmg
+          cd dist
+          create-dmg \
+            --volname "XuexitongManager" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "XuexitongManager.app" 175 190 \
+            --hide-extension "XuexitongManager.app" \
+            --app-drop-link 425 190 \
+            "XuexitongManager-${{ matrix.platform }}.dmg" \
+            "XuexitongManager.app"
+
       - name: Create Release
         if: matrix.os == 'ubuntu-22.04'
         uses: softprops/action-gh-release@v2
@@ -219,6 +266,9 @@ jobs:
           files: |
              dist/XuexitongManager-*.tar.gz
              dist/XuexitongManager-*.zip
+             dist/XuexitongManager-*.dmg
+             dist/XuexitongManager-Setup.exe
+             *.deb
           generate_release_notes: false
 
       - name: Upload additional assets
@@ -229,3 +279,6 @@ jobs:
           files: |
              dist/XuexitongManager-*.tar.gz
              dist/XuexitongManager-*.zip
+             dist/XuexitongManager-*.dmg
+             dist/XuexitongManager-Setup.exe
+             *.deb
