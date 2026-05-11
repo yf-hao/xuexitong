@@ -68,13 +68,14 @@ exe = EXE(
 
 app = BUNDLE(
     exe,
-    name='XuexitongManager.app',
+    name='XHelper.app',
     icon='assets/icon.icns',  # macOS 图标
-    bundle_identifier='com.hao.xuexitong',
+    bundle_identifier='com.xuexitong.xhelper',
     info_plist={
+        'NSPrincipalClass': 'NSApplication',
         'NSHighResolutionCapable': 'True',
-        'LSBackgroundOnly': 'False',
-        'CFBundleDisplayName': 'XuexitongManager',
-        'CFBundleName': 'XuexitongManager',
+        'CFBundleShortVersionString': '0.6.0',
+        'CFBundleDisplayName': 'XHelper',
+        'CFBundleName': 'XHelper',
     },
 )
