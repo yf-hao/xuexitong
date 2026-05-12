@@ -605,7 +605,7 @@ class StudyStatusView(QWidget):
         
         # 导入并显示对话框
         from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
-        dialog = AttendanceDetailDialog(activity, detail, self)
+        dialog = AttendanceDetailDialog(self.crawler, activity, detail, self)
         dialog.exec()
         
         self.status_update.emit("签到详情加载完成")

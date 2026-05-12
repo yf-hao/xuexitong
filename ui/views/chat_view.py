@@ -500,9 +500,9 @@ class ChatView(QWidget):
         if self._raw_sessions:
             self._request_unread_summary(self._raw_sessions)
 
-    def _load_message_list(self):
+    def _load_message_list(self, show_loading: bool = True):
         """异步加载会话列表"""
-        self._start_message_list_worker(show_loading=True)
+        self._start_message_list_worker(show_loading=show_loading)
 
     def _start_message_list_worker(self, show_loading: bool = True):
         if self._message_worker and self._message_worker.isRunning():
@@ -2412,7 +2412,7 @@ class ChatView(QWidget):
             elif msg.get("history_sync"):
                 self._refresh_session_list()
             else:
-                self._load_message_list()
+                self._load_message_list(show_loading=False)
         ChatView._schedule_realtime_message_refresh(self)
 
     def _on_read_ack(self, msg: dict):

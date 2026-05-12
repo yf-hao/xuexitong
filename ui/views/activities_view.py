@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QDate, QTimer
 from ui.workers import (
     GroupWorker, AddGroupWorker, RenameWorker, DeleteGroupWorker, 
-    PublishSigninWorker, DeleteSigninWorker, StartActiveWorker, EndActiveWorker, DeleteActiveWorker
+    PublishSigninWorker, DeleteSigninWorker, StartActiveWorker, EndActiveWorker,
+    DeleteActiveWorker, AttendanceDetailWorker
 )
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE
 from core.config import SIGNIN_DATA_FILE, LOCATION_DATA_FILE, DEFAULT_COMMON_LOCATIONS
@@ -431,7 +432,7 @@ class ActivitiesView(QWidget):
         """)
         self.btn_generate.clicked.connect(self._generate_signin_items)
         
-        self.btn_batch_publish = QPushButton("🚀 一键发布")
+        self.btn_batch_publish = QPushButton("🚀 一键提交")
         self.btn_batch_publish.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_batch_publish.setStyleSheet("""
             QPushButton { background-color: #4ec9b0; color: white; border-radius: 6px; padding: 10px 15px; font-weight: bold; }
@@ -607,7 +608,7 @@ class ActivitiesView(QWidget):
                 
             card_layout.addStretch()
             
-            pub_btn = QPushButton("已发布" if is_published else "发布此签到")
+            pub_btn = QPushButton("已发布" if is_published else "提交此签到")
             pub_btn.setFixedWidth(100)
             pub_btn.setEnabled(not is_published)
             
@@ -1111,6 +1112,15 @@ class ActivitiesView(QWidget):
                     time_lbl = QLabel(act.time_range)
                     time_lbl.setStyleSheet("font-size: 11px; color: #888;")
                     card_layout.addWidget(time_lbl)
+                    detail_btn = QPushButton("签到详情")
+                    detail_btn.setFixedWidth(76)
+                    detail_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    detail_btn.setStyleSheet("""
+                        QPushButton { background-color: #4a6fa5; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
+                        QPushButton:hover { background-color: #3d5f90; }
+                    """)
+                    detail_btn.clicked.connect(lambda checked, a=act: self._load_attendance_detail(a))
+                    card_layout.addWidget(detail_btn)
                     end_btn = QPushButton("结束")
                     end_btn.setFixedWidth(60)
                     end_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1120,9 +1130,9 @@ class ActivitiesView(QWidget):
                     """)
                     end_btn.clicked.connect(lambda checked, a=act: self._handle_end_active(a))
                     card_layout.addWidget(end_btn)
-                    # 双击进行中的签到显示二维码
+                    # 单击进行中的签到显示二维码
                     card.setCursor(Qt.CursorShape.PointingHandCursor)
-                    card.mouseDoubleClickEvent = lambda event, a=act: self._show_qrcode(a)
+                    card.mousePressEvent = lambda event, a=act: self._handle_active_card_click(event, a)
                 else:
                     status_lbl = QLabel(act.status_name)
                     status_lbl.setStyleSheet(f"font-size: 12px; color: {status_color}; margin-right: 10px;")
@@ -1139,10 +1149,45 @@ class ActivitiesView(QWidget):
                     """)
                     del_btn.clicked.connect(lambda checked, a=act: self._handle_delete_active(a))
                     card_layout.addWidget(del_btn)
+                    self._bind_ended_activity_detail_trigger(card, act, title_lbl, status_lbl, time_lbl)
                 
                 self.activities_scroll_layout.addWidget(card)
         
         self.status_callback(f"已加载 {len(activities)} 个签到活动（{len(groups)} 个分组）")
+
+    def _bind_ended_activity_detail_trigger(self, card, activity, *widgets):
+        handler = lambda event, a=activity: self._handle_ended_activity_click(a, event)
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        card.mousePressEvent = handler
+        for widget in widgets:
+            widget.setCursor(Qt.CursorShape.PointingHandCursor)
+            widget.mousePressEvent = handler
+
+    def _handle_ended_activity_click(self, activity, event=None):
+        if event is not None and hasattr(event, "button") and event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._load_attendance_detail(activity)
+
+    def _load_attendance_detail(self, activity):
+        self.status_callback(f"正在加载 {activity.title} 的签到详情...")
+
+        worker = AttendanceDetailWorker(self.crawler, activity.active_id)
+        self.workers.append(worker)
+        worker.detail_ready.connect(lambda detail, a=activity: self._show_attendance_detail(activity=a, detail=detail))
+        worker.detail_ready.connect(lambda _detail, w=worker: self.workers.remove(w) if w in self.workers else None)
+        worker.start()
+
+    def _show_attendance_detail(self, activity, detail):
+        if isinstance(detail, str):
+            QMessageBox.warning(self, "加载失败", f"获取签到详情失败：\n{detail}")
+            self.status_callback("签到详情加载失败")
+            return
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        dialog = AttendanceDetailDialog(self.crawler, activity, detail, self)
+        dialog.exec()
+        self.status_callback("签到详情加载完成")
     
     def _handle_start_active(self, act):
         """处理点击开始按钮启动签到活动"""
@@ -1163,8 +1208,13 @@ class ActivitiesView(QWidget):
         worker.start_finished.connect(lambda: self.workers.remove(worker) if worker in self.workers else None)
         worker.start()
 
+    def _handle_active_card_click(self, event, act):
+        if event is not None and hasattr(event, "button") and event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._show_qrcode(act)
+
     def _show_qrcode(self, act):
-        """双击进行中的签到时弹出二维码窗口"""
+        """单击进行中的签到时弹出二维码窗口"""
         from ui.dialogs.qrcode_dialog import QRCodeDialog
         
         # 计算结束时间（毫秒时间戳）

@@ -855,6 +855,32 @@ class AttendanceDetailWorker(QThread):
             self.detail_ready.emit(f"获取签到详情失败: {e}")
 
 
+class AttendanceStatusUpdateWorker(QThread):
+    """Worker thread to update a student's attendance status."""
+
+    update_finished = pyqtSignal(bool, str, int, int)  # success, message, uid, status
+
+    def __init__(self, crawler, active_id: str, uid: int, status: int, remark: str = ""):
+        super().__init__()
+        self.crawler = crawler
+        self.active_id = active_id
+        self.uid = int(uid)
+        self.status = int(status)
+        self.remark = remark
+
+    def run(self):
+        try:
+            success, message = self.crawler.update_attendance_status(
+                self.active_id,
+                self.uid,
+                self.status,
+                self.remark,
+            )
+            self.update_finished.emit(success, message, self.uid, self.status)
+        except Exception as e:
+            self.update_finished.emit(False, f"状态修改异常: {e}", self.uid, self.status)
+
+
 class AbsenceStatsWorker(QThread):
     """Worker thread to calculate absence statistics (缺勤统计)."""
     

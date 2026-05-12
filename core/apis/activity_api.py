@@ -303,3 +303,51 @@ class ActivityAPI:
         except Exception as e:
             print(f"获取签到详情异常: {e}")
             return f"网络请求失败: {e}"
+
+    def update_attendance_status(self, active_id: str, uid: int | str, status: int, remark: str = "") -> tuple[bool, str]:
+        """更新指定学生的签到状态。"""
+        params = self.session_manager.course_params
+        if not params:
+            return False, "错误：未找到课程参数，请先选择课程。"
+
+        url = (
+            "https://mobilelearn.chaoxing.com/pptSign/updateSignStatusByUidsV2"
+            "?DB_STRATEGY=PRIMARY_KEY&STRATEGY_PARA=activeId"
+            f"&activeId={active_id}"
+        )
+        data = {
+            "uids": str(uid),
+            "status": str(status),
+            "remark": remark,
+        }
+
+        headers = {
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Origin": "https://mobilelearn.chaoxing.com",
+            "Referer": (
+                f"https://mobilelearn.chaoxing.com/page/sign/endSign"
+                f"?courseId={params.get('courseid')}"
+                f"&classId={params.get('clazzid')}"
+                f"&activeId={active_id}"
+                f"&fid={params.get('fid')}"
+                f"&cpi={params.get('cpi')}"
+                f"&showOnScreenShare=true"
+                f"&returnType=1"
+            ),
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        try:
+            resp = self.session.post(url, headers=headers, data=data, timeout=10)
+            resp.raise_for_status()
+
+            payload = resp.json()
+            if payload.get("state") == "success":
+                return True, "状态修改成功"
+            return False, payload.get("msg") or payload.get("errorMsg") or "状态修改失败"
+        except Exception as e:
+            return False, f"网络请求失败: {e}"

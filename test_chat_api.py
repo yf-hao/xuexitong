@@ -15,6 +15,7 @@ from core.apis.teacher_api import TeacherAPI
 from core.communication_manager import CommunicationManager
 from core.group_members_cache import build_group_members_cache_path, resolve_student_from_group_cache
 from core.rendering.katex_snapshot import KaTeXSnapshotRenderer
+from models.attendance_record import AttendanceDetail
 from core.msync_client import (
     MSyncClient,
     build_conversation_read,
@@ -2572,6 +2573,353 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(params["ewmRefreshTime"], 30)
         self.assertEqual(params["ifopenAddress"], "0")
 
+    def test_attendance_detail_from_dict_preserves_signed_and_unsigned_lists(self):
+        detail = AttendanceDetail.from_dict(
+            {
+                "yiqianList": [
+                    {"id": 1, "uid": 10, "activeId": 100, "name": "已签学生", "username": "2025001", "status": 1, "submittime": "2026-05-12 13:50:45"},
+                ],
+                "weiqianList": [
+                    {"id": 2, "uid": 11, "activeId": 100, "name": "未签学生", "username": "2025002", "status": 0},
+                ],
+            }
+        )
+
+        stats = detail.get_statistics()
+
+        self.assertEqual(len(detail.signed_records), 1)
+        self.assertEqual(len(detail.unsigned_records), 1)
+        self.assertEqual(detail.signed_records[0].name, "已签学生")
+        self.assertEqual(detail.signed_records[0].status_name, "已签")
+        self.assertEqual(detail.unsigned_records[0].name, "未签学生")
+        self.assertEqual(stats["已签"], 1)
+        self.assertEqual(stats["未签"], 1)
+        self.assertEqual(stats["代签"], 0)
+
+    def test_attendance_detail_statistics_unsign_excludes_leave_records(self):
+        detail = AttendanceDetail.from_dict(
+            {
+                "yiqianList": [],
+                "weiqianList": [
+                    {"id": 1, "uid": 10, "activeId": 100, "name": "未签学生", "username": "2025001", "status": 0},
+                    {"id": 2, "uid": 11, "activeId": 100, "name": "事假学生", "username": "2025002", "status": 8},
+                    {"id": 3, "uid": 12, "activeId": 100, "name": "病假学生", "username": "2025003", "status": 7},
+                ],
+            }
+        )
+
+        stats = detail.get_statistics()
+
+        self.assertEqual(stats["未签"], 1)
+        self.assertEqual(stats["事假"], 1)
+        self.assertEqual(stats["病假"], 1)
+
+    def test_attendance_detail_update_record_status_moves_record_between_tabs(self):
+        detail = AttendanceDetail.from_dict(
+            {
+                "yiqianList": [
+                    {"id": 1, "uid": 10, "activeId": 100, "name": "已签学生", "username": "2025001", "status": 1},
+                ],
+                "weiqianList": [
+                    {"id": 2, "uid": 11, "activeId": 100, "name": "未签学生", "username": "2025002", "status": 0},
+                ],
+            }
+        )
+
+        changed = detail.update_record_status(10, 5)
+
+        self.assertTrue(changed)
+        self.assertEqual(len(detail.signed_records), 0)
+        self.assertEqual(len(detail.unsigned_records), 2)
+        self.assertEqual(detail.unsigned_records[0].uid, 10)
+        self.assertEqual(detail.unsigned_records[0].status_name, "缺勤")
+        self.assertTrue(detail.unsigned_records[0].submit_time)
+
+    def test_update_attendance_status_posts_expected_payload(self):
+        class _FakeActivityAPI(ActivityAPI):
+            def __init__(self):
+                self._session = _FakeSession(_FakeResponse(payload={"state": "success"}))
+                self.session_manager = SimpleNamespace(course_params={"courseid": "course-1", "clazzid": "class-1", "fid": "4311", "cpi": "cpi-1"})
+
+            @property
+            def session(self):
+                return self._session
+
+        api = _FakeActivityAPI()
+
+        success, message = api.update_attendance_status("active-1", 406811774, 5)
+
+        self.assertTrue(success)
+        self.assertEqual(message, "状态修改成功")
+        self.assertEqual(
+            api.session.calls[0],
+            {
+                "url": "https://mobilelearn.chaoxing.com/pptSign/updateSignStatusByUidsV2?DB_STRATEGY=PRIMARY_KEY&STRATEGY_PARA=activeId&activeId=active-1",
+                "params": {},
+                "headers": {
+                    "Accept": "*/*",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Cache-Control": "no-cache",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "Origin": "https://mobilelearn.chaoxing.com",
+                    "Referer": "https://mobilelearn.chaoxing.com/page/sign/endSign?courseId=course-1&classId=class-1&activeId=active-1&fid=4311&cpi=cpi-1&showOnScreenShare=true&returnType=1",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                "data": {"uids": "406811774", "status": "5", "remark": ""},
+                "timeout": 10,
+                "method": "POST",
+            },
+        )
+
+    def test_activities_view_load_attendance_detail_starts_worker(self):
+        statuses = []
+
+        class _FakeSignal:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+        class _FakeWorker:
+            instances = []
+
+            def __init__(self, crawler, active_id):
+                self.crawler = crawler
+                self.active_id = active_id
+                self.detail_ready = _FakeSignal()
+                self.started = False
+                _FakeWorker.instances.append(self)
+
+            def start(self):
+                self.started = True
+
+        view = SimpleNamespace(crawler=object(), status_callback=lambda text: statuses.append(text), workers=[])
+        activity = SimpleNamespace(title="签到1", active_id="active-1")
+
+        with patch("ui.views.activities_view.AttendanceDetailWorker", _FakeWorker):
+            ActivitiesView._load_attendance_detail(view, activity)
+
+        self.assertEqual(statuses, ["正在加载 签到1 的签到详情..."])
+        self.assertEqual(len(view.workers), 1)
+        self.assertEqual(_FakeWorker.instances[0].active_id, "active-1")
+        self.assertTrue(_FakeWorker.instances[0].started)
+        self.assertEqual(len(_FakeWorker.instances[0].detail_ready.callbacks), 2)
+
+    def test_activities_view_source_contains_active_sign_detail_button(self):
+        activities_view_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/activities_view.py").read_text(encoding="utf-8")
+        self.assertIn('detail_btn = QPushButton("签到详情")', activities_view_source)
+        self.assertIn("card.mousePressEvent = lambda event, a=act: self._handle_active_card_click(event, a)", activities_view_source)
+
+    def test_activities_view_show_attendance_detail_shows_warning_on_error(self):
+        warnings = []
+        statuses = []
+        view = SimpleNamespace(status_callback=lambda text: statuses.append(text))
+
+        with patch("ui.views.activities_view.QMessageBox.warning", side_effect=lambda *args: warnings.append(args[1:3])):
+            ActivitiesView._show_attendance_detail(view, SimpleNamespace(title="签到1"), "网络错误")
+
+        self.assertEqual(warnings, [("加载失败", "获取签到详情失败：\n网络错误")])
+        self.assertEqual(statuses, ["签到详情加载失败"])
+
+    def test_activities_view_active_card_click_opens_qrcode_on_left_click(self):
+        shown = []
+        view = SimpleNamespace(_show_qrcode=lambda act: shown.append(act))
+        act = SimpleNamespace(title="签到1")
+
+        class _FakeEvent:
+            def button(self):
+                return Qt.MouseButton.LeftButton
+
+        ActivitiesView._handle_active_card_click(view, _FakeEvent(), act)
+
+        self.assertEqual(shown, [act])
+
+    def test_attendance_detail_dialog_status_update_sets_local_current_time(self):
+        refreshed = []
+        detail = AttendanceDetail.from_dict(
+            {
+                "yiqianList": [
+                    {"id": 1, "uid": 10, "activeId": 100, "name": "已签学生", "username": "2025001", "status": 1, "submittime": "2026-05-12 13:50:45"},
+                ],
+                "weiqianList": [],
+            }
+        )
+        dialog = SimpleNamespace(
+            detail=detail,
+            setEnabled=lambda enabled: refreshed.append(("enabled", enabled)),
+            _refresh_tables=lambda preferred_uid="": refreshed.append(("refresh", preferred_uid)),
+            _status_worker=None,
+            _pending_selection_uid="",
+        )
+
+        with patch("ui.dialogs.attendance_detail_dialog.QApplication.restoreOverrideCursor", lambda: refreshed.append(("cursor", None))), \
+             patch("ui.dialogs.attendance_detail_dialog.datetime") as mock_datetime:
+            mock_datetime.now.return_value.strftime.return_value = "2026-05-12 14:00:00"
+            from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+            AttendanceDetailDialog._on_status_update_finished(dialog, True, "ok", 10, 5)
+
+        self.assertEqual(dialog.detail.unsigned_records[0].submit_time, "2026-05-12 14:00:00")
+        self.assertEqual(dialog.detail.unsigned_records[0].status_name, "缺勤")
+        self.assertIn(("refresh", ""), refreshed)
+        self.assertIn(("enabled", True), refreshed)
+
+    def test_attendance_detail_dialog_apply_selection_defaults_to_first_record(self):
+        actions = []
+
+        class _FakeTable:
+            def setFocus(self):
+                actions.append(("focus",))
+
+            def setCurrentCell(self, row, col):
+                actions.append(("current", row, col))
+
+            def selectRow(self, row):
+                actions.append(("select", row))
+
+        dialog = SimpleNamespace(
+            tabs=SimpleNamespace(setCurrentIndex=lambda index: actions.append(("tab", index))),
+            _tables={"signed": _FakeTable(), "unsigned": _FakeTable()},
+            detail=AttendanceDetail.from_dict(
+                {
+                    "yiqianList": [{"id": 1, "uid": 10, "activeId": 100, "name": "A", "username": "1", "status": 1}],
+                    "weiqianList": [{"id": 2, "uid": 11, "activeId": 100, "name": "B", "username": "2", "status": 0}],
+                }
+            ),
+            _pending_selection_uid="",
+        )
+        dialog._records_for_tab_key = lambda tab_key: AttendanceDetailDialog._records_for_tab_key(dialog, tab_key)
+        dialog._select_record_by_uid = lambda uid: AttendanceDetailDialog._select_record_by_uid(dialog, uid)
+        dialog._select_first_record = lambda: AttendanceDetailDialog._select_first_record(dialog)
+        dialog._focus_record = lambda tab_key, row: AttendanceDetailDialog._focus_record(dialog, tab_key, row)
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        AttendanceDetailDialog._apply_selection(dialog)
+
+        self.assertEqual(actions, [("tab", 0), ("focus",), ("current", 0, 0), ("select", 0)])
+
+    def test_attendance_detail_dialog_status_update_selects_next_record(self):
+        refreshed = []
+        detail = AttendanceDetail.from_dict(
+            {
+                "yiqianList": [
+                    {"id": 1, "uid": 10, "activeId": 100, "name": "A", "username": "1", "status": 1, "submittime": "2026-05-12 13:50:45"},
+                    {"id": 2, "uid": 11, "activeId": 100, "name": "B", "username": "2", "status": 1, "submittime": "2026-05-12 13:51:00"},
+                ],
+                "weiqianList": [],
+            }
+        )
+        dialog = SimpleNamespace(
+            detail=detail,
+            setEnabled=lambda enabled: refreshed.append(("enabled", enabled)),
+            _refresh_tables=lambda preferred_uid="": refreshed.append(("refresh", preferred_uid)),
+            _apply_selection=lambda: refreshed.append(("fallback", None)),
+            _status_worker=None,
+            _pending_selection_uid="11",
+        )
+
+        with patch("ui.dialogs.attendance_detail_dialog.QApplication.restoreOverrideCursor", lambda: refreshed.append(("cursor", None))), \
+             patch("ui.dialogs.attendance_detail_dialog.datetime") as mock_datetime:
+            mock_datetime.now.return_value.strftime.return_value = "2026-05-12 14:00:00"
+            from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+            AttendanceDetailDialog._on_status_update_finished(dialog, True, "ok", 10, 5)
+
+        self.assertEqual(dialog.detail.unsigned_records[0].submit_time, "2026-05-12 14:00:00")
+        self.assertIn(("refresh", "11"), refreshed)
+
+    def test_attendance_detail_dialog_activate_record_ignores_out_of_range_rows(self):
+        dialog = SimpleNamespace(
+            _records_for_table=lambda _table: [SimpleNamespace(uid=1)],
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        AttendanceDetailDialog._activate_record(dialog, object(), -1)
+        AttendanceDetailDialog._activate_record(dialog, object(), 5)
+
+    def test_attendance_detail_dialog_enter_activates_focused_row(self):
+        activated = []
+        table = SimpleNamespace(currentRow=lambda: 2)
+        dialog = SimpleNamespace(
+            _tables={"signed": table},
+            focusWidget=lambda: table,
+            _activate_record=lambda current_table, row: activated.append((current_table, row)),
+        )
+
+        class _FakeEvent:
+            def __init__(self):
+                self.accepted = False
+
+            def key(self):
+                return Qt.Key.Key_Return
+
+            def accept(self):
+                self.accepted = True
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        event = _FakeEvent()
+        with patch("PyQt6.QtWidgets.QDialog.keyPressEvent", lambda *args, **kwargs: None):
+            AttendanceDetailDialog.keyPressEvent(dialog, event)
+
+        self.assertEqual(activated, [(table, 2)])
+        self.assertTrue(event.accepted)
+
+    def test_attendance_detail_dialog_tab_change_selects_first_record_in_tab(self):
+        selected = []
+        dialog = SimpleNamespace(
+            _select_first_record_in_tab=lambda tab_key: selected.append(tab_key),
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        AttendanceDetailDialog._on_tab_changed(dialog, 0)
+        AttendanceDetailDialog._on_tab_changed(dialog, 1)
+        AttendanceDetailDialog._on_tab_changed(dialog, 2)
+
+        self.assertEqual(selected, ["signed", "unsigned"])
+
+    def test_attendance_status_edit_dialog_signed_option_maps_to_status_one(self):
+        from PyQt6.QtWidgets import QApplication
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        app = QApplication.instance() or QApplication([])
+        dialog = AttendanceStatusEditDialog(
+            SimpleNamespace(name="张三", username="2025001", status=0, status_name="未签")
+        )
+
+        dialog.shortcut_buttons["1"].setChecked(True)
+
+        self.assertEqual(dialog.selected_status, 1)
+        dialog.deleteLater()
+
+    def test_attendance_detail_dialog_unsigned_signed_submits_status_two(self):
+        dialog = SimpleNamespace()
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        self.assertEqual(AttendanceDetailDialog._resolve_submitted_status(dialog, "unsigned", 1), 2)
+        self.assertEqual(AttendanceDetailDialog._resolve_submitted_status(dialog, "signed", 1), 1)
+        self.assertEqual(AttendanceDetailDialog._resolve_submitted_status(dialog, "unsigned", 5), 5)
+
+    def test_attendance_detail_close_button_has_no_focus(self):
+        from PyQt6.QtWidgets import QApplication
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        app = QApplication.instance() or QApplication([])
+        dialog = AttendanceDetailDialog(
+            crawler=object(),
+            activity=SimpleNamespace(title="签到1", time_range="t", create_time="c", active_id="a"),
+            detail=AttendanceDetail.from_dict({"yiqianList": [], "weiqianList": []}),
+        )
+
+        self.assertEqual(dialog.close_btn.focusPolicy(), Qt.FocusPolicy.NoFocus)
+        dialog.deleteLater()
+
     def test_refresh_qrcode_parses_enc_and_sign_code(self):
         class _FakeActivityAPI(ActivityAPI):
             def __init__(self):
@@ -2715,7 +3063,7 @@ class ChatAPITests(unittest.TestCase):
                 setText=lambda text: calls.append(("hint", text)),
                 show=lambda: calls.append("show_hint"),
             ),
-            _load_message_list=lambda: calls.append("load_list"),
+            _load_message_list=lambda show_loading=True: calls.append(("load_list", show_loading)),
             _ensure_msync_connected=lambda: calls.append("ensure_msync"),
         )
 
@@ -2731,7 +3079,7 @@ class ChatAPITests(unittest.TestCase):
                 "ws_info",
                 ("enabled", True),
                 ("text", "刷新"),
-                "load_list",
+                ("load_list", True),
                 "ensure_msync",
             ],
         )
@@ -2749,13 +3097,52 @@ class ChatAPITests(unittest.TestCase):
                 setText=lambda text: calls.append(("hint", text)),
                 show=lambda: calls.append("show_hint"),
             ),
-            _load_message_list=lambda: calls.append("load_list"),
+            _load_message_list=lambda show_loading=True: calls.append(("load_list", show_loading)),
             _ensure_msync_connected=lambda: calls.append("ensure_msync"),
         )
 
         ChatView._refresh_message_tab(view, auto_triggered=True)
 
         self.assertEqual(calls, ["ws_info", "ensure_msync"])
+
+    def test_chat_view_realtime_message_list_reload_skips_loading_hint(self):
+        loaded = []
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(session_manager=SimpleNamespace(course_params={"im_tuid": "25278974"})),
+            _current_target_id="",
+            _current_history_id="",
+            _current_target_name="",
+            _history_id_by_peer={},
+            _raw_sessions=[],
+            _message_cache={},
+            _pending_read_acks={},
+            _unread_count_by_peer={},
+        )
+        view._resolve_message_peer_id = lambda msg: ChatView._resolve_message_peer_id(view, msg)
+        view._normalize_unread_peer_id = lambda peer_id: ChatView._normalize_unread_peer_id(view, peer_id)
+        view._store_class_info_metadata = lambda peer_id, class_info, allow_avatar_update=True: False
+        view._conversation_key = lambda peer_id=None, history_id=None: str(history_id or peer_id or "")
+        view._append_cached_message = lambda **kwargs: True
+        view._is_ai_assistant_conversation = lambda peer_id, msg=None: False
+        view._is_current_conversation_message = lambda peer_id, msg: False
+        view._get_unread_count = lambda peer_id="", history_id="", session=None: 0
+        view._set_unread_count = lambda peer_id, unread_count, history_id="": None
+        view._load_message_list = lambda show_loading=True: loaded.append(show_loading)
+
+        with patch.object(ChatView, "_schedule_realtime_message_refresh", lambda current: None):
+            ChatView._on_msync_message(
+                view,
+                {
+                    "from": "358566558",
+                    "to": "25278974",
+                    "peer_id": "358566558",
+                    "content": "新的实时消息",
+                    "timestamp": 1778312000000,
+                    "message_id": "1549399999999999999",
+                },
+            )
+
+        self.assertEqual(loaded, [False])
 
     def test_chat_view_refresh_message_tab_after_realtime_retries_when_busy(self):
         calls = []
