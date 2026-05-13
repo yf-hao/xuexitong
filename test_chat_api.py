@@ -2614,6 +2614,33 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(stats["事假"], 1)
         self.assertEqual(stats["病假"], 1)
 
+    def test_attendance_detail_filter_matches_partial_name_and_username(self):
+        detail = AttendanceDetail.from_dict(
+            {
+                "yiqianList": [
+                    {"id": 1, "uid": 10, "activeId": 100, "name": "张三", "username": "2025001", "status": 1},
+                    {"id": 2, "uid": 11, "activeId": 100, "name": "李四", "username": "1203456", "status": 1},
+                ],
+                "weiqianList": [],
+            }
+        )
+        dialog = SimpleNamespace(
+            detail=detail,
+            search_input=SimpleNamespace(text=lambda: "张"),
+            _records_for_tab_key=lambda tab_key: AttendanceDetailDialog._records_for_tab_key(dialog, tab_key),
+            _search_query=lambda: AttendanceDetailDialog._search_query(dialog),
+            _record_matches_query=lambda record, query: AttendanceDetailDialog._record_matches_query(dialog, record, query),
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        name_matches = AttendanceDetailDialog._filtered_records_for_tab_key(dialog, "signed")
+        dialog.search_input = SimpleNamespace(text=lambda: "203")
+        username_matches = AttendanceDetailDialog._filtered_records_for_tab_key(dialog, "signed")
+
+        self.assertEqual([record.name for record in name_matches], ["张三"])
+        self.assertEqual([record.name for record in username_matches], ["李四"])
+
     def test_attendance_detail_update_record_status_moves_record_between_tabs(self):
         detail = AttendanceDetail.from_dict(
             {
@@ -2791,8 +2818,10 @@ class ChatAPITests(unittest.TestCase):
             _pending_selection_uid="",
         )
         dialog._records_for_tab_key = lambda tab_key: AttendanceDetailDialog._records_for_tab_key(dialog, tab_key)
+        dialog._filtered_records_for_tab_key = lambda tab_key: AttendanceDetailDialog._filtered_records_for_tab_key(dialog, tab_key)
         dialog._select_record_by_uid = lambda uid: AttendanceDetailDialog._select_record_by_uid(dialog, uid)
-        dialog._select_first_record = lambda: AttendanceDetailDialog._select_first_record(dialog)
+        dialog._search_query = lambda: ""
+        dialog._select_first_record = lambda preferred_tab_key="": AttendanceDetailDialog._select_first_record(dialog, preferred_tab_key)
         dialog._focus_record = lambda tab_key, row: AttendanceDetailDialog._focus_record(dialog, tab_key, row)
 
         from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
@@ -2800,6 +2829,46 @@ class ChatAPITests(unittest.TestCase):
         AttendanceDetailDialog._apply_selection(dialog)
 
         self.assertEqual(actions, [("tab", 0), ("focus",), ("current", 0, 0), ("select", 0)])
+
+    def test_attendance_detail_search_button_refresh_prefers_current_tab_first_result(self):
+        refreshed = []
+        dialog = SimpleNamespace(
+            search_input=SimpleNamespace(text=lambda: "203"),
+            tabs=SimpleNamespace(count=lambda: 2, currentIndex=lambda: 1),
+            _refresh_tables=lambda preferred_uid="", preferred_tab_key="": refreshed.append((preferred_uid, preferred_tab_key)),
+            _tab_key_for_index=lambda index: "signed" if index == 0 else "unsigned",
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        AttendanceDetailDialog._execute_search(dialog)
+
+        self.assertEqual(dialog._active_search_query, "203")
+        self.assertEqual(refreshed, [("", "unsigned")])
+
+    def test_attendance_detail_search_clear_restores_all_records(self):
+        refreshed = []
+        dialog = SimpleNamespace(
+            _active_search_query="203",
+            tabs=SimpleNamespace(count=lambda: 2, currentIndex=lambda: 0),
+            _refresh_tables=lambda preferred_uid="", preferred_tab_key="": refreshed.append((preferred_uid, preferred_tab_key)),
+            _tab_key_for_index=lambda index: "signed" if index == 0 else "unsigned",
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
+
+        AttendanceDetailDialog._on_search_text_changed(dialog, "")
+
+        self.assertEqual(dialog._active_search_query, "")
+        self.assertEqual(refreshed, [("", "signed")])
+
+    def test_attendance_detail_dialog_source_contains_tab_row_search_button(self):
+        dialog_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/dialogs/attendance_detail_dialog.py").read_text(encoding="utf-8")
+
+        self.assertIn('self.search_btn = QPushButton("搜索")', dialog_source)
+        self.assertIn("self.tabs.setCornerWidget(search_container, Qt.Corner.TopRightCorner)", dialog_source)
+        self.assertIn("font-size: 12px;", dialog_source)
+        self.assertIn("self.search_input.textChanged.connect(self._on_search_text_changed)", dialog_source)
 
     def test_attendance_detail_dialog_status_update_selects_next_record(self):
         refreshed = []
@@ -2832,14 +2901,15 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn(("refresh", "11"), refreshed)
 
     def test_attendance_detail_dialog_activate_record_ignores_out_of_range_rows(self):
+        table = SimpleNamespace(property=lambda _name: "signed")
         dialog = SimpleNamespace(
-            _records_for_table=lambda _table: [SimpleNamespace(uid=1)],
+            _filtered_records_for_tab_key=lambda _tab_key: [SimpleNamespace(uid=1)],
         )
 
         from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
 
-        AttendanceDetailDialog._activate_record(dialog, object(), -1)
-        AttendanceDetailDialog._activate_record(dialog, object(), 5)
+        AttendanceDetailDialog._activate_record(dialog, table, -1)
+        AttendanceDetailDialog._activate_record(dialog, table, 5)
 
     def test_attendance_detail_dialog_enter_activates_focused_row(self):
         activated = []

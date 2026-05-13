@@ -1,9 +1,9 @@
 """签到详情对话框。"""
 from datetime import datetime
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QDialog, QHBoxLayout, QLabel, QMessageBox,
-    QPushButton, QHeaderView, QRadioButton, QTableWidget, QTableWidgetItem,
-    QTabWidget, QVBoxLayout, QWidget
+    QApplication, QButtonGroup, QDialog, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QHeaderView, QRadioButton, QTableWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
 )
 from PyQt6.QtCore import Qt
 from models.attendance_record import AttendanceDetail
@@ -109,6 +109,7 @@ class AttendanceDetailDialog(QDialog):
         self.crawler = crawler
         self.activity = activity
         self.detail = detail
+        self._active_search_query = ""
         self._status_worker = None
         self._tables = {}
         self._pending_selection_uid = ""
@@ -177,6 +178,40 @@ class AttendanceDetailDialog(QDialog):
 
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索姓名或学号...")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setFixedWidth(220)
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #404040;
+                border-radius: 5px;
+                font-size: 12px;
+                padding: 6px 8px;
+            }
+        """)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        self.search_input.returnPressed.connect(self._execute_search)
+
+        self.search_btn = QPushButton("搜索")
+        self.search_btn.setFixedWidth(72)
+        self.search_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 12px;
+                padding: 6px 12px;
+            }
+        """)
+        self.search_btn.clicked.connect(self._execute_search)
+
+        search_container = QWidget()
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(8)
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(self.search_btn)
+        self.tabs.setCornerWidget(search_container, Qt.Corner.TopRightCorner)
         layout.addWidget(self.tabs, stretch=1)
         self._refresh_tables()
         
@@ -258,24 +293,29 @@ class AttendanceDetailDialog(QDialog):
             f"<span style='color: #aaaaaa;'>代签：{stats['代签']}</span>"
         )
 
-    def _refresh_tables(self, preferred_uid: str = ""):
+    def _refresh_tables(self, preferred_uid: str = "", preferred_tab_key: str = ""):
         current_index = self.tabs.currentIndex() if self.tabs.count() else 0
         self.stats_label.setText(self._build_stats_text())
         self._tables = {}
         self.tabs.blockSignals(True)
         self.tabs.clear()
+        signed_records = self._filtered_records_for_tab_key("signed")
+        unsigned_records = self._filtered_records_for_tab_key("unsigned")
         self.tabs.addTab(
-            self._build_records_tab(self.detail.signed_records, empty_text="暂无已签学生", tab_key="signed"),
+            self._build_records_tab(signed_records, empty_text=self._empty_text_for_tab("signed"), tab_key="signed"),
             f"已签({len(self.detail.signed_records)})",
         )
         self.tabs.addTab(
-            self._build_records_tab(self.detail.unsigned_records, empty_text="暂无未签学生", tab_key="unsigned"),
+            self._build_records_tab(unsigned_records, empty_text=self._empty_text_for_tab("unsigned"), tab_key="unsigned"),
             f"未签({len(self.detail.unsigned_records)})",
         )
         if self.tabs.count():
             self.tabs.setCurrentIndex(min(current_index, self.tabs.count() - 1))
         self.tabs.blockSignals(False)
-        self._apply_selection(preferred_uid)
+        self._apply_selection(
+            preferred_uid,
+            preferred_tab_key=preferred_tab_key or self._tab_key_for_index(current_index),
+        )
 
     def _records_for_table(self, table: QTableWidget):
         tab_key = table.property("tab_key")
@@ -284,16 +324,48 @@ class AttendanceDetailDialog(QDialog):
     def _records_for_tab_key(self, tab_key: str):
         return self.detail.signed_records if tab_key == "signed" else self.detail.unsigned_records
 
-    def _apply_selection(self, preferred_uid: str = ""):
+    def _filtered_records_for_tab_key(self, tab_key: str):
+        records = self._records_for_tab_key(tab_key)
+        query = self._search_query()
+        if not query:
+            return list(records)
+        return [record for record in records if self._record_matches_query(record, query)]
+
+    def _search_query(self) -> str:
+        active_query = getattr(self, "_active_search_query", None)
+        if active_query is not None:
+            return str(active_query or "").strip().lower()
+        if not hasattr(self, "search_input"):
+            return ""
+        return str(self.search_input.text() or "").strip().lower()
+
+    def _record_matches_query(self, record, query: str) -> bool:
+        if not query:
+            return True
+        return query in str(record.name or "").lower() or query in str(record.username or "").lower()
+
+    def _empty_text_for_tab(self, tab_key: str) -> str:
+        if self._search_query():
+            return "无匹配结果"
+        return "暂无已签学生" if tab_key == "signed" else "暂无未签学生"
+
+    def _tab_key_for_index(self, index: int) -> str:
+        return "signed" if index == 0 else "unsigned"
+
+    def _apply_selection(self, preferred_uid: str = "", preferred_tab_key: str = ""):
         target_uid = str(preferred_uid or self._pending_selection_uid or "").strip()
         self._pending_selection_uid = ""
         if target_uid and self._select_record_by_uid(target_uid):
             return
-        self._select_first_record()
+        self._select_first_record(preferred_tab_key=preferred_tab_key)
 
-    def _select_first_record(self):
-        for tab_key in ("signed", "unsigned"):
-            if self._records_for_tab_key(tab_key):
+    def _select_first_record(self, preferred_tab_key: str = ""):
+        tab_keys = ["signed", "unsigned"]
+        if preferred_tab_key in tab_keys:
+            tab_keys.remove(preferred_tab_key)
+            tab_keys.insert(0, preferred_tab_key)
+        for tab_key in tab_keys:
+            if self._filtered_records_for_tab_key(tab_key):
                 self._focus_record(tab_key, 0)
                 return
 
@@ -302,7 +374,7 @@ class AttendanceDetailDialog(QDialog):
         if not uid_str:
             return False
         for tab_key in ("signed", "unsigned"):
-            for row, record in enumerate(self._records_for_tab_key(tab_key)):
+            for row, record in enumerate(self._filtered_records_for_tab_key(tab_key)):
                 if str(record.uid) == uid_str:
                     self._focus_record(tab_key, row)
                     return True
@@ -310,7 +382,7 @@ class AttendanceDetailDialog(QDialog):
 
     def _focus_record(self, tab_key: str, row: int):
         table = self._tables.get(tab_key)
-        records = self._records_for_tab_key(tab_key)
+        records = self._filtered_records_for_tab_key(tab_key)
         if table is None or row < 0 or row >= len(records):
             return
         self.tabs.setCurrentIndex(0 if tab_key == "signed" else 1)
@@ -319,7 +391,7 @@ class AttendanceDetailDialog(QDialog):
         table.selectRow(row)
 
     def _select_first_record_in_tab(self, tab_key: str):
-        records = self._records_for_tab_key(tab_key)
+        records = self._filtered_records_for_tab_key(tab_key)
         if records:
             self._focus_record(tab_key, 0)
 
@@ -329,6 +401,16 @@ class AttendanceDetailDialog(QDialog):
         elif index == 1:
             self._select_first_record_in_tab("unsigned")
 
+    def _execute_search(self):
+        self._active_search_query = str(self.search_input.text() or "").strip().lower()
+        self._refresh_tables(preferred_tab_key=self._tab_key_for_index(self.tabs.currentIndex() if self.tabs.count() else 0))
+
+    def _on_search_text_changed(self, _text: str):
+        if str(_text or "").strip():
+            return
+        self._active_search_query = ""
+        self._refresh_tables(preferred_tab_key=self._tab_key_for_index(self.tabs.currentIndex() if self.tabs.count() else 0))
+
     def _next_record_uid(self, records, row: int) -> str:
         next_index = row + 1
         if 0 <= next_index < len(records):
@@ -336,7 +418,7 @@ class AttendanceDetailDialog(QDialog):
         return ""
 
     def _activate_record(self, table: QTableWidget, row: int):
-        records = self._records_for_table(table)
+        records = self._filtered_records_for_tab_key(str(table.property("tab_key") or ""))
         if row < 0 or row >= len(records):
             return
 
