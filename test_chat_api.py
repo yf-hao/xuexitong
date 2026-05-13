@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, Qt
 
 from core.apis.chat_api import ChatAPI
 from core.apis.activity_api import ActivityAPI
@@ -2939,6 +2939,154 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(activated, [(table, 2)])
         self.assertTrue(event.accepted)
 
+    def test_attendance_status_edit_dialog_apply_name_column_visibility(self):
+        visible_states = []
+        sizes = []
+        dialog = SimpleNamespace(
+            name_column=SimpleNamespace(
+                setVisible=lambda visible: visible_states.append(visible),
+                setMinimumWidth=lambda width: sizes.append(("column", width)),
+            ),
+            _current_name_column_width=lambda: 380,
+            _position_name_zoom_button=lambda: sizes.append(("button", None)),
+            resize=lambda width, height: sizes.append((width, height)),
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        AttendanceStatusEditDialog._apply_name_column_visibility(dialog)
+        AttendanceStatusEditDialog._apply_name_column_visibility(dialog)
+
+        self.assertEqual(visible_states, [True, True])
+        self.assertEqual(sizes, [("column", 380), (800, 360), ("button", None), ("column", 380), (800, 360), ("button", None)])
+
+    def test_attendance_status_edit_dialog_adjust_name_font_size_click_and_shift_click(self):
+        updates = []
+        class _DialogStub:
+            NAME_COLUMN_FONT_SIZE = 72
+            NAME_COLUMN_FONT_SIZE_MIN = 36
+            _shift_pressed = False
+
+            def _is_shift_pressed(self):
+                return self._shift_pressed
+
+            def _update_name_column_appearance(self):
+                updates.append("appearance")
+
+            def _update_zoom_button_icon(self):
+                updates.append("icon")
+
+            def _apply_name_column_visibility(self):
+                updates.append("layout")
+
+            def _save_name_column_font_size(self):
+                updates.append("save")
+
+        dialog = _DialogStub()
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        dialog._shift_pressed = False
+        AttendanceStatusEditDialog._adjust_name_font_size(dialog)
+        dialog._shift_pressed = True
+        AttendanceStatusEditDialog._adjust_name_font_size(dialog)
+
+        self.assertEqual(dialog.__class__.NAME_COLUMN_FONT_SIZE, 72)
+        self.assertEqual(updates, ["save", "appearance", "icon", "layout", "save", "appearance", "icon", "layout"])
+
+    def test_attendance_status_edit_dialog_load_and_save_name_font_size(self):
+        values = {}
+
+        class _FakeSettings:
+            def value(self, key, default=None):
+                return values.get(key, default)
+
+            def setValue(self, key, value):
+                values[key] = value
+
+        class _DialogStub:
+            NAME_COLUMN_FONT_SIZE_KEY = "attendance_detail/name_column_font_size"
+            NAME_COLUMN_FONT_SIZE = 72
+            NAME_COLUMN_FONT_SIZE_MIN = 36
+
+            def __init__(self):
+                self.settings = _FakeSettings()
+
+        dialog = _DialogStub()
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        values[dialog.NAME_COLUMN_FONT_SIZE_KEY] = "90"
+        AttendanceStatusEditDialog._load_name_column_font_size(dialog)
+        self.assertEqual(dialog.__class__.NAME_COLUMN_FONT_SIZE, 90)
+
+        dialog.__class__.NAME_COLUMN_FONT_SIZE = 114
+        AttendanceStatusEditDialog._save_name_column_font_size(dialog)
+        self.assertEqual(values[dialog.NAME_COLUMN_FONT_SIZE_KEY], 114)
+
+    def test_attendance_status_edit_dialog_update_zoom_button_icon_switches_symbol(self):
+        icon_updates = []
+
+        class _ButtonStub:
+            def setIcon(self, icon):
+                icon_updates.append(("icon", icon))
+
+            def setIconSize(self, size):
+                icon_updates.append(("size", (size.width(), size.height())))
+
+        class _DialogStub:
+            def __init__(self):
+                self.name_zoom_btn = _ButtonStub()
+                self._shift_pressed = False
+
+            def _is_shift_pressed(self):
+                return self._shift_pressed
+
+            def _build_zoom_icon(self, symbol):
+                return symbol
+
+        dialog = _DialogStub()
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        dialog._shift_pressed = False
+        AttendanceStatusEditDialog._update_zoom_button_icon(dialog)
+        dialog._shift_pressed = True
+        AttendanceStatusEditDialog._update_zoom_button_icon(dialog)
+
+        self.assertEqual(icon_updates, [("icon", "+"), ("size", (20, 20)), ("icon", "-"), ("size", (20, 20))])
+
+    def test_attendance_status_edit_dialog_event_filter_updates_shift_icon(self):
+        updates = []
+        from PyQt6.QtWidgets import QApplication
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        app = QApplication.instance() or QApplication([])
+        dialog = AttendanceStatusEditDialog(
+            SimpleNamespace(name="张三", username="2025001", status=0, status_name="未签")
+        )
+        dialog._update_zoom_button_icon = lambda: updates.append("icon")
+        dialog.isVisible = lambda: True
+
+        class _FakeEvent:
+            def __init__(self, event_type, key):
+                self._type = event_type
+                self._key = key
+
+            def type(self):
+                return self._type
+
+            def key(self):
+                return self._key
+
+        with patch("PyQt6.QtWidgets.QDialog.eventFilter", return_value=False):
+            AttendanceStatusEditDialog.eventFilter(dialog, None, _FakeEvent(QEvent.Type.KeyPress, Qt.Key.Key_Shift))
+            AttendanceStatusEditDialog.eventFilter(dialog, None, _FakeEvent(QEvent.Type.KeyRelease, Qt.Key.Key_Shift))
+
+        self.assertEqual(updates, ["icon", "icon"])
+        self.assertFalse(dialog._shift_pressed)
+        dialog.deleteLater()
+
     def test_attendance_detail_dialog_tab_change_selects_first_record_in_tab(self):
         selected = []
         dialog = SimpleNamespace(
@@ -2966,6 +3114,30 @@ class ChatAPITests(unittest.TestCase):
 
         self.assertEqual(dialog.selected_status, 1)
         dialog.deleteLater()
+
+    def test_attendance_status_edit_dialog_source_contains_builtin_left_name_column(self):
+        dialog_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/dialogs/attendance_detail_dialog.py").read_text(encoding="utf-8")
+
+        self.assertIn('self.name_column_label = QLabel("")', dialog_source)
+        self.assertIn('self.info_label = QLabel(f"<b>当前状态：</b>{self.record.status_name}")', dialog_source)
+        self.assertIn("layout = QHBoxLayout(self)", dialog_source)
+        self.assertIn("NAME_COLUMN_FONT_SIZE = 72", dialog_source)
+        self.assertIn('self.name_zoom_btn = QPushButton("", self.name_column)', dialog_source)
+        self.assertIn("if event.key() == Qt.Key.Key_Shift:", dialog_source)
+        self.assertIn("font-size:{int(self.__class__.NAME_COLUMN_FONT_SIZE)}px", dialog_source)
+        self.assertIn("margin-top:8px;", dialog_source)
+        self.assertIn("self.name_zoom_btn.move(x, margin)", dialog_source)
+        self.assertIn("QSvgRenderer", dialog_source)
+        self.assertIn('return QIcon(pixmap)', dialog_source)
+        self.assertIn("QSettings", dialog_source)
+        self.assertIn("self.__class__.NAME_COLUMN_FONT_SIZE = self.__class__.NAME_COLUMN_FONT_SIZE + 6", dialog_source)
+        self.assertIn("self._app.installEventFilter(self)", dialog_source)
+        self.assertIn("self._app.removeEventFilter(self)", dialog_source)
+        self.assertIn("self._shift_pressed = event.type() == QEvent.Type.KeyPress", dialog_source)
+        self.assertNotIn('QShortcut(QKeySequence("F8")', dialog_source)
+        self.assertNotIn('<b>姓名：</b>{self.record.name}', dialog_source)
+        self.assertNotIn('<b>学号：</b>{self.record.username}', dialog_source)
+        self.assertNotIn("self.username_column_label", dialog_source)
 
     def test_attendance_detail_dialog_unsigned_signed_submits_status_two(self):
         dialog = SimpleNamespace()

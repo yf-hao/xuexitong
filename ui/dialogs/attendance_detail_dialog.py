@@ -1,11 +1,13 @@
 """签到详情对话框。"""
 from datetime import datetime
+from PyQt6.QtCore import QByteArray, QEvent, QSize, QSettings, Qt
+from PyQt6.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QHeaderView, QRadioButton, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
 )
-from PyQt6.QtCore import Qt
 from models.attendance_record import AttendanceDetail
 from models.activity import Activity
 from ui.workers import AttendanceStatusUpdateWorker
@@ -14,6 +16,10 @@ from ui.workers import AttendanceStatusUpdateWorker
 class AttendanceStatusEditDialog(QDialog):
     """签到状态修改对话框。"""
 
+    NAME_COLUMN_FONT_SIZE_KEY = "attendance_detail/name_column_font_size"
+    NAME_COLUMN_FONT_SIZE = 72
+    NAME_COLUMN_FONT_SIZE_MIN = 36
+    NAME_COLUMN_MIN_WIDTH = 340
     STATUS_OPTIONS = [
         ("1", "已签", 1),
         ("2", "缺勤", 5),
@@ -27,13 +33,18 @@ class AttendanceStatusEditDialog(QDialog):
     def __init__(self, record, parent=None):
         super().__init__(parent)
         self.record = record
+        self.settings = QSettings("HaoSoft", "XuexitongManager")
+        self._app = QApplication.instance()
+        self._shift_pressed = False
         self.button_group = QButtonGroup(self)
         self.shortcut_buttons = {}
+        self._load_name_column_font_size()
         self.setup_ui()
+        if self._app is not None:
+            self._app.installEventFilter(self)
 
     def setup_ui(self):
         self.setWindowTitle(f"修改签到状态 - {self.record.name}")
-        self.resize(320, 360)
         self.setModal(True)
         self.setStyleSheet("""
             QDialog { background-color: #1e1e1e; }
@@ -50,14 +61,53 @@ class AttendanceStatusEditDialog(QDialog):
             QPushButton:hover { background-color: #005a9e; }
         """)
 
-        layout = QVBoxLayout(self)
-        info_label = QLabel(
-            f"<b>姓名：</b>{self.record.name}<br>"
-            f"<b>学号：</b>{self.record.username}<br>"
-            f"<b>当前状态：</b>{self.record.status_name}"
-        )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        self.name_column = QWidget()
+        self.name_column.setMinimumWidth(self.NAME_COLUMN_MIN_WIDTH)
+        self.name_column.setStyleSheet("""
+            QWidget {
+                background-color: #2d2d2d;
+                border: 1px solid #404040;
+                border-radius: 8px;
+            }
+            QLabel {
+                color: #ffffff;
+                font-weight: bold;
+                padding: 24px;
+            }
+        """)
+        name_column_layout = QVBoxLayout(self.name_column)
+        name_column_layout.setContentsMargins(0, 0, 0, 0)
+        self.name_zoom_btn = QPushButton("", self.name_column)
+        self.name_zoom_btn.setFixedSize(34, 34)
+        self.name_zoom_btn.setToolTip("点击放大，按住 Shift 点击缩小")
+        self.name_zoom_btn.setStyleSheet("""
+            QPushButton {
+                padding: 0;
+                border-radius: 17px;
+                background-color: rgba(0, 122, 204, 220);
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 90, 158, 235);
+            }
+        """)
+        self.name_zoom_btn.clicked.connect(self._adjust_name_font_size)
+        self.name_column_label = QLabel("")
+        self.name_column_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.name_column_label.setWordWrap(True)
+        name_column_layout.addWidget(self.name_column_label)
+        layout.addWidget(self.name_column)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.info_label = QLabel(f"<b>当前状态：</b>{self.record.status_name}")
+        self.info_label.setWordWrap(True)
+        right_layout.addWidget(self.info_label)
 
         for key, text, status in self.STATUS_OPTIONS:
             radio = QRadioButton(f"{key}. {text}")
@@ -65,7 +115,7 @@ class AttendanceStatusEditDialog(QDialog):
             self.shortcut_buttons[key] = radio
             if status == self.record.status:
                 radio.setChecked(True)
-            layout.addWidget(radio)
+            right_layout.addWidget(radio)
 
         checked = self.button_group.checkedButton()
         if checked is None and self.shortcut_buttons:
@@ -73,7 +123,7 @@ class AttendanceStatusEditDialog(QDialog):
 
         hint_label = QLabel("快捷键：1-7 选择状态，Enter 确认")
         hint_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
-        layout.addWidget(hint_label)
+        right_layout.addWidget(hint_label)
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -85,13 +135,105 @@ class AttendanceStatusEditDialog(QDialog):
         ok_btn.setDefault(True)
         ok_btn.clicked.connect(self.accept)
         btn_layout.addWidget(ok_btn)
-        layout.addLayout(btn_layout)
+        right_layout.addLayout(btn_layout)
+        layout.addWidget(right_panel, stretch=1)
+
+        self._update_name_column_appearance()
+        self._update_zoom_button_icon()
+        self._apply_name_column_visibility()
 
     @property
     def selected_status(self) -> int:
         return self.button_group.checkedId()
 
+    def _apply_name_column_visibility(self):
+        self.name_column.setVisible(True)
+        column_width = self._current_name_column_width()
+        self.name_column.setMinimumWidth(column_width)
+        self.resize(420 + column_width, 360)
+        self._position_name_zoom_button()
+
+    def _adjust_name_font_size(self):
+        if self._is_shift_pressed():
+            self.__class__.NAME_COLUMN_FONT_SIZE = max(
+                self.NAME_COLUMN_FONT_SIZE_MIN,
+                self.__class__.NAME_COLUMN_FONT_SIZE - 6,
+            )
+        else:
+            self.__class__.NAME_COLUMN_FONT_SIZE = self.__class__.NAME_COLUMN_FONT_SIZE + 6
+        self._save_name_column_font_size()
+        self._update_name_column_appearance()
+        self._update_zoom_button_icon()
+        self._apply_name_column_visibility()
+
+    def _update_name_column_appearance(self):
+        username_size = max(24, int(self.__class__.NAME_COLUMN_FONT_SIZE * 0.5))
+        username_text = str(self.record.username or "")
+        self.name_column_label.setText(
+            f"<div style='text-align:center;'>"
+            f"<div style='color:#ffffff; font-size:{int(self.__class__.NAME_COLUMN_FONT_SIZE)}px; font-weight:bold;'>{self.record.name}</div>"
+            f"<div style='color:#cfd8dc; font-size:{username_size}px; margin-top:8px;'>{username_text}</div>"
+            f"</div>"
+        )
+        self.name_column_label.setStyleSheet("padding: 24px;")
+
+    def _current_name_column_width(self) -> int:
+        font = QFont(self.name_column_label.font())
+        font.setPixelSize(int(self.__class__.NAME_COLUMN_FONT_SIZE))
+        name_metrics = QFontMetrics(font)
+        name_width = name_metrics.horizontalAdvance(str(self.record.name or ""))
+        username_font = QFont(self.name_column_label.font())
+        username_font.setPixelSize(max(24, int(self.__class__.NAME_COLUMN_FONT_SIZE * 0.5)))
+        username_width = QFontMetrics(username_font).horizontalAdvance(str(self.record.username or ""))
+        return max(self.NAME_COLUMN_MIN_WIDTH, max(name_width, username_width) + 96)
+
+    def _position_name_zoom_button(self):
+        if not hasattr(self, "name_zoom_btn") or not hasattr(self, "name_column"):
+            return
+        margin = 10
+        x = max(margin, self.name_column.width() - self.name_zoom_btn.width() - margin)
+        self.name_zoom_btn.move(x, margin)
+        self.name_zoom_btn.raise_()
+
+    def _update_zoom_button_icon(self):
+        symbol = "-" if self._is_shift_pressed() else "+"
+        self.name_zoom_btn.setIcon(self._build_zoom_icon(symbol))
+        self.name_zoom_btn.setIconSize(QSize(20, 20))
+
+    def _is_shift_pressed(self) -> bool:
+        return bool(getattr(self, "_shift_pressed", False))
+
+    def _build_zoom_icon(self, symbol: str) -> QIcon:
+        svg = f"""
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="10" cy="10" r="6.5" stroke="white" stroke-width="2"/>
+            <line x1="14.8" y1="14.8" x2="20" y2="20" stroke="white" stroke-width="2.2" stroke-linecap="round"/>
+            <line x1="7" y1="10" x2="13" y2="10" stroke="white" stroke-width="2" stroke-linecap="round"/>
+            {"<line x1='10' y1='7' x2='10' y2='13' stroke='white' stroke-width='2' stroke-linecap='round'/>" if symbol == "+" else ""}
+        </svg>
+        """
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _load_name_column_font_size(self):
+        saved_size = self.settings.value(self.NAME_COLUMN_FONT_SIZE_KEY, self.NAME_COLUMN_FONT_SIZE)
+        try:
+            self.__class__.NAME_COLUMN_FONT_SIZE = max(self.NAME_COLUMN_FONT_SIZE_MIN, int(saved_size))
+        except (TypeError, ValueError):
+            self.__class__.NAME_COLUMN_FONT_SIZE = self.NAME_COLUMN_FONT_SIZE
+
+    def _save_name_column_font_size(self):
+        self.settings.setValue(self.NAME_COLUMN_FONT_SIZE_KEY, int(self.__class__.NAME_COLUMN_FONT_SIZE))
+
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift:
+            self._shift_pressed = True
+            self._update_zoom_button_icon()
         key_text = event.text()
         button = self.shortcut_buttons.get(key_text)
         if button is not None:
@@ -99,6 +241,29 @@ class AttendanceStatusEditDialog(QDialog):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift:
+            self._shift_pressed = False
+            self._update_zoom_button_icon()
+        super().keyReleaseEvent(event)
+
+    def eventFilter(self, watched, event):
+        if self.isVisible() and event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            if event.key() == Qt.Key.Key_Shift:
+                self._shift_pressed = event.type() == QEvent.Type.KeyPress
+                self._update_zoom_button_icon()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event):
+        self._position_name_zoom_button()
+        super().resizeEvent(event)
+
+    def closeEvent(self, event):
+        if self._app is not None:
+            self._app.removeEventFilter(self)
+        self._shift_pressed = False
+        super().closeEvent(event)
 
 
 class AttendanceDetailDialog(QDialog):
@@ -448,6 +613,7 @@ class AttendanceDetailDialog(QDialog):
                         return
                     break
         super().keyPressEvent(event)
+
 
     def _resolve_submitted_status(self, source_tab_key: str, selected_status: int) -> int:
         if source_tab_key == "unsigned" and int(selected_status) == 1:
