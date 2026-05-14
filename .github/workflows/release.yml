@@ -195,7 +195,7 @@ jobs:
           cd dist
           chmod +x ${{ matrix.executable }}
           # 创建免安装包
-          tar -czvf XHelper-${{ matrix.platform }}.tar.gz ${{ matrix.executable }}
+          tar -czvf XHelper-${{ needs.check-version.outputs.version }}-${{ matrix.platform }}.tar.gz ${{ matrix.executable }}
 
           # 创建 .deb 安装包
           mkdir -p deb_root/usr/bin
@@ -224,13 +224,13 @@ jobs:
         run: |
           cd dist
           # 压缩生成的 .app 文件夹
-          tar -czvf XHelper-${{ matrix.platform }}.tar.gz XHelper.app
+          tar -czvf XHelper-${{ needs.check-version.outputs.version }}-${{ matrix.platform }}.tar.gz XHelper.app
 
       - name: Package artifact (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           cd dist
-          7z a XHelper-${{ matrix.platform }}.zip ${{ matrix.executable }}
+          7z a XHelper-${{ needs.check-version.outputs.version }}-${{ matrix.platform }}.zip ${{ matrix.executable }}
 
       - name: Build Windows Installer (Inno Setup)
         if: matrix.os == 'windows-latest'
@@ -251,7 +251,7 @@ jobs:
             --icon "XHelper.app" 175 190 \
             --hide-extension "XHelper.app" \
             --app-drop-link 425 190 \
-            "XHelper-${{ matrix.platform }}.dmg" \
+            "XHelper-${{ needs.check-version.outputs.version }}-${{ matrix.platform }}.dmg" \
             "XHelper.app"
 
       - name: Create Release
@@ -265,7 +265,7 @@ jobs:
              dist/XHelper-*.tar.gz
              dist/XHelper-*.zip
              dist/XHelper-*.dmg
-             dist/XHelper-Setup.exe
+             dist/XHelper-*-Setup.exe
              *.deb
           generate_release_notes: false
 
