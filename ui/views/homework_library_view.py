@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction
+from ui.dialogs.homework_publish_dialog import HomeworkPublishDialog
 
 
 class FolderSelectDialog(QDialog):
@@ -282,12 +283,13 @@ class HomeworkLibraryView(QWidget):
         
         # ====== 中部：作业列表 ======
         self.library_tree = QTreeWidget()
-        self.library_tree.setHeaderLabels(["名称", "题量", "分值", "创建者", "创建时间"])
+        self.library_tree.setHeaderLabels(["名称", "题量", "分值", "创建者", "创建时间", "操作"])
         self.library_tree.setColumnWidth(0, 400)
         self.library_tree.setColumnWidth(1, 80)
         self.library_tree.setColumnWidth(2, 80)
         self.library_tree.setColumnWidth(3, 120)
         self.library_tree.setColumnWidth(4, 120)
+        self.library_tree.setColumnWidth(5, 100)
         self.library_tree.setRootIsDecorated(False)
         self.library_tree.setUniformRowHeights(True)
         self.library_tree.setItemsExpandable(False)
@@ -375,7 +377,8 @@ class HomeworkLibraryView(QWidget):
                     "---",
                     "---",
                     folder['author'],
-                    folder['time']
+                    folder['time'],
+                    ""
                 ])
                 
                 item.setForeground(0, Qt.GlobalColor.white)
@@ -389,21 +392,24 @@ class HomeworkLibraryView(QWidget):
             
             # 添加作业
             for work in works:
+                work_item_data = {
+                    'type': 'work',
+                    'id': work['id'],
+                    'title': work['title']
+                }
                 item = QTreeWidgetItem([
                     f"📝 {work['title']}",
                     str(work['question_num']),
                     str(work['score']),
                     work['author'],
-                    work['time']
+                    work['time'],
+                    ""
                 ])
                 
-                item.setData(0, Qt.ItemDataRole.UserRole, {
-                    'type': 'work',
-                    'id': work['id'],
-                    'title': work['title']
-                })
+                item.setData(0, Qt.ItemDataRole.UserRole, work_item_data)
                 
                 self.library_tree.addTopLevelItem(item)
+                self.library_tree.setItemWidget(item, 5, self._create_work_action_widget(work_item_data))
             
             # 更新统计信息
             self.stats_label.setText(f"共 {len(folders)} 个文件夹，{len(works)} 份作业")
@@ -560,6 +566,36 @@ class HomeworkLibraryView(QWidget):
         else:
             path_names = [d['name'] for d in self.directory_path]
             self.path_label.setText(f" / {' / '.join(path_names)}")
+
+    def _create_work_action_widget(self, work_data: dict) -> QWidget:
+        action_widget = QWidget(self.library_tree)
+        layout = QHBoxLayout(action_widget)
+        layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        publish_btn = QPushButton("发布")
+        publish_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        publish_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            QPushButton:pressed {
+                background-color: #1e7e34;
+            }
+        """)
+        publish_btn.clicked.connect(lambda checked=False, data=dict(work_data): self.publish_work(data))
+        layout.addWidget(publish_btn)
+        return action_widget
     
     def rename_work(self, work_data: dict):
         """重命名作业"""
@@ -843,25 +879,46 @@ class HomeworkLibraryView(QWidget):
         """发布作业"""
         work_id = work_data.get('id')
         title = work_data.get('title')
-        
-        reply = QMessageBox.question(
+
+        if not self.crawler or not self.current_course_id or not self.current_class_id:
+            QMessageBox.warning(self, "错误", "无法获取课程信息", QMessageBox.StandardButton.Ok)
+            return
+
+        dialog = HomeworkPublishDialog(
+            title,
+            self.current_course_id,
+            self.current_class_id,
+            work_id,
             self,
-            "确认发布",
-            f"确定要发布作业「{title}」吗？\n\n发布后学生将可以看到此作业。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
         )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self.status_update.emit(f"正在发布作业「{title}」...")
-            # TODO: 调用API发布作业
-            # result = self.crawler.publish_work(work_id)
-            # if result.get('status'):
-            #     QMessageBox.information(self, "成功", "作业发布成功！", QMessageBox.StandardButton.Ok)
-            #     self.load_library()  # 刷新列表
-            # else:
-            #     QMessageBox.warning(self, "失败", f"发布失败: {result.get('msg', '未知错误')}", QMessageBox.StandardButton.Ok)
-            QMessageBox.information(self, "提示", "发布功能开发中...", QMessageBox.StandardButton.Ok)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.status_update.emit("已取消发布作业")
+            return
+        self.status_update.emit(f"正在发布作业「{title}」...")
+        result = self.crawler.publish_work_from_library(
+            self.current_course_id,
+            self.current_class_id,
+            work_id,
+            settings=dialog.publish_settings,
+        )
+        if result.get('status'):
+            self.status_update.emit(f"✅ 作业「{title}」发布成功")
+            QMessageBox.information(
+                self,
+                "发布成功",
+                f"✅ 作业「{title}」已发布成功！",
+                QMessageBox.StandardButton.Ok
+            )
+            self.load_library()
+        else:
+            error_msg = result.get('msg', '未知错误')
+            self.status_update.emit(f"❌ 作业「{title}」发布失败: {error_msg}")
+            QMessageBox.warning(
+                self,
+                "发布失败",
+                f"❌ 发布失败: {error_msg}",
+                QMessageBox.StandardButton.Ok
+            )
 
     def create_folder(self):
         """创建文件夹"""

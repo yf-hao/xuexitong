@@ -2,6 +2,7 @@
 from typing import List, Dict
 import json
 import re
+from datetime import datetime, timedelta
 from models.student_work_stats import StudentWorkStats
 from models.question import Question
 
@@ -1382,6 +1383,145 @@ class HomeworkAPI:
             
         except Exception as e:
             print(f"重命名作业失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": False,
+                "msg": str(e)
+            }
+
+    def _build_library_publish_payload(
+        self,
+        course_id: str,
+        class_id: str,
+        work_library_id: str,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        settings: Dict | None = None,
+    ) -> Dict:
+        start_dt = start_time or datetime.now()
+        end_dt = end_time or (start_dt + timedelta(days=15))
+        try:
+            publish_class_id: int | str = int(class_id)
+        except (TypeError, ValueError):
+            publish_class_id = str(class_id)
+
+        payload = {
+            "courseid": course_id,
+            "workLibraryId": work_library_id,
+            "cpi": self.session_manager.course_params.get("cpi", ""),
+            "publishObj": json.dumps([{"classid": publish_class_id, "publishType": 0}], ensure_ascii=False, separators=(",", ":")),
+            "startTime": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "endTime": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "answerAfterEnd": 0,
+            "passingStandard": 60,
+            "redoTimes": 2,
+            "redoHighestScore": 1,
+            "allowAnswer": 1,
+            "allowScore": 1,
+            "viewTypeScore": 0,
+            "allowPaste": 1,
+            "knowTrueFalse": 0,
+            "randomSort": 1,
+            "randomOptions": 1,
+            "redoDifferQuestion": 0,
+            "endNoticeTime": 24,
+            "intervalNotice": 0,
+            "finishStandard": 0,
+            "blankobj": 1,
+            "completionIngoreCase": 1,
+            "multiHalfScore": 1,
+            "answerEmptyIsObj": 0,
+            "blankIgnoreComma": 1,
+            "evaluation": 0,
+            "evaluationStandard": "",
+            "evaluationNum": 0,
+            "evaluationStartTime": "",
+            "evaluationEndTime": "",
+            "anonymousMarking": 0,
+            "anonymousMarkingResult": 0,
+            "teacherMarkScore": 0,
+            "studentMarkScore": 0,
+            "evalPartakeScore": 0,
+            "stuMarkNum": 0,
+            "teachPlan": 0,
+            "sortAvgScore": 0,
+            "randomNum": 0,
+            "randomType": 0,
+            "randomTypeSet": "",
+            "randomCustomScore": 0,
+            "setMarkScore": 0,
+            "markScoreMin": 0,
+            "markScoreMax": 0,
+            "notShowLastAnswer": 1,
+            "allowDownloadAttachment": 1,
+            "redoDifferLibrary": 0,
+            "saveAsTemplate": 0,
+            "selfMark": 0,
+            "aiReview": 0,
+            "aiAutoMarkScore": 0,
+            "answerAfterEndDeadline": "",
+            "prohibitViewWork": 0,
+            "notShowTeacherComment": 0,
+            "limitReviewer": 0,
+            "limitReviewerObj": json.dumps([], ensure_ascii=False, separators=(",", ":")),
+            "removeMaxMinScore": 0,
+        }
+        if settings:
+            for key, value in settings.items():
+                if key in payload and value is not None:
+                    payload[key] = value
+        return payload
+
+    def publish_work_from_library(
+        self,
+        course_id: str,
+        class_id: str,
+        work_library_id: str,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        settings: Dict | None = None,
+    ) -> Dict:
+        url = "https://mooc2-gray.chaoxing.com/mooc2-ans/work/library/publish"
+        data = self._build_library_publish_payload(
+            course_id,
+            class_id,
+            work_library_id,
+            start_time=start_time,
+            end_time=end_time,
+            settings=settings,
+        )
+
+        headers = {
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Origin': 'https://mooc2-gray.chaoxing.com',
+            'Pragma': 'no-cache',
+            'Referer': f'https://mooc2-gray.chaoxing.com/mooc2-ans/work/library/setting?courseid={course_id}&cpi={self.session_manager.course_params.get("cpi", "")}&workLibraryId={work_library_id}&from=',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+            'X-Requested-With': 'XMLHttpRequest',
+            'sec-ch-ua': '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+        }
+
+        try:
+            response = self.session.post(url, data=data, headers=headers, timeout=15)
+            response.raise_for_status()
+
+            result = response.json()
+            print(f"\n=== 发布作业库作业结果 ===")
+            print(f"作业库ID: {work_library_id}")
+            print(f"结果: {result}")
+            return result
+        except Exception as e:
+            print(f"发布作业库作业失败: {e}")
             import traceback
             traceback.print_exc()
             return {

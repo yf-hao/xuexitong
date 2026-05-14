@@ -245,10 +245,21 @@ class KaTeXSnapshotRenderer:
     def _create_shared_view(cls):
         view = QWebEngineView()
         view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        cls._prepare_shared_view_for_platform(view)
         view.setZoomFactor(cls._CAPTURE_SCALE)
         view.page().setBackgroundColor(QColor(255, 255, 255, 255))
         view.show()
         return view
+
+    @classmethod
+    def _prepare_shared_view_for_platform(cls, view):
+        if not sys.platform.startswith("win"):
+            return
+        view.setWindowFlag(Qt.WindowType.Tool, True)
+        view.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        view.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        view.resize(4, 4)
+        view.move(-32000, -32000)
 
     @classmethod
     def _reset_shared_view(cls):

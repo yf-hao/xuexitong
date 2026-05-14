@@ -1,7 +1,7 @@
 """签到详情对话框。"""
 from datetime import datetime
 from PyQt6.QtCore import QByteArray, QEvent, QSize, QSettings, Qt
-from PyQt6.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -30,12 +30,18 @@ class AttendanceStatusEditDialog(QDialog):
         ("7", "公假", 12),
     ]
 
-    def __init__(self, record, parent=None):
+    def __init__(self, record, crawler=None, active_id="", source_tab_key="", source_records_provider=None, parent=None):
         super().__init__(parent)
         self.record = record
+        self.crawler = crawler
+        self.active_id = str(active_id or "")
+        self.source_tab_key = str(source_tab_key or "")
+        self.source_records_provider = source_records_provider
         self.settings = QSettings("HaoSoft", "XuexitongManager")
         self._app = QApplication.instance()
         self._shift_pressed = False
+        self._status_worker = None
+        self._submit_mode = ""
         self.button_group = QButtonGroup(self)
         self.shortcut_buttons = {}
         self._load_name_column_font_size()
@@ -131,9 +137,18 @@ class AttendanceStatusEditDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
 
+        self.next_btn = QPushButton("下一个")
+        self.next_btn.setFixedWidth(100)
+        self.next_btn.clicked.connect(self._handle_next_clicked)
+        btn_layout.addWidget(self.next_btn)
+        self.next_shortcut = QShortcut(QKeySequence("N"), self)
+        self.next_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.next_shortcut.activated.connect(self._handle_next_clicked)
+
         ok_btn = QPushButton("确定")
+        self.ok_btn = ok_btn
         ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self.accept)
+        ok_btn.clicked.connect(self._handle_accept_clicked)
         btn_layout.addWidget(ok_btn)
         right_layout.addLayout(btn_layout)
         layout.addWidget(right_panel, stretch=1)
@@ -141,6 +156,7 @@ class AttendanceStatusEditDialog(QDialog):
         self._update_name_column_appearance()
         self._update_zoom_button_icon()
         self._apply_name_column_visibility()
+        self._update_navigation_state()
 
     @property
     def selected_status(self) -> int:
@@ -152,6 +168,7 @@ class AttendanceStatusEditDialog(QDialog):
         self.name_column.setMinimumWidth(column_width)
         self.resize(420 + column_width, 360)
         self._position_name_zoom_button()
+        self._update_navigation_state()
 
     def _adjust_name_font_size(self):
         if self._is_shift_pressed():
@@ -176,6 +193,8 @@ class AttendanceStatusEditDialog(QDialog):
             f"</div>"
         )
         self.name_column_label.setStyleSheet("padding: 24px;")
+        if hasattr(self, "info_label"):
+            self.info_label.setText(f"<b>当前状态：</b>{self.record.status_name}")
 
     def _current_name_column_width(self) -> int:
         font = QFont(self.name_column_label.font())
@@ -203,6 +222,146 @@ class AttendanceStatusEditDialog(QDialog):
     def _is_shift_pressed(self) -> bool:
         return bool(getattr(self, "_shift_pressed", False))
 
+    def _source_records(self):
+        if callable(self.source_records_provider):
+            try:
+                return list(self.source_records_provider())
+            except Exception:
+                return []
+        return [self.record]
+
+    def _current_record_index_in_source(self) -> int:
+        uid = str(getattr(self.record, "uid", "") or "")
+        for index, record in enumerate(self._source_records()):
+            if str(getattr(record, "uid", "") or "") == uid:
+                return index
+        return -1
+
+    def _next_record_for_current_source(self):
+        records = self._source_records()
+        current_index = self._current_record_index_in_source()
+        if current_index < 0:
+            return None
+        next_index = current_index + 1
+        if 0 <= next_index < len(records):
+            return records[next_index]
+        return None
+
+    def _update_navigation_state(self):
+        if hasattr(self, "next_btn"):
+            self.next_btn.setEnabled(self._next_record_for_current_source() is not None and self._status_worker is None)
+
+    def _apply_record(self, record):
+        self.record = record
+        self.setWindowTitle(f"修改签到状态 - {self.record.name}")
+        for button in self.shortcut_buttons.values():
+            button.setAutoExclusive(False)
+            button.setChecked(False)
+            button.setAutoExclusive(True)
+        matched = False
+        for status, button in ((button_id, button) for button_id, button in ((self.button_group.id(btn), btn) for btn in self.button_group.buttons())):
+            if int(status) == int(getattr(self.record, "status", -1)):
+                button.setChecked(True)
+                matched = True
+                break
+        if not matched and self.shortcut_buttons:
+            self.shortcut_buttons["1"].setChecked(True)
+        self._update_name_column_appearance()
+        self._apply_name_column_visibility()
+
+    def _selected_submitted_status(self) -> int:
+        selected_status = int(self.selected_status)
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_resolve_submitted_status"):
+            return int(parent._resolve_submitted_status(self.source_tab_key, selected_status))
+        return selected_status
+
+    def _set_controls_enabled(self, enabled: bool):
+        self.setEnabled(enabled)
+        if hasattr(self, "next_shortcut"):
+            self.next_shortcut.setEnabled(enabled)
+
+    def _handle_accept_clicked(self):
+        self._submit_mode = "accept"
+        self._submit_current_status()
+
+    def _handle_next_clicked(self):
+        if not self.next_btn.isEnabled():
+            return
+        self._submit_mode = "next"
+        self._submit_current_status()
+
+    def _submit_current_status(self):
+        new_status = self._selected_submitted_status()
+        if new_status < 0:
+            return
+        if new_status == int(getattr(self.record, "status", -1)):
+            self._advance_after_submit(new_status, status_changed=False)
+            return
+        if self.crawler is None or not self.active_id:
+            QMessageBox.warning(self, "修改失败", "缺少签到状态提交参数")
+            return
+        self._set_controls_enabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._status_worker = AttendanceStatusUpdateWorker(
+            self.crawler,
+            self.active_id,
+            self.record.uid,
+            new_status,
+            "",
+        )
+        self._status_worker.update_finished.connect(self._on_status_update_finished)
+        self._status_worker.start()
+
+    def _refresh_parent_after_update(self, uid: int, status: int, preferred_uid: str = ""):
+        parent = self.parent()
+        if parent is None or not hasattr(parent, "detail"):
+            return False
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        changed = parent.detail.update_record_status(uid, status, current_time)
+        if changed and hasattr(parent, "_refresh_tables"):
+            parent._refresh_tables(preferred_uid=preferred_uid, preferred_tab_key=self.source_tab_key)
+        elif hasattr(parent, "_apply_selection"):
+            parent._apply_selection(preferred_uid=preferred_uid, preferred_tab_key=self.source_tab_key)
+        return changed
+
+    def _sync_parent_selection(self, preferred_uid: str = ""):
+        parent = self.parent()
+        if parent is None:
+            return
+        if hasattr(parent, "_refresh_tables"):
+            parent._refresh_tables(preferred_uid=preferred_uid, preferred_tab_key=self.source_tab_key)
+        elif hasattr(parent, "_apply_selection"):
+            parent._apply_selection(preferred_uid=preferred_uid, preferred_tab_key=self.source_tab_key)
+
+    def _advance_after_submit(self, submitted_status: int, status_changed: bool):
+        current_uid = str(getattr(self.record, "uid", "") or "")
+        current_index = self._current_record_index_in_source()
+        next_record = self._next_record_for_current_source()
+        if self._submit_mode == "next" and next_record is not None:
+            preferred_uid = str(getattr(next_record, "uid", "") or "")
+            if status_changed:
+                self._refresh_parent_after_update(self.record.uid, submitted_status, preferred_uid=preferred_uid)
+            else:
+                self._sync_parent_selection(preferred_uid=preferred_uid)
+            refreshed_records = self._source_records()
+            if current_index >= 0:
+                current_uid_present = any(str(getattr(record, "uid", "") or "") == current_uid for record in refreshed_records)
+                target_index = current_index + 1 if current_uid_present else current_index
+                if 0 <= target_index < len(refreshed_records):
+                    self._apply_record(refreshed_records[target_index])
+                    self._submit_mode = ""
+                    self._set_controls_enabled(True)
+                    self._update_navigation_state()
+                    return
+        else:
+            if status_changed:
+                self._refresh_parent_after_update(self.record.uid, submitted_status)
+        self._submit_mode = ""
+        self._set_controls_enabled(True)
+        self._update_navigation_state()
+        self.accept()
+
     def _build_zoom_icon(self, symbol: str) -> QIcon:
         svg = f"""
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -229,6 +388,19 @@ class AttendanceStatusEditDialog(QDialog):
 
     def _save_name_column_font_size(self):
         self.settings.setValue(self.NAME_COLUMN_FONT_SIZE_KEY, int(self.__class__.NAME_COLUMN_FONT_SIZE))
+
+    def _on_status_update_finished(self, success: bool, message: str, uid: int, status: int):
+        worker = self._status_worker
+        self._status_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        QApplication.restoreOverrideCursor()
+        if not success:
+            self._set_controls_enabled(True)
+            self._update_navigation_state()
+            QMessageBox.warning(self, "修改失败", message)
+            return
+        self._advance_after_submit(status, status_changed=True)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Shift:
@@ -263,6 +435,9 @@ class AttendanceStatusEditDialog(QDialog):
         if self._app is not None:
             self._app.removeEventFilter(self)
         self._shift_pressed = False
+        if self._status_worker is not None:
+            self._status_worker.deleteLater()
+            self._status_worker = None
         super().closeEvent(event)
 
 
@@ -297,6 +472,7 @@ class AttendanceDetailDialog(QDialog):
             }
             QTableWidget {
                 background-color: #2d2d2d;
+                alternate-background-color: #252526;
                 color: #e0e0e0;
                 gridline-color: #404040;
                 border: 1px solid #404040;
@@ -583,23 +759,22 @@ class AttendanceDetailDialog(QDialog):
         return ""
 
     def _activate_record(self, table: QTableWidget, row: int):
-        records = self._filtered_records_for_tab_key(str(table.property("tab_key") or ""))
+        source_tab_key = str(table.property("tab_key") or "")
+        records = self._filtered_records_for_tab_key(source_tab_key)
         if row < 0 or row >= len(records):
             return
 
         record = records[row]
-        source_tab_key = str(table.property("tab_key") or "")
-        self._pending_selection_uid = self._next_record_uid(records, row)
-        dialog = AttendanceStatusEditDialog(record, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            self._pending_selection_uid = ""
-            return
-
-        new_status = self._resolve_submitted_status(source_tab_key, dialog.selected_status)
-        if new_status < 0 or new_status == record.status:
-            self._pending_selection_uid = ""
-            return
-        self._submit_status_change(record, new_status)
+        self._pending_selection_uid = ""
+        dialog = AttendanceStatusEditDialog(
+            record,
+            crawler=self.crawler,
+            active_id=self.activity.active_id,
+            source_tab_key=source_tab_key,
+            source_records_provider=lambda tab_key=source_tab_key: self._filtered_records_for_tab_key(tab_key),
+            parent=self,
+        )
+        dialog.exec()
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):

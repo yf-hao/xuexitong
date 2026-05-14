@@ -193,17 +193,20 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           cd dist
-          chmod +x ${{ matrix.executable }}
-          # 创建免安装包
-          tar -czvf XHelper-${{ needs.check-version.outputs.version }}-${{ matrix.platform }}.tar.gz ${{ matrix.executable }}
+          # 创建免安装包 (现在包含整个文件夹)
+          tar -czvf XHelper-${{ needs.check-version.outputs.version }}-${{ matrix.platform }}.tar.gz XHelper/
 
           # 创建 .deb 安装包
+          mkdir -p deb_root/opt/xhelper
           mkdir -p deb_root/usr/bin
           mkdir -p deb_root/usr/share/applications
           mkdir -p deb_root/usr/share/icons/hicolor/256x256/apps
           mkdir -p deb_root/DEBIAN
 
-          cp ${{ matrix.executable }} deb_root/usr/bin/
+          cp -r XHelper/* deb_root/opt/xhelper/
+          # 创建软链接到 /usr/bin
+          ln -s /opt/xhelper/${{ matrix.executable }} deb_root/usr/bin/${{ matrix.executable }}
+          
           cp ../assets/xuexitong.desktop deb_root/usr/share/applications/
           cp ../assets/icon.png deb_root/usr/share/icons/hicolor/256x256/apps/xuexitong.png
 
@@ -230,7 +233,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cd dist
-          7z a XHelper-${{ needs.check-version.outputs.version }}-${{ matrix.platform }}.zip ${{ matrix.executable }}
+          7z a XHelper-${{ needs.check-version.outputs.version }}-${{ matrix.platform }}.zip XHelper/
 
       - name: Build Windows Installer (Inno Setup)
         if: matrix.os == 'windows-latest'

@@ -3,13 +3,16 @@ import unittest
 import base64
 import threading
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from core.apis.chat_api import ChatAPI
 from core.apis.activity_api import ActivityAPI
+from core.apis.homework_api import HomeworkAPI
 from core.apis.question_bank_api import QuestionBankAPI
 from core.apis.teacher_api import TeacherAPI
 from core.communication_manager import CommunicationManager
@@ -119,6 +122,16 @@ class _FakeQuestionBankAPI(QuestionBankAPI):
 
     def upload_cover_image(self, path, upload_variant="question"):
         return {"success": True, "url": f"https://img.example/{Path(path).name}"}
+
+
+class _FakeHomeworkAPI(HomeworkAPI):
+    def __init__(self, session, course_params=None):
+        self._session = session
+        self.session_manager = SimpleNamespace(course_params=course_params or {})
+
+    @property
+    def session(self):
+        return self._session
 
 
 class _FakeCrawlerForView:
@@ -1395,6 +1408,174 @@ class ChatAPITests(unittest.TestCase):
                 KaTeXSnapshotRenderer._is_initializing,
                 KaTeXSnapshotRenderer._render_in_progress,
             ) = old_state
+
+    def test_katex_snapshot_renderer_prepares_windows_shared_view_offscreen(self):
+        calls = []
+
+        class _FakeView:
+            def setWindowFlag(self, flag, enabled=True):
+                calls.append(("window_flag", flag, enabled))
+
+            def setAttribute(self, attr, enabled=True):
+                calls.append(("attribute", attr, enabled))
+
+            def resize(self, width, height):
+                calls.append(("resize", width, height))
+
+            def move(self, x, y):
+                calls.append(("move", x, y))
+
+        with patch("core.rendering.katex_snapshot.sys.platform", "win32"):
+            KaTeXSnapshotRenderer._prepare_shared_view_for_platform(_FakeView())
+
+        self.assertIn(("resize", 4, 4), calls)
+        self.assertIn(("move", -32000, -32000), calls)
+        self.assertTrue(any(item[:2] == ("window_flag", Qt.WindowType.Tool) for item in calls))
+        self.assertTrue(any(item[:2] == ("window_flag", Qt.WindowType.FramelessWindowHint) for item in calls))
+        self.assertTrue(any(item[:2] == ("attribute", Qt.WidgetAttribute.WA_ShowWithoutActivating) for item in calls))
+
+    def test_katex_snapshot_renderer_source_positions_windows_shared_view_offscreen(self):
+        renderer_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/core/rendering/katex_snapshot.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _prepare_shared_view_for_platform", renderer_source)
+        self.assertIn('if not sys.platform.startswith("win"):', renderer_source)
+        self.assertIn("view.setWindowFlag(Qt.WindowType.Tool, True)", renderer_source)
+        self.assertIn("view.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)", renderer_source)
+        self.assertIn("view.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)", renderer_source)
+        self.assertIn("view.move(-32000, -32000)", renderer_source)
+
+    def test_homework_api_build_library_publish_payload_uses_current_class_and_defaults(self):
+        api = _FakeHomeworkAPI(_FakeSession(_FakeResponse(payload={})), course_params={"cpi": "14632912"})
+        start_time = datetime(2026, 5, 14, 22, 1, 36)
+        end_time = datetime(2026, 5, 29, 22, 1, 44)
+
+        payload = api._build_library_publish_payload(
+            "214719736",
+            "146422963",
+            "1bd30a012eb048e38f84524fa79ef71f",
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        self.assertEqual(payload["courseid"], "214719736")
+        self.assertEqual(payload["workLibraryId"], "1bd30a012eb048e38f84524fa79ef71f")
+        self.assertEqual(payload["cpi"], "14632912")
+        self.assertEqual(payload["publishObj"], '[{"classid":146422963,"publishType":0}]')
+        self.assertEqual(payload["startTime"], "2026-05-14 22:01:36")
+        self.assertEqual(payload["endTime"], "2026-05-29 22:01:44")
+        self.assertEqual(payload["redoTimes"], 2)
+        self.assertEqual(payload["randomSort"], 1)
+        self.assertEqual(payload["allowDownloadAttachment"], 1)
+        self.assertEqual(payload["limitReviewerObj"], "[]")
+
+    def test_homework_api_build_library_publish_payload_applies_dialog_overrides(self):
+        api = _FakeHomeworkAPI(_FakeSession(_FakeResponse(payload={})), course_params={"cpi": "14632912"})
+
+        payload = api._build_library_publish_payload(
+            "214719736",
+            "146422963",
+            "1bd30a012eb048e38f84524fa79ef71f",
+            settings={
+                "startTime": "2026-05-15 08:30:00",
+                "endTime": "2026-05-20 23:59:59",
+                "redoTimes": 5,
+                "allowPaste": 0,
+                "randomOptions": 0,
+            },
+        )
+
+        self.assertEqual(payload["startTime"], "2026-05-15 08:30:00")
+        self.assertEqual(payload["endTime"], "2026-05-20 23:59:59")
+        self.assertEqual(payload["redoTimes"], 5)
+        self.assertEqual(payload["allowPaste"], 0)
+        self.assertEqual(payload["randomOptions"], 0)
+
+    def test_homework_api_publish_work_from_library_posts_expected_payload(self):
+        session = _FakeSession(_FakeResponse(payload={"status": True, "msg": "发布成功", "taskId": 123}))
+        api = _FakeHomeworkAPI(session, course_params={"cpi": "14632912"})
+        start_time = datetime(2026, 5, 14, 22, 1, 36)
+        end_time = datetime(2026, 5, 29, 22, 1, 44)
+
+        result = api.publish_work_from_library(
+            "214719736",
+            "146422963",
+            "1bd30a012eb048e38f84524fa79ef71f",
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        self.assertTrue(result["status"])
+        self.assertEqual(session.calls[0]["method"], "POST")
+        self.assertEqual(session.calls[0]["url"], "https://mooc2-gray.chaoxing.com/mooc2-ans/work/library/publish")
+        self.assertEqual(session.calls[0]["data"]["publishObj"], '[{"classid":146422963,"publishType":0}]')
+        self.assertEqual(session.calls[0]["data"]["startTime"], "2026-05-14 22:01:36")
+        self.assertEqual(session.calls[0]["data"]["endTime"], "2026-05-29 22:01:44")
+        self.assertIn("workLibraryId=1bd30a012eb048e38f84524fa79ef71f", session.calls[0]["headers"]["Referer"])
+
+    def test_homework_library_view_publish_work_calls_crawler_and_refreshes(self):
+        statuses = []
+        infos = []
+        load_calls = []
+        crawler_calls = []
+
+        class _FakeDialog:
+            def __init__(self, title, course_id="", class_id="", work_library_id="", parent=None):
+                self.publish_settings = {"redoTimes": 5, "allowPaste": 0, "multiHalfScore": 0}
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(
+                publish_work_from_library=lambda course_id, class_id, work_id, settings=None: crawler_calls.append((course_id, class_id, work_id, settings)) or {"status": True, "msg": "发布成功"}
+            ),
+            current_course_id="214719736",
+            current_class_id="146422963",
+            status_update=SimpleNamespace(emit=lambda text: statuses.append(text)),
+            load_library=lambda: load_calls.append(True),
+        )
+        work_data = {"id": "work-lib-1", "title": "第一次作业"}
+
+        from ui.views.homework_library_view import HomeworkLibraryView
+
+        with patch("ui.views.homework_library_view.HomeworkPublishDialog", _FakeDialog), \
+             patch("ui.views.homework_library_view.QMessageBox.information", side_effect=lambda *args: infos.append(args[1:3])):
+            HomeworkLibraryView.publish_work(view, work_data)
+
+        self.assertEqual(crawler_calls, [("214719736", "146422963", "work-lib-1", {"redoTimes": 5, "allowPaste": 0, "multiHalfScore": 0})])
+        self.assertIn("正在发布作业「第一次作业」...", statuses)
+        self.assertIn("✅ 作业「第一次作业」发布成功", statuses)
+        self.assertEqual(load_calls, [True])
+        self.assertEqual(infos[0][0], "发布成功")
+
+    def test_homework_library_view_publish_work_cancellation_stops_before_api_call(self):
+        statuses = []
+        crawler_calls = []
+
+        class _FakeDialog:
+            def __init__(self, title, course_id="", class_id="", work_library_id="", parent=None):
+                self.publish_settings = {}
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        view = SimpleNamespace(
+            crawler=SimpleNamespace(
+                publish_work_from_library=lambda *args, **kwargs: crawler_calls.append((args, kwargs)) or {"status": True}
+            ),
+            current_course_id="214719736",
+            current_class_id="146422963",
+            status_update=SimpleNamespace(emit=lambda text: statuses.append(text)),
+            load_library=lambda: None,
+        )
+
+        from ui.views.homework_library_view import HomeworkLibraryView
+
+        with patch("ui.views.homework_library_view.HomeworkPublishDialog", _FakeDialog):
+            HomeworkLibraryView.publish_work(view, {"id": "work-lib-1", "title": "第一次作业"})
+
+        self.assertEqual(crawler_calls, [])
+        self.assertIn("已取消发布作业", statuses)
 
     def test_get_history_messages_returns_empty_on_api_error(self):
         response = _FakeResponse(payload={"status": "fail", "msg": "bad token"})
@@ -2949,6 +3130,7 @@ class ChatAPITests(unittest.TestCase):
             ),
             _current_name_column_width=lambda: 380,
             _position_name_zoom_button=lambda: sizes.append(("button", None)),
+            _update_navigation_state=lambda: sizes.append(("nav", None)),
             resize=lambda width, height: sizes.append((width, height)),
         )
 
@@ -2958,7 +3140,7 @@ class ChatAPITests(unittest.TestCase):
         AttendanceStatusEditDialog._apply_name_column_visibility(dialog)
 
         self.assertEqual(visible_states, [True, True])
-        self.assertEqual(sizes, [("column", 380), (800, 360), ("button", None), ("column", 380), (800, 360), ("button", None)])
+        self.assertEqual(sizes, [("column", 380), (800, 360), ("button", None), ("nav", None), ("column", 380), (800, 360), ("button", None), ("nav", None)])
 
     def test_attendance_status_edit_dialog_adjust_name_font_size_click_and_shift_click(self):
         updates = []
@@ -3087,6 +3269,78 @@ class ChatAPITests(unittest.TestCase):
         self.assertFalse(dialog._shift_pressed)
         dialog.deleteLater()
 
+    def test_attendance_status_edit_dialog_update_navigation_state_uses_next_record_and_worker(self):
+        enabled_states = []
+        dialog = SimpleNamespace(
+            next_btn=SimpleNamespace(setEnabled=lambda enabled: enabled_states.append(enabled)),
+            _next_record_for_current_source=lambda: SimpleNamespace(uid=2),
+            _status_worker=None,
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        AttendanceStatusEditDialog._update_navigation_state(dialog)
+        dialog._status_worker = object()
+        AttendanceStatusEditDialog._update_navigation_state(dialog)
+        dialog._next_record_for_current_source = lambda: None
+        dialog._status_worker = None
+        AttendanceStatusEditDialog._update_navigation_state(dialog)
+
+        self.assertEqual(enabled_states, [True, False, False])
+
+    def test_attendance_status_edit_dialog_handle_next_clicked_submits_only_when_enabled(self):
+        submitted = []
+
+        class _ButtonStub:
+            def __init__(self, enabled):
+                self._enabled = enabled
+
+            def isEnabled(self):
+                return self._enabled
+
+        dialog = SimpleNamespace(
+            next_btn=_ButtonStub(True),
+            _submit_mode="",
+            _submit_current_status=lambda: submitted.append("submitted"),
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        AttendanceStatusEditDialog._handle_next_clicked(dialog)
+        self.assertEqual(dialog._submit_mode, "next")
+        self.assertEqual(submitted, ["submitted"])
+
+        dialog.next_btn = _ButtonStub(False)
+        dialog._submit_mode = ""
+        AttendanceStatusEditDialog._handle_next_clicked(dialog)
+        self.assertEqual(dialog._submit_mode, "")
+        self.assertEqual(submitted, ["submitted"])
+
+    def test_attendance_status_edit_dialog_advance_after_submit_moves_to_next_record_in_same_tab(self):
+        actions = []
+        next_record = SimpleNamespace(uid=2, name="李四", username="2025002", status=1, status_name="已签")
+        third_record = SimpleNamespace(uid=3, name="王五", username="2025003", status=1, status_name="已签")
+        dialog = SimpleNamespace(
+            record=SimpleNamespace(uid=1, name="张三", username="2025001", status=1, status_name="已签"),
+            _submit_mode="next",
+            _current_record_index_in_source=lambda: 0,
+            _next_record_for_current_source=lambda: next_record,
+            _refresh_parent_after_update=lambda uid, status, preferred_uid="": actions.append(("refresh", uid, status, preferred_uid)),
+            _sync_parent_selection=lambda preferred_uid="": actions.append(("select", preferred_uid)),
+            _source_records=lambda: [next_record, third_record],
+            _apply_record=lambda record: actions.append(("record", record.uid)),
+            _set_controls_enabled=lambda enabled: actions.append(("enabled", enabled)),
+            _update_navigation_state=lambda: actions.append(("nav", None)),
+            accept=lambda: actions.append(("accept", None)),
+        )
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        AttendanceStatusEditDialog._advance_after_submit(dialog, 5, status_changed=True)
+
+        self.assertEqual(actions, [("refresh", 1, 5, "2"), ("record", 2), ("enabled", True), ("nav", None)])
+        self.assertEqual(dialog._submit_mode, "")
+
     def test_attendance_detail_dialog_tab_change_selects_first_record_in_tab(self):
         selected = []
         dialog = SimpleNamespace(
@@ -3134,10 +3388,13 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("self._app.installEventFilter(self)", dialog_source)
         self.assertIn("self._app.removeEventFilter(self)", dialog_source)
         self.assertIn("self._shift_pressed = event.type() == QEvent.Type.KeyPress", dialog_source)
+        self.assertIn('self.next_btn = QPushButton("下一个")', dialog_source)
+        self.assertIn('self.next_shortcut = QShortcut(QKeySequence("N"), self)', dialog_source)
         self.assertNotIn('QShortcut(QKeySequence("F8")', dialog_source)
         self.assertNotIn('<b>姓名：</b>{self.record.name}', dialog_source)
         self.assertNotIn('<b>学号：</b>{self.record.username}', dialog_source)
         self.assertNotIn("self.username_column_label", dialog_source)
+        self.assertIn("alternate-background-color: #252526;", dialog_source)
 
     def test_attendance_detail_dialog_unsigned_signed_submits_status_two(self):
         dialog = SimpleNamespace()
@@ -3190,6 +3447,84 @@ class ChatAPITests(unittest.TestCase):
             QRCodeDialog._build_qr_url("12345", "ENC123", ""),
             "https://mobilelearn.chaoxing.com/widget/sign/e?id=12345&c=12345&enc=ENC123&DB_STRATEGY=PRIMARY_KEY&STRATEGY_PARA=id",
         )
+
+    def test_qrcode_dialog_source_uses_512_qr_size(self):
+        dialog_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/dialogs/qrcode_dialog.py").read_text(encoding="utf-8")
+
+        self.assertIn("self.setFixedSize(572, 672)", dialog_source)
+        self.assertIn("self.qr_label.setFixedSize(512, 512)", dialog_source)
+        self.assertIn("492, 492", dialog_source)
+
+    def test_homework_publish_dialog_collects_publish_settings(self):
+        from PyQt6.QtWidgets import QApplication
+        from ui.dialogs.homework_publish_dialog import HomeworkPublishDialog
+
+        app = QApplication.instance() or QApplication([])
+        dialog = HomeworkPublishDialog("第一次作业", "214719736", "146422963", "1bd30a012eb048e38f84524fa79ef71f")
+        dialog.passing_standard_input.setValue(75)
+        dialog.redo_times_input.setValue(3)
+        dialog.allow_paste_cb.setChecked(False)
+        dialog.random_options_cb.setChecked(False)
+        dialog.multi_half_score_cb.setChecked(False)
+        dialog.not_show_last_answer_cb.setChecked(False)
+        dialog.prohibit_view_work_cb.setChecked(True)
+
+        settings = dialog.publish_settings
+
+        self.assertEqual(settings["passingStandard"], 75)
+        self.assertEqual(settings["redoTimes"], 3)
+        self.assertEqual(settings["allowPaste"], 0)
+        self.assertEqual(settings["randomOptions"], 0)
+        self.assertEqual(settings["multiHalfScore"], 0)
+        self.assertEqual(settings["notShowLastAnswer"], 0)
+        self.assertEqual(settings["prohibitViewWork"], 1)
+        self.assertNotIn("randomNum", settings)
+        self.assertEqual(settings["allowDownloadAttachment"], 1)
+        dialog.deleteLater()
+
+    def test_homework_publish_dialog_defaults_end_time_to_start_time(self):
+        from PyQt6.QtWidgets import QApplication
+        from ui.dialogs.homework_publish_dialog import HomeworkPublishDialog
+
+        app = QApplication.instance() or QApplication([])
+        dialog = HomeworkPublishDialog("第一次作业", "214719736", "146422963", "1bd30a012eb048e38f84524fa79ef71f")
+
+        self.assertEqual(dialog.start_time_input.dateTime(), dialog.end_time_input.dateTime())
+        dialog.deleteLater()
+
+    def test_homework_library_view_source_contains_inline_publish_button_and_publish_api(self):
+        view_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/homework_library_view.py").read_text(encoding="utf-8")
+        api_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/core/apis/homework_api.py").read_text(encoding="utf-8")
+        dialog_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/dialogs/homework_publish_dialog.py").read_text(encoding="utf-8")
+
+        self.assertIn('self.library_tree.setHeaderLabels(["名称", "题量", "分值", "创建者", "创建时间", "操作"])', view_source)
+        self.assertIn('publish_btn = QPushButton("发布")', view_source)
+        self.assertIn("self.library_tree.setItemWidget(item, 5, self._create_work_action_widget(work_item_data))", view_source)
+        self.assertIn("dialog = HomeworkPublishDialog(", view_source)
+        self.assertIn("self.current_course_id", view_source)
+        self.assertIn("self.current_class_id", view_source)
+        self.assertIn("settings=dialog.publish_settings", view_source)
+        self.assertIn("result = self.crawler.publish_work_from_library(", view_source)
+        self.assertIn('url = "https://mooc2-gray.chaoxing.com/mooc2-ans/work/library/publish"', api_source)
+        self.assertIn("if settings:", api_source)
+        self.assertIn('"publishObj": json.dumps([{"classid": publish_class_id, "publishType": 0}]', api_source)
+        self.assertIn("content_layout = QHBoxLayout()", dialog_source)
+        self.assertIn("left_layout = QVBoxLayout()", dialog_source)
+        self.assertIn("right_layout = QVBoxLayout()", dialog_source)
+        self.assertIn('time_group = QGroupBox("1. 时间与生命周期")', dialog_source)
+        self.assertIn('score_group = QGroupBox("2. 重做与评分规则")', dialog_source)
+        self.assertIn('option_group = QGroupBox("3. 防作弊与随机化")', dialog_source)
+        self.assertIn('visibility_group = QGroupBox("4. 结果显示控制")', dialog_source)
+        self.assertIn('advanced_group = QGroupBox("5. 重点参数补充")', dialog_source)
+        self.assertNotIn('core_group = QGroupBox("1. 核心身份与目标")', dialog_source)
+        self.assertIn('self.not_show_last_answer_cb = QCheckBox("不展示上次答案")', dialog_source)
+        self.assertIn("score_form.addRow(\"\", self.not_show_last_answer_cb)", dialog_source)
+        self.assertNotIn("随机抽题数量", dialog_source)
+        self.assertNotIn("self.random_num_input", dialog_source)
+        self.assertIn("end = now", dialog_source)
+        self.assertIn("if self.end_time_input.dateTime() < self.start_time_input.dateTime():", dialog_source)
+        self.assertIn('send_btn = QPushButton("发送")', dialog_source)
+        self.assertIn("def publish_settings(self) -> dict:", dialog_source)
 
     def test_msync_batch_message_keeps_device_resources(self):
         frame = base64.b64decode(

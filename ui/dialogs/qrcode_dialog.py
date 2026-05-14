@@ -24,7 +24,7 @@ class QRCodeDialog(QDialog):
         self._end_time_ms = end_time_ms  # 结束时间（毫秒时间戳），0表示不判断
 
         self.setWindowTitle(f"签到二维码 - {title}" if title else "签到二维码")
-        self.setFixedSize(660, 760)
+        self.setFixedSize(572, 672)
         self.setStyleSheet("""
             QDialog { background-color: #1e1e1e; }
             QLabel { color: #ffffff; }
@@ -42,7 +42,7 @@ class QRCodeDialog(QDialog):
 
         # 二维码显示区域
         self.qr_label = QLabel()
-        self.qr_label.setFixedSize(600, 600)
+        self.qr_label.setFixedSize(512, 512)
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_label.setStyleSheet("""
             background-color: #ffffff;
@@ -209,7 +209,7 @@ class QRCodeDialog(QDialog):
 
             # 缩放到标签大小
             scaled = pixmap.scaled(
-                580, 580,
+                492, 492,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )

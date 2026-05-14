@@ -52,29 +52,32 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
+    exclude_binaries=True,
     name='XHelper',
     debug=False,
+    bootloader_ignore_signals=False,
     strip=False,
-    upx=False,               # mac 必关
-    console=False,           # 不显示控制台窗口
+    upx=False,
+    console=False,
     disable_windowed_traceback=False,
-    argv_emulation=False,    # 改为False以生成单一文件
+    argv_emulation=False,
     target_arch=os.environ.get('ARCH', 'x86_64'),
+    codesign_identity=None,
+    entitlements_file=None,
 )
 
 app = BUNDLE(
     exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     name='XHelper.app',
-    icon='assets/icon.icns',  # macOS 图标
+    icon='assets/icon.icns',
     bundle_identifier='com.xuexitong.xhelper',
     info_plist={
         'NSPrincipalClass': 'NSApplication',
         'NSHighResolutionCapable': 'True',
-        'CFBundleShortVersionString': '0.6.0',
+        'CFBundleShortVersionString': '0.8.1',
         'CFBundleDisplayName': 'XHelper',
         'CFBundleName': 'XHelper',
     },
