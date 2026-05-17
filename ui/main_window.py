@@ -1,11 +1,12 @@
 import os
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QComboBox, QTreeWidget, QTreeWidgetItem, 
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                             QComboBox, QTreeWidget, QTreeWidgetItem,
                              QPushButton, QLabel, QSplitter, QFrame, QListView,
                              QListWidget, QListWidgetItem, QStackedWidget, QMessageBox, QFileDialog)
 from PyQt6.QtCore import Qt, QSettings, QCoreApplication
 from ui.workers import (CourseWorker, DetailsWorker, ClassWorker, MaterialWorker, DownloadWorker)
 from ui.styles import MAIN_STYLE
+from ui.theme import apply_theme_stylesheet, refresh_theme_styles, theme_manager
 from core.config import SIGNIN_DATA_FILE, APP_TITLE
 from ui.views.stats_view import StatsView
 from ui.views.management_view import ManagementView
@@ -30,9 +31,6 @@ class MainWindow(QMainWindow):
         
         # State tracking for UI consistency
         self.last_nav_title = None
-        
-        # Premium Dark Theme QSS
-        self.setStyleSheet(MAIN_STYLE)
         
         # Ensure data directory exists
         os.makedirs(os.path.dirname(SIGNIN_DATA_FILE), exist_ok=True)
@@ -62,12 +60,34 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.clazz_box)
         
         header_layout.addStretch()
+
+        self.theme_toggle_btn = QPushButton("☀️")
+        self.theme_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_toggle_btn.setFixedSize(36, 36)
+        self.theme_toggle_btn.clicked.connect(self._toggle_theme)
+        apply_theme_stylesheet(self.theme_toggle_btn, """
+            QPushButton {
+                background-color: #252526;
+                color: #aaaaaa;
+                border: 1px solid #3d3d3d;
+                border-radius: 18px;
+                padding: 0;
+                font-size: 16px;
+                font-weight: normal;
+            }
+            QPushButton:hover {
+                background-color: #2a2d2e;
+                color: #ffffff;
+                border: 1px solid #007acc;
+            }
+        """)
+        header_layout.addWidget(self.theme_toggle_btn)
         
         # Logout Button
         self.btn_logout = QPushButton("🚪 退出登录")
         self.btn_logout.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_logout.setFixedWidth(120)
-        self.btn_logout.setStyleSheet("""
+        apply_theme_stylesheet(self.btn_logout, """
             QPushButton {
                 background-color: transparent;
                 color: #ff5252;
@@ -95,7 +115,7 @@ class MainWindow(QMainWindow):
         nav_layout = QVBoxLayout(nav_container)
         nav_layout.setContentsMargins(0, 0, 5, 0)
         nav_label = QLabel("课程菜单")
-        nav_label.setStyleSheet("color: #007acc; margin-bottom: 5px;")
+        apply_theme_stylesheet(nav_label, "color: #007acc; margin-bottom: 5px;")
         nav_layout.addWidget(nav_label)
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("nav_list")
@@ -177,11 +197,11 @@ class MainWindow(QMainWindow):
         # Bottom Bar
         self.bottom_widget = QFrame()
         self.bottom_widget.setFixedHeight(30)
-        self.bottom_widget.setStyleSheet("background: transparent; border-top: 1px solid #252526;")
+        apply_theme_stylesheet(self.bottom_widget, "background: transparent; border-top: 1px solid #252526;")
         bottom_bar = QHBoxLayout(self.bottom_widget)
         
         self.status_label = QLabel("正在初始化...")
-        self.status_label.setStyleSheet("font-weight: normal; color: #007acc; font-size: 12px; border: none;")
+        apply_theme_stylesheet(self.status_label, "font-weight: normal; color: #007acc; font-size: 12px; border: none;")
         self.download_btn = QPushButton("下载选中资料")
         self.download_btn.setMinimumWidth(180)
         self.download_btn.clicked.connect(self.download_selected)
@@ -192,6 +212,22 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.bottom_widget)
         
         self.load_courses()
+        theme_manager().theme_changed.connect(self._apply_theme)
+        self._apply_theme(theme_manager().mode)
+
+    def _toggle_theme(self):
+        mode = theme_manager().mode
+        theme_manager().set_mode("dark" if mode == "light" else "light")
+
+    def _apply_theme(self, mode):
+        apply_theme_stylesheet(self, MAIN_STYLE, mode)
+        if mode == "light":
+            self.theme_toggle_btn.setText("🌙")
+            self.theme_toggle_btn.setToolTip("切换到暗色主题")
+        else:
+            self.theme_toggle_btn.setText("☀️")
+            self.theme_toggle_btn.setToolTip("切换到亮色主题")
+        refresh_theme_styles(self, mode)
 
     def _update_status(self, message):
         self.status_label.setText(message)

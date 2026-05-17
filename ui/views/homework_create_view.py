@@ -11,6 +11,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from ui.components.multi_select_combo import MultiSelectCombo
+from PyQt6.QtGui import QColor
+from ui.theme import bind_theme_tree, get_theme_palette
 
 
 class QuestionPreviewDialog(QDialog):
@@ -403,6 +405,7 @@ class HomeworkCreateView(QWidget):
         self.library_view.status_update.connect(self.status_update.emit)
         self.library_view.create_homework_requested.connect(self.on_create_homework_requested)
         main_layout.addWidget(self.library_view)
+        bind_theme_tree(self)
     
     def create_filter_panel(self) -> QFrame:
         """创建筛选条件面板"""
@@ -941,7 +944,7 @@ class HomeworkCreateView(QWidget):
                     "data": folder
                 })
                 
-                item.setForeground(1, Qt.GlobalColor.white)
+                item.setForeground(1, QColor(get_theme_palette().text))
                 self.question_tree.addTopLevelItem(item)
         
         # 添加题目到树形列表

@@ -10,6 +10,7 @@ from core.communication_manager import CommunicationManager
 from core.exporters.absence_stats_exporter import build_absence_stats_filename
 from ui.dialogs.homework_reminder_dialog import DEFAULT_ABSENCE_REMINDER_TEMPLATE, HomeworkReminderDialog
 from ui.dialogs.student_message_dialog import StudentMessageDialog
+from ui.theme import apply_theme_stylesheet, bind_theme_tree
 from ui.workers import AbsenceStatsExportWorker
 
 
@@ -49,7 +50,7 @@ class AbsenceStatsDialog(QDialog):
         self.resize(800, 600)
         
         # 设置对话框背景为暗色主题
-        self.setStyleSheet("""
+        apply_theme_stylesheet(self, """
             QDialog {
                 background-color: #1e1e1e;
             }
@@ -96,7 +97,7 @@ class AbsenceStatsDialog(QDialog):
             f"<span style='color: #f44747;'>{total_students} 名学生有缺勤记录</span>"
         )
         info_label = QLabel(info_text)
-        info_label.setStyleSheet("padding: 10px; background: #2d2d2d; border-radius: 5px; border: 1px solid #404040;")
+        apply_theme_stylesheet(info_label, "padding: 10px; background: #2d2d2d; border-radius: 5px; border: 1px solid #404040;")
         layout.addWidget(info_label)
         
         # 缺勤学生表格
@@ -176,7 +177,7 @@ class AbsenceStatsDialog(QDialog):
 
             message_btn = QPushButton("发送消息")
             message_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            message_btn.setStyleSheet("""
+            apply_theme_stylesheet(message_btn, """
                 QPushButton {
                     background-color: transparent;
                     color: #007acc;
@@ -217,6 +218,7 @@ class AbsenceStatsDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
+        bind_theme_tree(self)
 
     def _apply_table_style(self, table: QTableWidget):
         if not table:
@@ -225,7 +227,7 @@ class AbsenceStatsDialog(QDialog):
         table.setAlternatingRowColors(True)
         table.setWordWrap(False)
         table.setShowGrid(True)
-        table.setStyleSheet("""
+        apply_theme_stylesheet(table, """
             QTableWidget {
                 background-color: #1e1e1e;
                 alternate-background-color: #252526;

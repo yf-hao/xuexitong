@@ -17,6 +17,7 @@ from ui.workers import (
     GetWeightWorker, WeightWorker, DeleteClazzWorker
 )
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE, MAIN_STYLE
+from ui.theme import bind_theme_tree
 
 class ImportCourseListWorker(QThread):
     finished = pyqtSignal(object, str)
@@ -132,6 +133,7 @@ class ManagementView(QWidget):
         self.btn_grade_weight.clicked.connect(self.on_grade_weight_clicked)
         self.btn_teacher_team.clicked.connect(self.on_teacher_team_clicked)
         self.btn_course_management.clicked.connect(self.on_course_management_clicked)
+        bind_theme_tree(self)
 
     def clear_management_list(self):
         """清空管理面板内容，包含嵌套的 layout 和 spacer。"""

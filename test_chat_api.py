@@ -1854,8 +1854,9 @@ class ChatAPITests(unittest.TestCase):
         self.assertTrue(table.alternating)
         self.assertFalse(table.word_wrap)
         self.assertTrue(table.show_grid)
-        self.assertIn("alternate-background-color: #252526;", table.style_sheet)
-        self.assertIn("color: #e6e6e6;", table.style_sheet)
+        self.assertIn("alternate-background-color:", table.style_sheet)
+        self.assertIn("selection-background-color:", table.style_sheet)
+        self.assertIn("color:", table.style_sheet)
         self.assertEqual(table.header.default_size, 36)
         self.assertEqual(table.header.minimum_size, 32)
 
@@ -1902,8 +1903,8 @@ class ChatAPITests(unittest.TestCase):
         self.assertTrue(table.alternating)
         self.assertFalse(table.word_wrap)
         self.assertTrue(table.show_grid)
-        self.assertIn("alternate-background-color: #252526;", table.style_sheet)
-        self.assertIn("selection-color: #ffffff;", table.style_sheet)
+        self.assertIn("alternate-background-color:", table.style_sheet)
+        self.assertIn("selection-color:", table.style_sheet)
         self.assertEqual(table.header.default_size, 36)
         self.assertEqual(table.header.minimum_size, 32)
 
@@ -3176,6 +3177,39 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(dialog.__class__.NAME_COLUMN_FONT_SIZE, 72)
         self.assertEqual(updates, ["save", "appearance", "icon", "layout", "save", "appearance", "icon", "layout"])
 
+    def test_attendance_status_edit_dialog_change_name_font_size_helpers(self):
+        updates = []
+
+        class _DialogStub:
+            NAME_COLUMN_FONT_SIZE = 72
+            NAME_COLUMN_FONT_SIZE_MIN = 36
+
+            def _save_name_column_font_size(self):
+                updates.append("save")
+
+            def _update_name_column_appearance(self):
+                updates.append("appearance")
+
+            def _update_zoom_button_icon(self):
+                updates.append("icon")
+
+            def _apply_name_column_visibility(self):
+                updates.append("layout")
+
+        dialog = _DialogStub()
+
+        from ui.dialogs.attendance_detail_dialog import AttendanceStatusEditDialog
+
+        AttendanceStatusEditDialog._zoom_in_name_column(dialog)
+        AttendanceStatusEditDialog._zoom_out_name_column(dialog)
+        AttendanceStatusEditDialog._change_name_font_size(dialog, -999)
+
+        self.assertEqual(dialog.__class__.NAME_COLUMN_FONT_SIZE, 36)
+        self.assertEqual(
+            updates,
+            ["save", "appearance", "icon", "layout"] * 3,
+        )
+
     def test_attendance_status_edit_dialog_load_and_save_name_font_size(self):
         values = {}
 
@@ -3384,7 +3418,11 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("QSvgRenderer", dialog_source)
         self.assertIn('return QIcon(pixmap)', dialog_source)
         self.assertIn("QSettings", dialog_source)
-        self.assertIn("self.__class__.NAME_COLUMN_FONT_SIZE = self.__class__.NAME_COLUMN_FONT_SIZE + 6", dialog_source)
+        self.assertIn("def _change_name_font_size(self, delta: int):", dialog_source)
+        self.assertIn("self.zoom_in_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.ZoomIn), self)", dialog_source)
+        self.assertIn("self.zoom_out_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.ZoomOut), self)", dialog_source)
+        self.assertIn("self.zoom_in_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)", dialog_source)
+        self.assertIn("self.zoom_out_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)", dialog_source)
         self.assertIn("self._app.installEventFilter(self)", dialog_source)
         self.assertIn("self._app.removeEventFilter(self)", dialog_source)
         self.assertIn("self._shift_pressed = event.type() == QEvent.Type.KeyPress", dialog_source)
@@ -3454,6 +3492,232 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("self.setFixedSize(572, 672)", dialog_source)
         self.assertIn("self.qr_label.setFixedSize(512, 512)", dialog_source)
         self.assertIn("492, 492", dialog_source)
+
+    def test_theme_stylesheet_maps_dark_declarations_to_light_palette(self):
+        from ui.theme import themed_stylesheet
+
+        themed = themed_stylesheet(
+            "background-color: #1e1e1e; color: #ffffff; border: 1px solid #333333;",
+            mode="light",
+        )
+
+        self.assertIn("background-color: #ffffff;", themed)
+        self.assertIn("color: #1f2328;", themed)
+        self.assertIn("border: 1px solid #d0d7de;", themed)
+
+    def test_theme_helper_preserves_base_stylesheet_for_refresh(self):
+        from PyQt6.QtWidgets import QApplication, QWidget
+        from ui.theme import apply_theme_stylesheet, refresh_theme_styles, themed_stylesheet
+
+        app = QApplication.instance() or QApplication([])
+        widget = QWidget()
+
+        base_css = "background-color: #1e1e1e; color: #ffffff;"
+        apply_theme_stylesheet(widget, base_css, mode="dark")
+        refresh_theme_styles(widget, mode="light")
+
+        self.assertEqual(getattr(widget, "_theme_base_stylesheet", ""), base_css)
+        self.assertEqual(widget.styleSheet(), themed_stylesheet(base_css, mode="light"))
+        widget.deleteLater()
+
+    def test_theme_helper_maps_alternate_background_for_light_mode(self):
+        from ui.theme import themed_stylesheet
+
+        themed = themed_stylesheet(
+            "background-color: #1e1e1e; alternate-background-color: #252526; color: #e0e0e0;",
+            mode="light",
+        )
+
+        self.assertIn("background-color: #ffffff;", themed)
+        self.assertIn("alternate-background-color: #f3f4f6;", themed)
+        self.assertIn("color: #24292f;", themed)
+
+    def test_theme_helper_maps_card_background_and_header_text_for_light_mode(self):
+        from ui.theme import themed_stylesheet
+
+        themed = themed_stylesheet(
+            "background: #2d2d2d; color: #d0d0d0; border: 1px solid #404040;",
+            mode="light",
+        )
+
+        self.assertIn("background: #f3f4f6;", themed)
+        self.assertIn("color: #24292f;", themed)
+        self.assertIn("border: 1px solid #c2cad3;", themed)
+
+    def test_theme_helper_maps_legacy_shorthand_ui_colors_for_light_mode(self):
+        from ui.theme import themed_stylesheet
+
+        themed = themed_stylesheet(
+            "background-color: #1e1f22; color: #00bfff; border: 1px solid #444; "
+            "background-color: #4a6fa5; color: #888; background-color: #d9534f;",
+            mode="light",
+        )
+
+        self.assertIn("background-color: #ffffff;", themed)
+        self.assertIn("color: #54aeff;", themed)
+        self.assertIn("border: 1px solid #c2cad3;", themed)
+        self.assertIn("color: #57606a;", themed)
+        self.assertIn("background-color: #0969da;", themed)
+        self.assertIn("background-color: #cf222e;", themed)
+
+    def test_theme_tree_binding_rethemes_existing_widgets(self):
+        from PyQt6.QtWidgets import QApplication, QWidget, QLabel
+        from ui.theme import bind_theme_tree, refresh_theme_styles
+
+        app = QApplication.instance() or QApplication([])
+        root = QWidget()
+        child = QLabel("test", root)
+        child.setStyleSheet("color: #ffffff; background-color: #1e1e1e;")
+
+        bind_theme_tree(root)
+        refresh_theme_styles(root, mode="light")
+
+        self.assertIn("#1f2328", child.styleSheet())
+        self.assertEqual(getattr(child, "_theme_base_stylesheet", ""), "color: #ffffff; background-color: #1e1e1e;")
+        root.deleteLater()
+
+    def test_theme_tree_binding_rethemes_runtime_stylesheet_changes(self):
+        from PyQt6.QtWidgets import QApplication, QWidget, QLabel
+        from ui.theme import bind_theme_tree, theme_manager
+
+        app = QApplication.instance() or QApplication([])
+        root = QWidget()
+        child = QLabel("runtime", root)
+        bind_theme_tree(root)
+
+        theme_manager().set_mode("light")
+        child.setStyleSheet("background-color: #1e1f22; color: #ffffff; border: 1px solid #444;")
+        app.processEvents()
+
+        self.assertEqual(
+            getattr(child, "_theme_base_stylesheet", ""),
+            "background-color: #1e1f22; color: #ffffff; border: 1px solid #444;",
+        )
+        self.assertIn("background-color: #ffffff;", child.styleSheet())
+        self.assertIn("color: #1f2328;", child.styleSheet())
+        self.assertIn("border: 1px solid #c2cad3;", child.styleSheet())
+        theme_manager().set_mode("dark")
+        root.deleteLater()
+
+    def test_theme_tree_binding_tracks_latest_runtime_base_stylesheet(self):
+        from PyQt6.QtWidgets import QApplication, QWidget, QLabel
+        from ui.theme import bind_theme_tree, theme_manager
+
+        app = QApplication.instance() or QApplication([])
+        root = QWidget()
+        child = QLabel("runtime", root)
+        bind_theme_tree(root)
+
+        theme_manager().set_mode("light")
+        child.setStyleSheet("color: #00bfff;")
+        app.processEvents()
+        child.setStyleSheet("color: #ff4d4d;")
+        app.processEvents()
+
+        self.assertEqual(getattr(child, "_theme_base_stylesheet", ""), "color: #ff4d4d;")
+        self.assertIn("color: #cf222e;", child.styleSheet())
+        theme_manager().set_mode("dark")
+        root.deleteLater()
+
+    def test_chat_view_startup_badge_gate_keeps_chat_list_alive(self):
+        from PyQt6.QtWidgets import QApplication
+
+        class _FakeCrawler:
+            def get_im_credentials(self):
+                return {}
+
+            def is_msync_connected(self):
+                return False
+
+        app = QApplication.instance() or QApplication([])
+        view = ChatView(_FakeCrawler())
+
+        view._begin_startup_badge_gate()
+
+        self.assertFalse(view.chat_list.isEnabled())
+        view.deleteLater()
+
+    def test_main_and_login_windows_source_expose_theme_switching(self):
+        main_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/main_window.py").read_text(encoding="utf-8")
+        login_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/login_window.py").read_text(encoding="utf-8")
+
+        self.assertIn('self.theme_toggle_btn = QPushButton("☀️")', main_source)
+        self.assertIn('def _toggle_theme(self):', main_source)
+        self.assertIn('theme_manager().theme_changed.connect(self._apply_theme)', main_source)
+        self.assertIn('self.theme_toggle_btn = QPushButton("☀️")', login_source)
+        self.assertIn('def _toggle_theme(self):', login_source)
+        self.assertIn('theme_manager().theme_changed.connect(self._apply_theme)', login_source)
+        self.assertIn('self.theme_toggle_btn.setToolTip("切换到暗色主题")', main_source)
+        self.assertIn('self.theme_toggle_btn.setToolTip("切换到亮色主题")', main_source)
+        self.assertIn('self.theme_toggle_btn.setToolTip("切换到暗色主题")', login_source)
+        self.assertIn('self.theme_toggle_btn.setToolTip("切换到亮色主题")', login_source)
+
+    def test_theme_label_uses_light_and_dark_copy(self):
+        from ui.theme import theme_label
+
+        self.assertEqual(theme_label("light"), "亮色")
+        self.assertEqual(theme_label("dark"), "暗色")
+
+    def test_main_views_source_bind_theme_tree(self):
+        for path in [
+            "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/activities_view.py",
+            "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/question_bank_view.py",
+            "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/homework_create_view.py",
+            "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/study_status_view.py",
+            "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/cloud_drive_view.py",
+            "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/chat_view.py",
+            "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/management_view.py",
+        ]:
+            source = Path(path).read_text(encoding="utf-8")
+            self.assertIn("bind_theme_tree(self)", source)
+
+    def test_study_status_and_absence_dialog_source_use_theme_helpers(self):
+        study_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/study_status_view.py").read_text(encoding="utf-8")
+        absence_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/dialogs/absence_stats_dialog.py").read_text(encoding="utf-8")
+
+        self.assertIn("apply_theme_stylesheet(btn, STAT_BUTTON_STYLE)", study_source)
+        self.assertIn("apply_theme_stylesheet(self.btn_absence_stats", study_source)
+        self.assertIn("apply_theme_stylesheet(self.btn_homework_reminder", study_source)
+        self.assertIn("apply_theme_stylesheet(self.btn_homework_export", study_source)
+        self.assertIn("apply_theme_stylesheet(view_btn", study_source)
+        self.assertIn("apply_theme_stylesheet(btn, STAT_BUTTON_STYLE + \"border: 2px solid #007acc;\")", study_source)
+
+        self.assertIn("apply_theme_stylesheet(self, \"\"\"", absence_source)
+        self.assertIn("apply_theme_stylesheet(message_btn", absence_source)
+        self.assertIn("apply_theme_stylesheet(table, \"\"\"", absence_source)
+        self.assertIn("bind_theme_tree(self)", absence_source)
+
+    def test_remaining_theme_gap_files_now_bind_theme_tree(self):
+        multi_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/components/multi_select_combo.py").read_text(encoding="utf-8")
+        location_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/dialogs/location_dialog.py").read_text(encoding="utf-8")
+        learning_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/learning_view.py").read_text(encoding="utf-8")
+
+        self.assertIn("bind_theme_tree(self)", multi_source)
+        self.assertIn("bind_theme_tree(self)", location_source)
+        self.assertIn("bind_theme_tree(self)", learning_source)
+
+    def test_attendance_theme_sources_use_runtime_palette_updates(self):
+        study_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/study_status_view.py").read_text(encoding="utf-8")
+        detail_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/dialogs/attendance_detail_dialog.py").read_text(encoding="utf-8")
+
+        self.assertIn("get_theme_palette", study_source)
+        self.assertIn("status_item.setForeground(QColor(get_theme_palette().text_secondary))", study_source)
+        self.assertIn("theme_manager().theme_changed.connect(self._apply_runtime_theme)", detail_source)
+        self.assertIn("def _status_color_for_record", detail_source)
+        self.assertIn("alternate-background-color: #252526;", detail_source)
+
+    def test_homework_views_use_theme_palette_for_folder_text(self):
+        library_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/homework_library_view.py").read_text(encoding="utf-8")
+        create_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/homework_create_view.py").read_text(encoding="utf-8")
+
+        self.assertIn("item.setForeground(0, QColor(get_theme_palette().text))", library_source)
+        self.assertIn("item.setForeground(1, QColor(get_theme_palette().text))", create_source)
+
+    def test_multi_select_combo_binds_popup_and_themes_runtime_label_updates(self):
+        source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/components/multi_select_combo.py").read_text(encoding="utf-8")
+
+        self.assertIn("bind_theme_tree(self.dropdown_panel)", source)
+        self.assertIn('apply_theme_stylesheet(self.display_label, "color: #ffffff; font-size: 13px;")', source)
 
     def test_homework_publish_dialog_collects_publish_settings(self):
         from PyQt6.QtWidgets import QApplication

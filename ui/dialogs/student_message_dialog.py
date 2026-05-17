@@ -3,6 +3,7 @@ import time
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTextEdit, QVBoxLayout
+from ui.theme import apply_theme_stylesheet
 
 
 class StudentMessageDialog(QDialog):
@@ -23,7 +24,7 @@ class StudentMessageDialog(QDialog):
         self.setWindowTitle(f"发送消息 - {student_name}")
         self.resize(520, 360)
         self.setModal(True)
-        self.setStyleSheet("""
+        apply_theme_stylesheet(self, """
             QDialog {
                 background-color: #1e1e1e;
             }
@@ -61,7 +62,7 @@ class StudentMessageDialog(QDialog):
         info_lines = self._build_info_lines(self.student)
         info_label = QLabel("\n".join(info_lines))
         info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        info_label.setStyleSheet("color: #dcdcdc; font-size: 14px;")
+        apply_theme_stylesheet(info_label, "color: #dcdcdc; font-size: 14px;")
         layout.addWidget(info_label)
 
         self.message_input = QTextEdit()
@@ -70,7 +71,7 @@ class StudentMessageDialog(QDialog):
         layout.addWidget(self.message_input, stretch=1)
 
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #888888; font-size: 12px;")
+        apply_theme_stylesheet(self.status_label, "color: #888888; font-size: 12px;")
         layout.addWidget(self.status_label)
 
         btn_layout = QHBoxLayout()

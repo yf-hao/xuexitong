@@ -22,6 +22,7 @@ from core.config import DATA_DIR
 from core.group_members_cache import build_group_members_cache_path, load_group_members_cache, sanitize_group_cache_filename
 from ui.workers import ChatMessageListWorker, ChatHistoryWorker, ChatGroupMembersWorker
 from core.logger import get_logger
+from ui.theme import apply_theme_stylesheet, bind_theme_tree
 
 logger = get_logger()
 
@@ -208,12 +209,12 @@ class ChatSessionItem(QWidget):
         text_layout.setSpacing(2)
 
         self.name_label = QLabel(name)
-        self.name_label.setStyleSheet("color: #cccccc; font-size: 14px;")
+        apply_theme_stylesheet(self.name_label, "color: #cccccc; font-size: 14px;")
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         text_layout.addWidget(self.name_label)
 
         self.subtitle_label = QLabel(subtitle or "")
-        self.subtitle_label.setStyleSheet("color: #888888; font-size: 12px;")
+        apply_theme_stylesheet(self.subtitle_label, "color: #888888; font-size: 12px;")
         self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.subtitle_label.setVisible(bool(subtitle))
         text_layout.addWidget(self.subtitle_label)
@@ -222,7 +223,7 @@ class ChatSessionItem(QWidget):
 
         # 右侧：时间
         self.time_label = QLabel(time_str or "")
-        self.time_label.setStyleSheet("color: #888888; font-size: 12px;")
+        apply_theme_stylesheet(self.time_label, "color: #888888; font-size: 12px;")
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.time_label.setVisible(bool(time_str))
         layout.addWidget(self.time_label)
@@ -231,7 +232,7 @@ class ChatSessionItem(QWidget):
     def _set_placeholder_avatar(self, name: str):
         """显示名字首字作为占位头像"""
         self.avatar_label.setText(name[:1] if name else "?")
-        self.avatar_label.setStyleSheet(
+        apply_theme_stylesheet(self.avatar_label,
             "background-color: #6b5ce7; color: white; font-size: 16px; font-weight: bold;"
         )
         self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -255,7 +256,7 @@ class ChatSessionItem(QWidget):
         badge_size = 10
         self.unread_badge_label.setText("")
         self.unread_badge_label.setGeometry(40 - badge_size, 0, badge_size, badge_size)
-        self.unread_badge_label.setStyleSheet(
+        apply_theme_stylesheet(self.unread_badge_label,
             "background-color: #ff4d4f; border-radius: 5px;"
         )
         self.unread_badge_label.raise_()
@@ -350,7 +351,7 @@ class ChatView(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setStyleSheet(CHAT_STYLE)
+        apply_theme_stylesheet(self, CHAT_STYLE)
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -477,8 +478,9 @@ class ChatView(QWidget):
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-
         main_layout.addWidget(splitter)
+
+        bind_theme_tree(self)
 
         # 默认显示空状态
         self._show_empty_state()

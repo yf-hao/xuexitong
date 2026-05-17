@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+from ui.theme import apply_theme_stylesheet
 
 
 class HomeworkPublishDialog(QDialog):
@@ -59,7 +60,7 @@ class HomeworkPublishDialog(QDialog):
         self.setWindowTitle("发布作业设置")
         self.resize(620, 560)
         self.setModal(True)
-        self.setStyleSheet("""
+        apply_theme_stylesheet(self, """
             QDialog {
                 background-color: #1e1e1e;
             }
@@ -103,11 +104,11 @@ class HomeworkPublishDialog(QDialog):
         layout.setSpacing(12)
 
         title_label = QLabel(f"作业：{self.work_title or '未命名作业'}")
-        title_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #ffffff;")
+        apply_theme_stylesheet(title_label, "font-size: 15px; font-weight: bold; color: #ffffff;")
         layout.addWidget(title_label)
 
         tip_label = QLabel("请先确认发布时间和作业规则，点击“发送”后再正式发布。")
-        tip_label.setStyleSheet("color: #9cdcfe; font-size: 12px;")
+        apply_theme_stylesheet(tip_label, "color: #9cdcfe; font-size: 12px;")
         tip_label.setWordWrap(True)
         layout.addWidget(tip_label)
 

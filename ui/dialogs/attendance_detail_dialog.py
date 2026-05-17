@@ -1,7 +1,7 @@
 """签到详情对话框。"""
 from datetime import datetime
 from PyQt6.QtCore import QByteArray, QEvent, QSize, QSettings, Qt
-from PyQt6.QtGui import QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
 )
 from models.attendance_record import AttendanceDetail
 from models.activity import Activity
+from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager
 from ui.workers import AttendanceStatusUpdateWorker
 
 
@@ -52,7 +53,7 @@ class AttendanceStatusEditDialog(QDialog):
     def setup_ui(self):
         self.setWindowTitle(f"修改签到状态 - {self.record.name}")
         self.setModal(True)
-        self.setStyleSheet("""
+        apply_theme_stylesheet(self, """
             QDialog { background-color: #1e1e1e; }
             QLabel { color: #e0e0e0; }
             QRadioButton { color: #e0e0e0; spacing: 8px; padding: 4px 0; }
@@ -73,7 +74,7 @@ class AttendanceStatusEditDialog(QDialog):
 
         self.name_column = QWidget()
         self.name_column.setMinimumWidth(self.NAME_COLUMN_MIN_WIDTH)
-        self.name_column.setStyleSheet("""
+        apply_theme_stylesheet(self.name_column, """
             QWidget {
                 background-color: #2d2d2d;
                 border: 1px solid #404040;
@@ -90,7 +91,7 @@ class AttendanceStatusEditDialog(QDialog):
         self.name_zoom_btn = QPushButton("", self.name_column)
         self.name_zoom_btn.setFixedSize(34, 34)
         self.name_zoom_btn.setToolTip("点击放大，按住 Shift 点击缩小")
-        self.name_zoom_btn.setStyleSheet("""
+        apply_theme_stylesheet(self.name_zoom_btn, """
             QPushButton {
                 padding: 0;
                 border-radius: 17px;
@@ -128,7 +129,7 @@ class AttendanceStatusEditDialog(QDialog):
             self.shortcut_buttons["1"].setChecked(True)
 
         hint_label = QLabel("快捷键：1-7 选择状态，Enter 确认")
-        hint_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+        apply_theme_stylesheet(hint_label, "color: #aaaaaa; font-size: 12px;")
         right_layout.addWidget(hint_label)
 
         btn_layout = QHBoxLayout()
@@ -144,6 +145,12 @@ class AttendanceStatusEditDialog(QDialog):
         self.next_shortcut = QShortcut(QKeySequence("N"), self)
         self.next_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.next_shortcut.activated.connect(self._handle_next_clicked)
+        self.zoom_in_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.ZoomIn), self)
+        self.zoom_in_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.zoom_in_shortcut.activated.connect(self._zoom_in_name_column)
+        self.zoom_out_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.ZoomOut), self)
+        self.zoom_out_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.zoom_out_shortcut.activated.connect(self._zoom_out_name_column)
 
         ok_btn = QPushButton("确定")
         self.ok_btn = ok_btn
@@ -157,6 +164,9 @@ class AttendanceStatusEditDialog(QDialog):
         self._update_zoom_button_icon()
         self._apply_name_column_visibility()
         self._update_navigation_state()
+        bind_theme_tree(self)
+        theme_manager().theme_changed.connect(self._apply_runtime_theme)
+        self._apply_runtime_theme(theme_manager().mode)
 
     @property
     def selected_status(self) -> int:
@@ -171,30 +181,51 @@ class AttendanceStatusEditDialog(QDialog):
         self._update_navigation_state()
 
     def _adjust_name_font_size(self):
-        if self._is_shift_pressed():
+        AttendanceStatusEditDialog._change_name_font_size(self, -6 if self._is_shift_pressed() else 6)
+
+    def _zoom_in_name_column(self):
+        AttendanceStatusEditDialog._change_name_font_size(self, 6)
+
+    def _zoom_out_name_column(self):
+        AttendanceStatusEditDialog._change_name_font_size(self, -6)
+
+    def _change_name_font_size(self, delta: int):
+        if int(delta) < 0:
             self.__class__.NAME_COLUMN_FONT_SIZE = max(
                 self.NAME_COLUMN_FONT_SIZE_MIN,
-                self.__class__.NAME_COLUMN_FONT_SIZE - 6,
+                self.__class__.NAME_COLUMN_FONT_SIZE + int(delta),
             )
         else:
-            self.__class__.NAME_COLUMN_FONT_SIZE = self.__class__.NAME_COLUMN_FONT_SIZE + 6
+            self.__class__.NAME_COLUMN_FONT_SIZE = self.__class__.NAME_COLUMN_FONT_SIZE + int(delta)
         self._save_name_column_font_size()
         self._update_name_column_appearance()
         self._update_zoom_button_icon()
         self._apply_name_column_visibility()
 
     def _update_name_column_appearance(self):
+        palette = get_theme_palette()
         username_size = max(24, int(self.__class__.NAME_COLUMN_FONT_SIZE * 0.5))
         username_text = str(self.record.username or "")
         self.name_column_label.setText(
             f"<div style='text-align:center;'>"
-            f"<div style='color:#ffffff; font-size:{int(self.__class__.NAME_COLUMN_FONT_SIZE)}px; font-weight:bold;'>{self.record.name}</div>"
-            f"<div style='color:#cfd8dc; font-size:{username_size}px; margin-top:8px;'>{username_text}</div>"
+            f"<div style='color:{palette.text}; font-size:{int(self.__class__.NAME_COLUMN_FONT_SIZE)}px; font-weight:bold;'>{self.record.name}</div>"
+            f"<div style='color:{palette.text_muted}; font-size:{username_size}px; margin-top:8px;'>{username_text}</div>"
             f"</div>"
         )
         self.name_column_label.setStyleSheet("padding: 24px;")
-        if hasattr(self, "info_label"):
-            self.info_label.setText(f"<b>当前状态：</b>{self.record.status_name}")
+        self._update_info_label()
+
+    def _update_info_label(self):
+        if not hasattr(self, "info_label"):
+            return
+        palette = get_theme_palette()
+        self.info_label.setText(
+            f"<span style='color:{palette.accent}; font-weight:bold;'>当前状态：</span>"
+            f"<span style='color:{palette.text};'>{self.record.status_name}</span>"
+        )
+
+    def _apply_runtime_theme(self, _mode: str):
+        self._update_name_column_appearance()
 
     def _current_name_column_width(self) -> int:
         font = QFont(self.name_column_label.font())
@@ -463,7 +494,7 @@ class AttendanceDetailDialog(QDialog):
         self.resize(860, dialog_height)
         
         # 设置对话框背景为暗色主题
-        self.setStyleSheet("""
+        apply_theme_stylesheet(self, """
             QDialog {
                 background-color: #1e1e1e;
             }
@@ -504,16 +535,13 @@ class AttendanceDetailDialog(QDialog):
         layout = QVBoxLayout(self)
         
         # 活动信息
-        info_label = QLabel(
-            f"<b style='color: #569cd6;'>活动名称：</b><span style='color: #e0e0e0;'>{self.activity.title}</span><br>"
-            f"<b style='color: #569cd6;'>活动时间：</b><span style='color: #e0e0e0;'>{self.activity.time_range}</span>"
-        )
-        info_label.setStyleSheet("padding: 10px; background: #2d2d2d; border-radius: 5px; border: 1px solid #404040;")
-        layout.addWidget(info_label)
+        self.info_label = QLabel()
+        apply_theme_stylesheet(self.info_label, "padding: 10px; background: #2d2d2d; border-radius: 5px; border: 1px solid #404040;")
+        layout.addWidget(self.info_label)
         
         # 统计信息
         self.stats_label = QLabel(self._build_stats_text())
-        self.stats_label.setStyleSheet("padding: 10px; background: #2d2d2d; font-size: 13px; border-radius: 5px; border: 1px solid #404040;")
+        apply_theme_stylesheet(self.stats_label, "padding: 10px; background: #2d2d2d; font-size: 13px; border-radius: 5px; border: 1px solid #404040;")
         self.stats_label.setWordWrap(True)
         layout.addWidget(self.stats_label)
 
@@ -523,7 +551,7 @@ class AttendanceDetailDialog(QDialog):
         self.search_input.setPlaceholderText("搜索姓名或学号...")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setFixedWidth(220)
-        self.search_input.setStyleSheet("""
+        apply_theme_stylesheet(self.search_input, """
             QLineEdit {
                 background-color: #2d2d2d;
                 color: #e0e0e0;
@@ -538,7 +566,7 @@ class AttendanceDetailDialog(QDialog):
 
         self.search_btn = QPushButton("搜索")
         self.search_btn.setFixedWidth(72)
-        self.search_btn.setStyleSheet("""
+        apply_theme_stylesheet(self.search_btn, """
             QPushButton {
                 font-size: 12px;
                 padding: 6px 12px;
@@ -567,6 +595,9 @@ class AttendanceDetailDialog(QDialog):
         self.close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(self.close_btn)
         layout.addLayout(btn_layout)
+        bind_theme_tree(self)
+        theme_manager().theme_changed.connect(self._apply_runtime_theme)
+        self._apply_runtime_theme(theme_manager().mode)
 
     def _build_records_tab(self, records, empty_text: str, tab_key: str) -> QWidget:
         container = QWidget()
@@ -594,14 +625,7 @@ class AttendanceDetailDialog(QDialog):
             table.setItem(row, 1, QTableWidgetItem(record.username))
 
             status_item = QTableWidgetItem(record.status_name)
-            if record.is_normal or record.is_proxy:
-                status_item.setForeground(Qt.GlobalColor.darkGreen)
-            elif record.is_late or record.is_early_leave:
-                status_item.setForeground(Qt.GlobalColor.darkYellow)
-            elif record.is_absent or record.is_unsign:
-                status_item.setForeground(Qt.GlobalColor.red)
-            elif record.is_leave:
-                status_item.setForeground(Qt.GlobalColor.blue)
+            status_item.setForeground(QColor(self._status_color_for_record(record)))
             table.setItem(row, 2, status_item)
 
             table.setItem(row, 3, QTableWidgetItem(record.submit_time or record.create_time))
@@ -611,6 +635,7 @@ class AttendanceDetailDialog(QDialog):
             empty_item = QTableWidgetItem(empty_text)
             empty_item.setFlags(empty_item.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsEnabled)
             empty_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_item.setForeground(QColor(get_theme_palette().text_muted))
             table.setSpan(0, 0, 1, 4)
             table.setItem(0, 0, empty_item)
 
@@ -618,20 +643,59 @@ class AttendanceDetailDialog(QDialog):
         layout.addWidget(table)
         return container
 
-    def _build_stats_text(self) -> str:
+    def _build_activity_info_text(self, mode: str | None = None) -> str:
+        palette = get_theme_palette(mode)
+        return (
+            f"<b style='color: {palette.accent};'>活动名称：</b>"
+            f"<span style='color: {palette.text};'>{self.activity.title}</span><br>"
+            f"<b style='color: {palette.accent};'>活动时间：</b>"
+            f"<span style='color: {palette.text};'>{self.activity.time_range}</span>"
+        )
+
+    def _status_color_for_record(self, record, mode: str | None = None) -> str:
+        palette = get_theme_palette(mode)
+        if record.is_normal or record.is_proxy:
+            return palette.success
+        if record.is_late or record.is_early_leave:
+            return "#9a6700" if palette.mode == "light" else "#dcdcaa"
+        if record.is_absent or record.is_unsign:
+            return palette.danger
+        if record.is_leave:
+            return palette.accent
+        return palette.text_secondary
+
+    def _apply_runtime_theme(self, mode: str):
+        self.info_label.setText(self._build_activity_info_text(mode))
+        self.stats_label.setText(self._build_stats_text(mode))
+        palette = get_theme_palette(mode)
+        for table in self._tables.values():
+            tab_key = str(table.property("tab_key") or "")
+            records = self._filtered_records_for_tab_key(tab_key)
+            if records:
+                for row, record in enumerate(records):
+                    status_item = table.item(row, 2)
+                    if status_item is not None:
+                        status_item.setForeground(QColor(self._status_color_for_record(record, mode)))
+            else:
+                empty_item = table.item(0, 0)
+                if empty_item is not None:
+                    empty_item.setForeground(QColor(palette.text_muted))
+
+    def _build_stats_text(self, mode: str | None = None) -> str:
+        palette = get_theme_palette(mode)
         stats = self.detail.get_statistics()
         return (
-            f"<b style='color: #569cd6;'>签到统计：</b>"
-            f"<span style='color: #e0e0e0;'>总人数：{stats['总人数']} | </span>"
-            f"<span style='color: #4ec9b0;'>已签：{stats['已签']} | </span>"
-            f"<span style='color: #f44747;'>未签：{stats['未签']} | </span>"
-            f"<span style='color: #dcdcaa;'>迟到：{stats['迟到']} | </span>"
-            f"<span style='color: #dcdcaa;'>早退：{stats['早退']} | </span>"
-            f"<span style='color: #f44747;'>缺勤：{stats['缺勤']} | </span>"
-            f"<span style='color: #9cdcfe;'>病假：{stats['病假']} | </span>"
-            f"<span style='color: #9cdcfe;'>事假：{stats['事假']} | </span>"
-            f"<span style='color: #9cdcfe;'>公假：{stats['公假']} | </span>"
-            f"<span style='color: #aaaaaa;'>代签：{stats['代签']}</span>"
+            f"<b style='color: {palette.accent};'>签到统计：</b>"
+            f"<span style='color: {palette.text};'>总人数：{stats['总人数']} | </span>"
+            f"<span style='color: {palette.success};'>已签：{stats['已签']} | </span>"
+            f"<span style='color: {palette.danger};'>未签：{stats['未签']} | </span>"
+            f"<span style='color: {'#9a6700' if palette.mode == 'light' else '#dcdcaa'};'>迟到：{stats['迟到']} | </span>"
+            f"<span style='color: {'#9a6700' if palette.mode == 'light' else '#dcdcaa'};'>早退：{stats['早退']} | </span>"
+            f"<span style='color: {palette.danger};'>缺勤：{stats['缺勤']} | </span>"
+            f"<span style='color: {palette.accent};'>病假：{stats['病假']} | </span>"
+            f"<span style='color: {palette.accent};'>事假：{stats['事假']} | </span>"
+            f"<span style='color: {palette.accent};'>公假：{stats['公假']} | </span>"
+            f"<span style='color: {palette.text_muted};'>代签：{stats['代签']}</span>"
         )
 
     def _refresh_tables(self, preferred_uid: str = "", preferred_tab_key: str = ""):

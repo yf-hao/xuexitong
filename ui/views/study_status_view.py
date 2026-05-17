@@ -16,6 +16,7 @@ from ui.workers import (
 from models.activity import Activity
 from core.communication_manager import CommunicationManager
 from core.exporters.homework_stats_exporter import build_homework_stats_filename
+from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -77,7 +78,7 @@ class StudyStatusView(QWidget):
         self.buttons = [self.btn_attendance, self.btn_homework, self.btn_quiz, self.btn_midterm]
         
         for btn in self.buttons:
-            btn.setStyleSheet(STAT_BUTTON_STYLE)
+            apply_theme_stylesheet(btn, STAT_BUTTON_STYLE)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
         self.layout.addWidget(self.btn_attendance, 0, 0)
@@ -87,7 +88,7 @@ class StudyStatusView(QWidget):
         
         # 结果区域
         self.content_frame = QFrame()
-        self.content_frame.setStyleSheet(STAT_CARD_CONTAINER_STYLE)
+        apply_theme_stylesheet(self.content_frame, STAT_CARD_CONTAINER_STYLE)
         self.content_layout = QVBoxLayout(self.content_frame)
         self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.content_layout.setSpacing(10)
@@ -95,7 +96,7 @@ class StudyStatusView(QWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setWidget(self.content_frame)
-        self.scroll_area.setStyleSheet("border: none; background: transparent;")
+        apply_theme_stylesheet(self.scroll_area, "border: none; background: transparent;")
         
         self.layout.addWidget(self.scroll_area, 1, 0, 1, 4)
         
@@ -104,6 +105,7 @@ class StudyStatusView(QWidget):
         self.btn_homework.clicked.connect(self.on_homework_clicked)
         self.btn_quiz.clicked.connect(self.on_quiz_clicked)
         self.btn_midterm.clicked.connect(self.on_midterm_clicked)
+        bind_theme_tree(self)
 
     def clear_content(self):
         """清空内容区域"""
@@ -137,7 +139,7 @@ class StudyStatusView(QWidget):
         table.setAlternatingRowColors(True)
         table.setWordWrap(False)
         table.setShowGrid(True)
-        table.setStyleSheet("""
+        apply_theme_stylesheet(table, """
             QTableWidget {
                 background-color: #1e1e1e;
                 alternate-background-color: #252526;
@@ -176,7 +178,7 @@ class StudyStatusView(QWidget):
         """显示加载提示"""
         self.clear_content()
         loading_label = QLabel(message)
-        loading_label.setStyleSheet("color: #007acc; padding: 20px;")
+        apply_theme_stylesheet(loading_label, "color: #007acc; padding: 20px;")
         self.content_layout.addWidget(loading_label)
 
     def _set_absence_stats_busy(self, busy: bool):
@@ -188,7 +190,7 @@ class StudyStatusView(QWidget):
     def _create_inline_action_button(self, text: str, handler):
         btn = QPushButton(text)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet("""
+        apply_theme_stylesheet(btn, """
             QPushButton {
                 background-color: transparent;
                 color: #007acc;
@@ -412,7 +414,7 @@ class StudyStatusView(QWidget):
         """显示占位提示"""
         self.clear_content()
         label = QLabel(message)
-        label.setStyleSheet("color: #888; font-size: 14px; padding: 20px;")
+        apply_theme_stylesheet(label, "color: #888888; font-size: 14px; padding: 20px;")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.content_layout.addWidget(label)
 
@@ -448,7 +450,7 @@ class StudyStatusView(QWidget):
         if isinstance(result, str):
             # 错误信息
             error_label = QLabel(f"❌ {result}")
-            error_label.setStyleSheet("color: #ff5252; padding: 20px; font-size: 14px;")
+            apply_theme_stylesheet(error_label, "color: #ff5252; padding: 20px; font-size: 14px;")
             self.content_layout.addWidget(error_label)
             self.status_update.emit("考勤情况加载失败")
             return
@@ -456,7 +458,7 @@ class StudyStatusView(QWidget):
         if not result or len(result) == 0:
             # 无数据
             empty_label = QLabel("💡 未找到考勤活动记录")
-            empty_label.setStyleSheet("color: #888; padding: 20px; font-size: 14px;")
+            apply_theme_stylesheet(empty_label, "color: #888888; padding: 20px; font-size: 14px;")
             empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.content_layout.addWidget(empty_label)
             self.status_update.emit("考勤情况加载完成（无数据）")
@@ -470,7 +472,7 @@ class StudyStatusView(QWidget):
         
         if not ended_attendance:
             empty_label = QLabel("💡 未找到已结束的签到活动记录")
-            empty_label.setStyleSheet("color: #888; padding: 20px; font-size: 14px;")
+            apply_theme_stylesheet(empty_label, "color: #888888; padding: 20px; font-size: 14px;")
             empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.content_layout.addWidget(empty_label)
             self.status_update.emit("考勤情况加载完成（无已结束的签到）")
@@ -507,13 +509,13 @@ class StudyStatusView(QWidget):
             
             # 状态
             status_item = QTableWidgetItem(activity.status_name)
-            status_item.setForeground(QColor("#a0a0a0"))
+            status_item.setForeground(QColor(get_theme_palette().text_secondary))
             self.attendance_table.setItem(row, 4, status_item)
             
             # 查看按钮
             view_btn = QPushButton("查看")
             view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            view_btn.setStyleSheet("""
+            apply_theme_stylesheet(view_btn, """
                 QPushButton {
                     background-color: transparent;
                     color: #007acc;
@@ -550,7 +552,7 @@ class StudyStatusView(QWidget):
         
         self.btn_absence_stats = QPushButton("📊 缺勤统计")
         self.btn_absence_stats.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_absence_stats.setStyleSheet("""
+        apply_theme_stylesheet(self.btn_absence_stats, """
             QPushButton {
                 background-color: #007acc;
                 color: white;
@@ -726,7 +728,7 @@ class StudyStatusView(QWidget):
         if isinstance(result, str):
             # 错误信息
             error_label = QLabel(f"❌ {result}")
-            error_label.setStyleSheet("color: #ff5252; padding: 20px; font-size: 14px;")
+            apply_theme_stylesheet(error_label, "color: #ff5252; padding: 20px; font-size: 14px;")
             self.content_layout.addWidget(error_label)
             self.status_update.emit("学生作业统计加载失败")
             return
@@ -734,7 +736,7 @@ class StudyStatusView(QWidget):
         if not result or len(result) == 0:
             # 无数据
             empty_label = QLabel("💡 未找到学生作业统计记录")
-            empty_label.setStyleSheet("color: #888; padding: 20px; font-size: 14px;")
+            apply_theme_stylesheet(empty_label, "color: #888888; padding: 20px; font-size: 14px;")
             empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.content_layout.addWidget(empty_label)
             self.status_update.emit("学生作业统计加载完成（无数据）")
@@ -863,7 +865,7 @@ class StudyStatusView(QWidget):
         btn_layout.addStretch()
         self.btn_homework_reminder = QPushButton("🔔 一键提醒")
         self.btn_homework_reminder.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_homework_reminder.setStyleSheet("""
+        apply_theme_stylesheet(self.btn_homework_reminder, """
             QPushButton {
                 background-color: #007acc;
                 color: white;
@@ -882,7 +884,7 @@ class StudyStatusView(QWidget):
 
         self.btn_homework_export = QPushButton("导出")
         self.btn_homework_export.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_homework_export.setStyleSheet("""
+        apply_theme_stylesheet(self.btn_homework_export, """
             QPushButton {
                 background-color: #007acc;
                 color: white;
@@ -1007,9 +1009,9 @@ class StudyStatusView(QWidget):
         """高亮选中的按钮"""
         for btn in self.buttons:
             if btn == active_btn:
-                btn.setStyleSheet(STAT_BUTTON_STYLE + "border: 2px solid #007acc;")
+                apply_theme_stylesheet(btn, STAT_BUTTON_STYLE + "border: 2px solid #007acc;")
             else:
-                btn.setStyleSheet(STAT_BUTTON_STYLE)
+                apply_theme_stylesheet(btn, STAT_BUTTON_STYLE)
 
     def on_show(self):
         """视图显示时调用"""

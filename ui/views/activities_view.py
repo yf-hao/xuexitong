@@ -17,6 +17,7 @@ from ui.workers import (
 )
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE
 from core.config import SIGNIN_DATA_FILE, LOCATION_DATA_FILE, DEFAULT_COMMON_LOCATIONS
+from ui.theme import bind_theme_tree
 
 class ActivitiesView(QWidget):
     def __init__(self, crawler, status_callback, get_course_callback, get_class_name_callback, get_class_id_callback, parent=None):
@@ -80,6 +81,7 @@ class ActivitiesView(QWidget):
         self.btn_signin.clicked.connect(self.on_signin_clicked)
         self.btn_questionnaire.clicked.connect(self.on_questionnaire_clicked)
         self.btn_group_manage.clicked.connect(self.on_group_manage_clicked)
+        bind_theme_tree(self)
 
     def clear_activities_list(self):
         while self.activities_scroll_layout.count():

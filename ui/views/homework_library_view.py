@@ -8,8 +8,9 @@ from PyQt6.QtWidgets import (
     QInputDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QColor
 from ui.dialogs.homework_publish_dialog import HomeworkPublishDialog
+from ui.theme import apply_theme_stylesheet, get_theme_palette
 
 
 class FolderSelectDialog(QDialog):
@@ -28,7 +29,7 @@ class FolderSelectDialog(QDialog):
         """设置界面"""
         self.setWindowTitle("移动到 (选择目标目录)")
         self.setFixedSize(400, 450)
-        self.setStyleSheet("background-color: #2d2d30;")
+        apply_theme_stylesheet(self, "background-color: #2d2d30;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -37,7 +38,7 @@ class FolderSelectDialog(QDialog):
         # 文件夹树
         self.folder_tree = QTreeWidget()
         self.folder_tree.setHeaderHidden(True)
-        self.folder_tree.setStyleSheet("""
+        apply_theme_stylesheet(self.folder_tree, """
             QTreeWidget {
                 background-color: #1e1e1e;
                 color: #cccccc;
@@ -81,7 +82,7 @@ class FolderSelectDialog(QDialog):
 
         cancel_btn = QPushButton("取消")
         cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        cancel_btn.setStyleSheet("""
+        apply_theme_stylesheet(cancel_btn, """
             QPushButton {
                 background-color: #3e3e42;
                 color: #ffffff;
@@ -100,7 +101,7 @@ class FolderSelectDialog(QDialog):
 
         ok_btn = QPushButton("确定")
         ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        ok_btn.setStyleSheet("""
+        apply_theme_stylesheet(ok_btn, """
             QPushButton {
                 background-color: #007acc;
                 color: white;
@@ -178,7 +179,7 @@ class HomeworkLibraryView(QWidget):
     
     def setup_ui(self):
         """设置界面布局"""
-        self.setStyleSheet("background-color: #1e1e1e;")
+        apply_theme_stylesheet(self, "background-color: #1e1e1e;")
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(15, 15, 15, 15)
@@ -190,7 +191,7 @@ class HomeworkLibraryView(QWidget):
         # 新建文件夹按钮
         new_folder_btn = QPushButton("📁 新建文件夹")
         new_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        new_folder_btn.setStyleSheet("""
+        apply_theme_stylesheet(new_folder_btn, """
             QPushButton {
                 background-color: #007acc;
                 color: white;
@@ -209,7 +210,7 @@ class HomeworkLibraryView(QWidget):
         
         # 当前路径标签
         self.path_label = QLabel("")
-        self.path_label.setStyleSheet("color: #888888; font-size: 12px;")
+        apply_theme_stylesheet(self.path_label, "color: #888888; font-size: 12px;")
         header_layout.addWidget(self.path_label)
         
         header_layout.addStretch()
@@ -218,7 +219,7 @@ class HomeworkLibraryView(QWidget):
         self.create_in_folder_btn = QPushButton("在此创建作业")
         self.create_in_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.create_in_folder_btn.setMinimumHeight(28)
-        self.create_in_folder_btn.setStyleSheet("""
+        apply_theme_stylesheet(self.create_in_folder_btn, """
             QPushButton {
                 background-color: #28a745;
                 color: white;
@@ -240,7 +241,7 @@ class HomeworkLibraryView(QWidget):
         # 返回上级按钮
         self.back_btn = QPushButton("⬅ 返回上级")
         self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.back_btn.setStyleSheet("""
+        apply_theme_stylesheet(self.back_btn, """
             QPushButton {
                 background-color: #3e3e42;
                 color: #ffffff;
@@ -262,7 +263,7 @@ class HomeworkLibraryView(QWidget):
         # 刷新按钮
         refresh_btn = QPushButton("🔄 刷新")
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.setStyleSheet("""
+        apply_theme_stylesheet(refresh_btn, """
             QPushButton {
                 background-color: #3e3e42;
                 color: #ffffff;
@@ -294,7 +295,7 @@ class HomeworkLibraryView(QWidget):
         self.library_tree.setUniformRowHeights(True)
         self.library_tree.setItemsExpandable(False)
         
-        self.library_tree.setStyleSheet("""
+        apply_theme_stylesheet(self.library_tree, """
             QTreeWidget {
                 background-color: #252526;
                 color: #cccccc;
@@ -340,7 +341,7 @@ class HomeworkLibraryView(QWidget):
         footer_layout = QHBoxLayout()
         
         self.stats_label = QLabel("共 0 个文件夹，0 份作业")
-        self.stats_label.setStyleSheet("color: #888888; font-size: 12px;")
+        apply_theme_stylesheet(self.stats_label, "color: #888888; font-size: 12px;")
         footer_layout.addWidget(self.stats_label)
         
         footer_layout.addStretch()
@@ -381,7 +382,7 @@ class HomeworkLibraryView(QWidget):
                     ""
                 ])
                 
-                item.setForeground(0, Qt.GlobalColor.white)
+                item.setForeground(0, QColor(get_theme_palette().text))
                 item.setData(0, Qt.ItemDataRole.UserRole, {
                     'type': 'folder',
                     'id': folder['id'],
@@ -576,7 +577,7 @@ class HomeworkLibraryView(QWidget):
 
         publish_btn = QPushButton("发布")
         publish_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        publish_btn.setStyleSheet("""
+        apply_theme_stylesheet(publish_btn, """
             QPushButton {
                 background-color: #28a745;
                 color: white;
@@ -664,7 +665,7 @@ class HomeworkLibraryView(QWidget):
         
         # 创建菜单
         menu = QMenu(self)
-        menu.setStyleSheet("""
+        apply_theme_stylesheet(menu, """
             QMenu {
                 background-color: #2d2d30;
                 color: #ffffff;

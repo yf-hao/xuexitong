@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QEvent, QThread
 from PyQt6.QtGui import QIcon, QAction, QKeySequence, QShortcut
 from PyQt6.QtWebEngineCore import QWebEnginePage
+from ui.theme import bind_theme_tree
 
 
 class QuestionDetailPage(QWebEnginePage):
@@ -247,6 +248,7 @@ class QuestionBankView(QWidget):
         splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
+        bind_theme_tree(self)
     
     def create_left_panel(self) -> QWidget:
         """创建左侧文件夹面板"""

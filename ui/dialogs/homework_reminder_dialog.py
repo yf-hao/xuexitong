@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
 )
+from ui.theme import apply_theme_stylesheet
 
 
 DEFAULT_HOMEWORK_REMINDER_TEMPLATE = (
@@ -52,7 +53,7 @@ class HomeworkReminderDialog(QDialog):
         self.setWindowTitle(self._title)
         self.resize(620, 420)
         self.setModal(True)
-        self.setStyleSheet("""
+        apply_theme_stylesheet(self, """
             QDialog {
                 background-color: #1e1e1e;
             }
@@ -102,7 +103,7 @@ class HomeworkReminderDialog(QDialog):
         layout.addWidget(self.template_input, stretch=1)
 
         tips_label = QLabel(self._placeholders_tip)
-        tips_label.setStyleSheet("color: #9cdcfe; font-size: 12px;")
+        apply_theme_stylesheet(tips_label, "color: #9cdcfe; font-size: 12px;")
         tips_label.setWordWrap(True)
         layout.addWidget(tips_label)
 

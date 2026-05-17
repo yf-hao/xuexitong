@@ -1,6 +1,7 @@
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLineEdit, QPushButton, QLabel, QCheckBox
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel, QCheckBox
 from PyQt6.QtCore import Qt, QSettings
 from core.config import APP_TITLE
+from ui.theme import apply_theme_stylesheet, refresh_theme_styles, theme_manager
 
 class LoginWindow(QDialog):
     def __init__(self, crawler):
@@ -9,8 +10,7 @@ class LoginWindow(QDialog):
         self.setWindowTitle(APP_TITLE)
         self.setFixedSize(380, 420)
         
-        # Dark Theme QSS for Login
-        self.setStyleSheet("""
+        apply_theme_stylesheet(self, """
             QDialog {
                 background-color: #1e1e1e;
             }
@@ -75,10 +75,39 @@ class LoginWindow(QDialog):
         layout = QVBoxLayout()
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(8) # 缩小间距，使标签和输入框成对出现
+
+        theme_row = QHBoxLayout()
+        theme_row.addStretch()
+        self.theme_toggle_btn = QPushButton("☀️")
+        self.theme_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_toggle_btn.clicked.connect(self._toggle_theme)
+        apply_theme_stylesheet(self.theme_toggle_btn, """
+            QPushButton {
+                background-color: #252526;
+                color: #aaaaaa;
+                border: 1px solid #3d3d3d;
+                border-radius: 16px;
+                padding: 0;
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
+                font-size: 15px;
+                font-weight: normal;
+                margin-top: 0;
+            }
+            QPushButton:hover {
+                background-color: #2a2d2e;
+                color: #ffffff;
+                border: 1px solid #007acc;
+            }
+        """)
+        theme_row.addWidget(self.theme_toggle_btn)
+        layout.addLayout(theme_row)
         
         title_label = QLabel("学习通登录")
         title_label.setObjectName("title_label")
-        title_label.setStyleSheet("margin-bottom: 15px;") # 标题离下方远一点
+        apply_theme_stylesheet(title_label, "margin-bottom: 15px;") # 标题离下方远一点
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
         
@@ -104,7 +133,7 @@ class LoginWindow(QDialog):
         self.load_settings()
         
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #ff5252; font-size: 12px;")
+        apply_theme_stylesheet(self.status_label, "color: #ff5252; font-size: 12px;")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_label)
         
@@ -114,6 +143,21 @@ class LoginWindow(QDialog):
         layout.addWidget(self.login_btn)
         
         self.setLayout(layout)
+        theme_manager().theme_changed.connect(self._apply_theme)
+        self._apply_theme(theme_manager().mode)
+
+    def _toggle_theme(self):
+        mode = theme_manager().mode
+        theme_manager().set_mode("dark" if mode == "light" else "light")
+
+    def _apply_theme(self, mode):
+        if mode == "light":
+            self.theme_toggle_btn.setText("🌙")
+            self.theme_toggle_btn.setToolTip("切换到暗色主题")
+        else:
+            self.theme_toggle_btn.setText("☀️")
+            self.theme_toggle_btn.setToolTip("切换到亮色主题")
+        refresh_theme_styles(self, mode)
 
     def handle_login(self):
         phone = self.phone_input.text().strip()

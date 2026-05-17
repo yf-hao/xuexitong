@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from ui.workers import StatsWorker, DownloadWorker, DeleteStatsWorker
 from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE, STAT_CARD_HIGHLIGHT_STYLE
+from ui.theme import apply_theme_stylesheet
 from core.config import STATS_TYPES
 from core.stats_history import StatsHistory
 
@@ -36,7 +37,7 @@ class StatsView(QWidget):
         self.buttons = [self.btn_attendance, self.btn_homework, self.btn_quiz, self.btn_final_score]
         
         for btn in self.buttons:
-            btn.setStyleSheet(STAT_BUTTON_STYLE)
+            apply_theme_stylesheet(btn, STAT_BUTTON_STYLE)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
         self.layout.addWidget(self.btn_attendance, 0, 0)
@@ -46,7 +47,7 @@ class StatsView(QWidget):
         
         # Result area
         self.stats_scroll = QFrame()
-        self.stats_scroll.setStyleSheet(STAT_CARD_CONTAINER_STYLE)
+        apply_theme_stylesheet(self.stats_scroll, STAT_CARD_CONTAINER_STYLE)
         self.stats_scroll_layout = QVBoxLayout(self.stats_scroll)
         self.stats_scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.stats_scroll_layout.setSpacing(10)
@@ -54,7 +55,7 @@ class StatsView(QWidget):
         self.stats_scroll_area = QScrollArea()
         self.stats_scroll_area.setWidgetResizable(True)
         self.stats_scroll_area.setWidget(self.stats_scroll)
-        self.stats_scroll_area.setStyleSheet("border: none; background: transparent;")
+        apply_theme_stylesheet(self.stats_scroll_area, "border: none; background: transparent;")
         
         self.layout.addWidget(self.stats_scroll_area, 1, 0, 1, 4)
         
@@ -82,7 +83,7 @@ class StatsView(QWidget):
         
         self.clear_stats_list()
         loading_label = QLabel(f"正在同步{display_name}数据列表，请稍候...")
-        loading_label.setStyleSheet("color: #007acc; padding: 20px;")
+        apply_theme_stylesheet(loading_label, "color: #007acc; padding: 20px;")
         self.stats_scroll_layout.addWidget(loading_label)
         
         btn.setEnabled(False)
@@ -109,7 +110,7 @@ class StatsView(QWidget):
         
         if isinstance(result, str):
             error_label = QLabel(result)
-            error_label.setStyleSheet("color: #ff4d4d; padding: 20px;")
+            apply_theme_stylesheet(error_label, "color: #ff4d4d; padding: 20px;")
             self.stats_scroll_layout.addWidget(error_label)
             return
 
@@ -124,7 +125,7 @@ class StatsView(QWidget):
             for item in result:
                 card = QFrame()
                 card.setObjectName("stats_card")
-                card.setStyleSheet(STAT_CARD_STYLE)
+                apply_theme_stylesheet(card, STAT_CARD_STYLE)
                 card_layout = QHBoxLayout(card)
                 
                 info_layout = QVBoxLayout()
@@ -148,9 +149,9 @@ class StatsView(QWidget):
                     display_name = original_name
                 
                 name_label = QLabel(f"{icon} {display_name}")
-                name_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 13px;")
+                apply_theme_stylesheet(name_label, "font-weight: bold; color: #ffffff; font-size: 13px;")
                 meta_label = QLabel(f"🕒 时间: {item['time']}   |   ✨ 状态: {item['status']}")
-                meta_label.setStyleSheet("color: #aaaaaa; font-size: 11px;")
+                apply_theme_stylesheet(meta_label, "color: #aaaaaa; font-size: 11px;")
                 info_layout.addWidget(name_label)
                 info_layout.addWidget(meta_label)
                 
@@ -161,7 +162,7 @@ class StatsView(QWidget):
                     dl_btn = QPushButton("下载数据")
                     dl_btn.setFixedWidth(90)
                     dl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    dl_btn.setStyleSheet("""
+                    apply_theme_stylesheet(dl_btn, """
                         QPushButton {
                             background-color: #007acc;
                             color: white;
@@ -180,7 +181,7 @@ class StatsView(QWidget):
                 del_btn = QPushButton("删除")
                 del_btn.setFixedWidth(90)
                 del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                del_btn.setStyleSheet("""
+                apply_theme_stylesheet(del_btn, """
                     QPushButton {
                         background-color: #442222;
                         color: #ff8888;
@@ -234,7 +235,7 @@ class StatsView(QWidget):
 
     def on_delete_stats_clicked(self, report_id, name, card_widget):
         # Highlight the card being deleted
-        card_widget.setStyleSheet(STAT_CARD_HIGHLIGHT_STYLE)
+        apply_theme_stylesheet(card_widget, STAT_CARD_HIGHLIGHT_STYLE)
         
         reply = QMessageBox.question(
             self, "确认删除", 
@@ -252,7 +253,7 @@ class StatsView(QWidget):
             worker.start()
         else:
             # Revert highlight if cancelled
-            card_widget.setStyleSheet(STAT_CARD_STYLE)
+            apply_theme_stylesheet(card_widget, STAT_CARD_STYLE)
 
     def on_delete_finished(self, success, message, report_id=None):
         if success:

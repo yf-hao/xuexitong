@@ -1,5 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
 from PyQt6.QtCore import Qt
+from ui.theme import bind_theme_tree
 
 
 class LearningView(QWidget):
@@ -40,6 +41,7 @@ class LearningView(QWidget):
         card_layout.addWidget(title)
         card_layout.addWidget(desc)
         layout.addWidget(card)
+        bind_theme_tree(self)
 
     def on_show(self):
         self.status_callback("学情页面已加载")

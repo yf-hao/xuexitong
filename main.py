@@ -26,6 +26,7 @@ def _setup_early_logging():
 _setup_early_logging()
 
 from PyQt6.QtWidgets import QApplication
+from ui.theme import apply_application_theme, theme_manager
 
 # 后台预加载线程：在用户登录期间并行加载重依赖模块
 _preload_result = {}
@@ -54,6 +55,7 @@ class AppController:
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)  # 防止登录窗口关闭时程序意外退出
         app.setStyle("Fusion")
+        apply_application_theme(app, theme_manager().mode)
         
         # 启动后台预加载
         preload_thread = threading.Thread(target=_preload_modules, daemon=True)

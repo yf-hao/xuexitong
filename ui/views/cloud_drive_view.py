@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QAction
+from ui.theme import bind_theme_tree, get_theme_palette, theme_manager
 
 
 class DownloadThread(QThread):
@@ -264,6 +265,7 @@ class CloudDriveView(QWidget):
         """)
         layout.addWidget(self.loading_label)
         self.loading_label.hide()
+        bind_theme_tree(self)
     
     def refresh_info(self):
         """刷新云盘信息"""
@@ -377,6 +379,10 @@ class CloudDriveView(QWidget):
     
     def display_file_list(self, file_list):
         """显示文件列表"""
+        palette = get_theme_palette(theme_manager().mode)
+        primary_text = QColor(palette.text)
+        secondary_text = QColor(palette.text_muted)
+
         # 缓存文件列表
         self.current_file_list = file_list
         
@@ -405,7 +411,7 @@ class CloudDriveView(QWidget):
                 display_name = f"{icon} {name}"
             name_item = QTableWidgetItem(display_name)
             name_item.setData(Qt.ItemDataRole.UserRole, item)  # 存储原始数据
-            name_item.setForeground(QColor("#e1e1e1"))
+            name_item.setForeground(primary_text)
             self.file_table.setItem(row, 0, name_item)
             
             # 类型列
@@ -416,7 +422,7 @@ class CloudDriveView(QWidget):
                 type_text = "文件夹"
             type_item = QTableWidgetItem(type_text)
             type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            type_item.setForeground(QColor("#888888"))
+            type_item.setForeground(secondary_text)
             self.file_table.setItem(row, 1, type_item)
             
             # 大小列
@@ -426,7 +432,7 @@ class CloudDriveView(QWidget):
                 size_text = "-"
             size_item = QTableWidgetItem(size_text)
             size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            size_item.setForeground(QColor("#888888"))
+            size_item.setForeground(secondary_text)
             self.file_table.setItem(row, 2, size_item)
             
             # 修改时间列
@@ -442,7 +448,7 @@ class CloudDriveView(QWidget):
                 time_text = "-"
             time_item = QTableWidgetItem(time_text)
             time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            time_item.setForeground(QColor("#888888"))
+            time_item.setForeground(secondary_text)
             self.file_table.setItem(row, 3, time_item)
     
     def format_file_size(self, size):

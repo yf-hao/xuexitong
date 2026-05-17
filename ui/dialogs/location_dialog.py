@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from core.config import LOCATION_DATA_FILE, DEFAULT_COMMON_LOCATIONS, DEFAULT_LOCATION_TEMPLATE
+from ui.theme import bind_theme_tree
 
 
 class LocationConfigDialog(QDialog):
@@ -174,6 +175,7 @@ class LocationConfigDialog(QDialog):
         button_layout.addWidget(btn_cancel)
         
         layout.addLayout(button_layout)
+        bind_theme_tree(self)
     
     def _create_template_tab(self):
         """创建位置模板配置Tab"""
@@ -1025,4 +1027,3 @@ class LocationConfigDialog(QDialog):
         
         except Exception as e:
             QMessageBox.warning(self, "错误", f"导入失败: {e}")
-

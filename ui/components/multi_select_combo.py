@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QLabel, QFrame, QScrollArea, QPushButton, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from ui.theme import apply_theme_stylesheet, bind_theme_tree
 
 
 class MultiSelectCombo(QFrame):
@@ -168,6 +169,8 @@ class MultiSelectCombo(QFrame):
         
         # 为header添加点击事件
         self.header.mousePressEvent = lambda event: self.on_header_clicked(event)
+        bind_theme_tree(self)
+        bind_theme_tree(self.dropdown_panel)
         
     def add_group(self, text: str, indent: int = 0):
         """添加分组标题（不可选择）"""
@@ -383,7 +386,7 @@ class MultiSelectCombo(QFrame):
         
         if not selected:
             self.display_label.setText(self.placeholder)
-            self.display_label.setStyleSheet("color: #888888; font-size: 13px;")
+            apply_theme_stylesheet(self.display_label, "color: #888888; font-size: 13px;")
         elif len(selected) == total_count:
             # 全部选中时显示"全部X"（根据placeholder）
             if "题型" in self.placeholder:
@@ -396,14 +399,14 @@ class MultiSelectCombo(QFrame):
                 self.display_label.setText("全部课程")
             else:
                 self.display_label.setText("全部")
-            self.display_label.setStyleSheet("color: #ffffff; font-size: 13px;")
+            apply_theme_stylesheet(self.display_label, "color: #ffffff; font-size: 13px;")
         else:
             # 部分选中时显示选中的项
             text = "，".join(selected)
             if len(text) > 15:
                 text = text[:15] + "..."
             self.display_label.setText(text)
-            self.display_label.setStyleSheet("color: #ffffff; font-size: 13px;")
+            apply_theme_stylesheet(self.display_label, "color: #ffffff; font-size: 13px;")
             
     def emit_selection(self):
         """发送选中变化信号"""
