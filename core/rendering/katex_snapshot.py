@@ -86,7 +86,11 @@ class KaTeXSnapshotRenderer:
             for x in range(0, width, step_x):
                 color = image.pixelColor(x, y)
                 total_samples += 1
-                if color.alpha() < 245 or color.red() < 245 or color.green() < 245 or color.blue() < 245:
+                alpha_ratio = color.alphaF()
+                blended_red = round(255 - alpha_ratio * (255 - color.red()))
+                blended_green = round(255 - alpha_ratio * (255 - color.green()))
+                blended_blue = round(255 - alpha_ratio * (255 - color.blue()))
+                if blended_red < 245 or blended_green < 245 or blended_blue < 245:
                     non_white_samples += 1
                     if non_white_samples >= 8:
                         return False
@@ -119,7 +123,7 @@ class KaTeXSnapshotRenderer:
         html, body {{
             margin: 0;
             padding: 0;
-            background: #ffffff;
+        background: transparent;
             overflow: visible;
         }}
         body {{
@@ -129,7 +133,7 @@ class KaTeXSnapshotRenderer:
         #formula {{
             display: inline-block;
             padding: 1px 4px 3px 4px;
-            background: #ffffff;
+            background: transparent;
             min-width: 1px;
             min-height: 1px;
             white-space: nowrap; /* 强制公式不换行 */
@@ -150,13 +154,48 @@ class KaTeXSnapshotRenderer:
             }}
             window.__renderError = "";
             window.__renderBusy = false;
+            window.__paintReady = false;
+            window.__renderState = null;
             return true;
+        }};
+        window._captureRenderState = () => {{
+            const root = document.getElementById("formula");
+            if (!root) {{
+                window.__renderState = {{ ok: false, error: "formula root missing", paintReady: false, fontsReady: true }};
+                return window.__renderState;
+            }}
+            const rect = root.getBoundingClientRect();
+            window.__renderState = {{
+                width: rect.width,
+                height: rect.height,
+                scrollWidth: root.scrollWidth,
+                scrollHeight: root.scrollHeight,
+                ok: !window.__renderError,
+                error: window.__renderError || "",
+                fontsReady: !document.fonts || document.fonts.status === "loaded",
+                paintReady: true
+            }};
+            window.__paintReady = true;
+            return window.__renderState;
+        }};
+        window.getRenderState = () => {{
+            if (window.__renderState) {{
+                return window.__renderState;
+            }}
+            return {{
+                ok: !window.__renderError,
+                error: window.__renderError || "",
+                fontsReady: !document.fonts || document.fonts.status === "loaded",
+                paintReady: !!window.__paintReady
+            }};
         }};
         window.renderFormula = (expr, displayMode) => {{
             const root = document.getElementById("formula");
             root.innerHTML = "";
             window.__renderError = "";
             window.__renderBusy = true;
+            window.__paintReady = false;
+            window.__renderState = null;
             try {{
                 if (typeof katex === "undefined") {{
                     throw new Error("KaTeX not loaded");
@@ -167,19 +206,31 @@ class KaTeXSnapshotRenderer:
                     strict: "ignore",
                     trust: false
                 }});
-                
+
                 const rect = root.getBoundingClientRect();
-                return {{
+                window.__renderState = {{
                     width: rect.width,
                     height: rect.height,
                     scrollWidth: root.scrollWidth,
                     scrollHeight: root.scrollHeight,
                     ok: true,
-                    fontsReady: !document.fonts || document.fonts.status === 'loaded'
+                    fontsReady: !document.fonts || document.fonts.status === 'loaded',
+                    paintReady: false
                 }};
+                const finalizePaint = () => requestAnimationFrame(() => requestAnimationFrame(() => {{
+                    window._captureRenderState();
+                }}));
+                if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === "function") {{
+                    document.fonts.ready.then(finalizePaint).catch(finalizePaint);
+                }} else {{
+                    finalizePaint();
+                }};
+                return window.__renderState;
             }} catch (error) {{
                 window.__renderError = error.message || String(error);
-                return {{ ok: false, error: window.__renderError }};
+                window.__paintReady = false;
+                window.__renderState = {{ ok: false, error: window.__renderError, fontsReady: true, paintReady: false }};
+                return window.__renderState;
             }} finally {{
                 window.__renderBusy = false;
             }}
@@ -247,7 +298,7 @@ class KaTeXSnapshotRenderer:
         view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         cls._prepare_shared_view_for_platform(view)
         view.setZoomFactor(cls._CAPTURE_SCALE)
-        view.page().setBackgroundColor(QColor(255, 255, 255, 255))
+        view.page().setBackgroundColor(QColor(0, 0, 0, 0))
         view.show()
         return view
 
@@ -351,9 +402,47 @@ class KaTeXSnapshotRenderer:
             cls._page_ready = False
             return
 
-        cls._perform_js_check(cls._shared_view, "window.resetFormula && window.resetFormula()")
         if not keep_ready or not cls._is_view_ready(cls._shared_view):
+            cls._perform_js_check(cls._shared_view, "window.resetFormula && window.resetFormula()")
             cls._page_ready = False
+
+    @classmethod
+    def _wait_for_render_state(cls, view, timeout_ms: int = 5000):
+        deadline = timeout_ms
+        while deadline > 0:
+            info = cls._perform_js_check(view, "window.getRenderState && window.getRenderState()")
+            if isinstance(info, dict) and info.get("ok") and info.get("fontsReady") and info.get("paintReady"):
+                return info
+            loop = QEventLoop()
+            QTimer.singleShot(100, loop.quit)
+            loop.exec()
+            deadline -= 100
+        return cls._perform_js_check(view, "window.getRenderState && window.getRenderState()")
+
+    @classmethod
+    def _grab_view_image_with_retries(cls, view, app, attempts: int = 3, base_delay_ms: int = 80):
+        for attempt in range(attempts):
+            grab_loop = QEventLoop()
+            pix_holder = {}
+
+            def do_grab():
+                pix_holder["pix"] = view.grab()
+                grab_loop.quit()
+
+            QTimer.singleShot(base_delay_ms * (attempt + 1), do_grab)
+            QTimer.singleShot(base_delay_ms * (attempt + 1) + 1500, grab_loop.quit)
+            grab_loop.exec()
+            app.processEvents()
+
+            pix = pix_holder.get("pix")
+            if pix is None or pix.isNull():
+                continue
+
+            image = pix.toImage()
+            if cls._looks_blank(image):
+                continue
+            return image
+        return None
 
     @classmethod
     def _render_with_shared_view(cls, expr: str, display_mode: bool = False) -> tuple[bytes, int, int] | None:
@@ -393,18 +482,13 @@ class KaTeXSnapshotRenderer:
             loop.exec()
             return res.get("v")
 
-        # Execute render and get dimensions with polling for fonts
-        info = None
-        for _ in range(50):
-            info = run_js_sync(render_script)
-            if isinstance(info, dict) and info.get("ok") and info.get("fontsReady"):
-                break
-            # Wait a bit for fonts
-            loop = QEventLoop()
-            QTimer.singleShot(100, loop.quit)
-            loop.exec()
-            app.processEvents()
+        info = run_js_sync(render_script)
+        if not isinstance(info, dict) or not info.get("ok"):
+            if isinstance(info, dict) and "error" in info:
+                print(f"KaTeX Render Error: {info['error']}")
+            return None
 
+        info = cls._wait_for_render_state(view)
         if not isinstance(info, dict) or not info.get("ok"):
             if isinstance(info, dict) and "error" in info:
                 print(f"KaTeX Render Error: {info['error']}")
@@ -427,23 +511,8 @@ class KaTeXSnapshotRenderer:
         view.resize(capture_w, capture_h)
         app.processEvents()
 
-        # Brief wait for resize and paint stability
-        grab_loop = QEventLoop()
-        pix_holder = {}
-        def do_grab():
-            pix_holder["pix"] = view.grab()
-            grab_loop.quit()
-        
-        QTimer.singleShot(50, do_grab)
-        QTimer.singleShot(1500, grab_loop.quit)
-        grab_loop.exec()
-
-        pix = pix_holder.get("pix")
-        if pix is None or pix.isNull():
-            return None
-
-        image = pix.toImage()
-        if cls._looks_blank(image):
+        image = cls._grab_view_image_with_retries(view, app)
+        if image is None:
             return None
 
         ba = QByteArray()

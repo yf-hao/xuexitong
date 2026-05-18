@@ -281,5 +281,5 @@ jobs:
              dist/XHelper-*.tar.gz
              dist/XHelper-*.zip
              dist/XHelper-*.dmg
-             dist/XHelper-Setup.exe
+             dist/XHelper-*-Setup.exe
              *.deb

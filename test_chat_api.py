@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from core.apis.chat_api import ChatAPI
@@ -1332,6 +1333,7 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("<img", session.calls[0]["data"]["A"])
         self.assertNotIn("$", session.calls[0]["data"]["A"])
 
+
     def test_katex_snapshot_reset_shared_view_clears_renderer_state(self):
         class _FakeView:
             def __init__(self):
@@ -1409,6 +1411,31 @@ class ChatAPITests(unittest.TestCase):
                 KaTeXSnapshotRenderer._render_in_progress,
             ) = old_state
 
+    def test_katex_snapshot_renderer_finalize_keep_ready_skips_reset(self):
+        old_state = (
+            KaTeXSnapshotRenderer._shared_view,
+            KaTeXSnapshotRenderer._page_ready,
+            KaTeXSnapshotRenderer._render_in_progress,
+        )
+        try:
+            KaTeXSnapshotRenderer._shared_view = object()
+            KaTeXSnapshotRenderer._page_ready = True
+            KaTeXSnapshotRenderer._render_in_progress = True
+
+            with patch.object(KaTeXSnapshotRenderer, "_perform_js_check") as js_mock, \
+                 patch.object(KaTeXSnapshotRenderer, "_is_view_ready", return_value=True):
+                KaTeXSnapshotRenderer._finalize_shared_render(keep_ready=True)
+
+            js_mock.assert_not_called()
+            self.assertTrue(KaTeXSnapshotRenderer._page_ready)
+            self.assertFalse(KaTeXSnapshotRenderer._render_in_progress)
+        finally:
+            (
+                KaTeXSnapshotRenderer._shared_view,
+                KaTeXSnapshotRenderer._page_ready,
+                KaTeXSnapshotRenderer._render_in_progress,
+            ) = old_state
+
     def test_katex_snapshot_renderer_prepares_windows_shared_view_offscreen(self):
         calls = []
 
@@ -1434,6 +1461,17 @@ class ChatAPITests(unittest.TestCase):
         self.assertTrue(any(item[:2] == ("window_flag", Qt.WindowType.FramelessWindowHint) for item in calls))
         self.assertTrue(any(item[:2] == ("attribute", Qt.WidgetAttribute.WA_ShowWithoutActivating) for item in calls))
 
+    def test_katex_snapshot_renderer_treats_transparent_empty_image_as_blank(self):
+        image = QImage(24, 24, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+
+        self.assertTrue(KaTeXSnapshotRenderer._looks_blank(image))
+
+        for index in range(9):
+            image.setPixelColor(index, index, QColor(0, 0, 0, 180))
+
+        self.assertFalse(KaTeXSnapshotRenderer._looks_blank(image))
+
     def test_katex_snapshot_renderer_source_positions_windows_shared_view_offscreen(self):
         renderer_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/core/rendering/katex_snapshot.py").read_text(encoding="utf-8")
 
@@ -1443,6 +1481,13 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("view.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)", renderer_source)
         self.assertIn("view.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)", renderer_source)
         self.assertIn("view.move(-32000, -32000)", renderer_source)
+        self.assertIn("background: transparent;", renderer_source)
+        self.assertIn("view.page().setBackgroundColor(QColor(0, 0, 0, 0))", renderer_source)
+        self.assertIn("window.getRenderState = () => {", renderer_source)
+        self.assertIn("paintReady", renderer_source)
+        self.assertIn("requestAnimationFrame(() => requestAnimationFrame", renderer_source)
+        self.assertIn("def _wait_for_render_state", renderer_source)
+        self.assertIn("def _grab_view_image_with_retries", renderer_source)
 
     def test_homework_api_build_library_publish_payload_uses_current_class_and_defaults(self):
         api = _FakeHomeworkAPI(_FakeSession(_FakeResponse(payload={})), course_params={"cpi": "14632912"})
