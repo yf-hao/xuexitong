@@ -1349,7 +1349,7 @@ class ActivitiesView(QWidget):
         self.clear_activities_list()
         
         loading_label = QLabel("正在同步分组数据，请稍候...")
-        loading_label.setStyleSheet("color: #007acc; padding: 20px;")
+        apply_theme_stylesheet(loading_label, lambda palette: f"color: {palette.accent}; padding: 20px;")
         self.activities_scroll_layout.addWidget(loading_label)
         
         worker = GroupWorker(self.crawler, course.id, self.get_class_id_callback())
@@ -1369,16 +1369,13 @@ class ActivitiesView(QWidget):
         header_layout.setContentsMargins(10, 10, 10, 5)
         
         count_lbl = QLabel(f"<b>分组列表</b> ({len(result) if isinstance(result, list) else 0})")
-        count_lbl.setStyleSheet("color: #ffffff; font-size: 14px;")
+        apply_theme_stylesheet(count_lbl, lambda palette: f"color: {palette.text}; font-size: 14px;")
         header_layout.addWidget(count_lbl)
         header_layout.addStretch()
         
         add_btn = QPushButton("➕ 新增分组")
         add_btn.setFixedWidth(100)
-        add_btn.setStyleSheet("""
-            QPushButton { background-color: #007acc; color: white; border-radius: 4px; padding: 5px; font-weight: bold; }
-            QPushButton:hover { background-color: #1a8ad4; }
-        """)
+        apply_theme_stylesheet(add_btn, lambda palette: _activity_small_button_style(palette, palette.accent, palette.accent_hover))
         add_btn.clicked.connect(self._handle_add_group)
         header_layout.addWidget(add_btn)
         
@@ -1386,13 +1383,13 @@ class ActivitiesView(QWidget):
         
         if isinstance(result, str):
             error_label = QLabel(result)
-            error_label.setStyleSheet("color: #ff4d4d; padding: 20px;")
+            apply_theme_stylesheet(error_label, lambda palette: f"color: {palette.danger}; padding: 20px;")
             self.activities_scroll_layout.addWidget(error_label)
             return
 
         if not result:
             empty_label = QLabel("💡 该课程下暂无分组信息")
-            empty_label.setStyleSheet("color: #aaaaaa; padding: 25px; font-size: 14px; text-align: center;")
+            apply_theme_stylesheet(empty_label, lambda palette: f"color: {palette.text_muted}; padding: 25px; font-size: 14px; text-align: center;")
             self.activities_scroll_layout.addWidget(empty_label)
             return
 
@@ -1402,27 +1399,18 @@ class ActivitiesView(QWidget):
             
             card = QFrame()
             card.setObjectName("group_card")
-            card.setStyleSheet("""
-                QFrame#group_card { 
-                    background-color: #1e1e1e; 
-                    border: 1px solid #333333; 
-                    border-radius: 8px; 
-                    padding: 12px; 
-                    margin-bottom: 5px; 
-                }
-                QFrame#group_card:hover { border: 1px solid #007acc; }
-            """)
+            apply_theme_stylesheet(card, lambda palette: _activity_card_style(palette, highlighted=False))
             card_layout = QHBoxLayout(card)
             
             info_layout = QVBoxLayout()
             name_lbl = QLabel(f"👥 {group_name}")
-            name_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #ffffff;")
+            apply_theme_stylesheet(name_lbl, lambda palette: f"font-size: 15px; font-weight: bold; color: {palette.text};")
             
             create_ts = group.get('createtime')
             time_str = datetime.fromtimestamp(create_ts / 1000).strftime('%Y-%m-%d %H:%M') if create_ts else "未知时间"
             teacher = group.get('teacherName', '未知')
             desc_lbl = QLabel(f"创建者: {teacher}  |  时间: {time_str}")
-            desc_lbl.setStyleSheet("font-size: 12px; color: #aaaaaa;")
+            apply_theme_stylesheet(desc_lbl, lambda palette: f"font-size: 12px; color: {palette.text_muted};")
             
             info_layout.addWidget(name_lbl)
             info_layout.addWidget(desc_lbl)
@@ -1436,18 +1424,12 @@ class ActivitiesView(QWidget):
             
             edit_btn = QPushButton("✏️ 重命名")
             edit_btn.setFixedWidth(75)
-            edit_btn.setStyleSheet("""
-                QPushButton { background-color: #3e3e42; color: #d4d4d4; border-radius: 4px; padding: 4px; font-size: 12px; }
-                QPushButton:hover { background-color: #4e4e52; color: white; }
-            """)
+            apply_theme_stylesheet(edit_btn, lambda palette: _activity_small_button_style(palette, palette.panel_alt_bg, palette.hover_bg))
             edit_btn.clicked.connect(lambda checked, g=group: self._handle_rename_group(g))
             
             del_btn = QPushButton("🗑️ 删除")
             del_btn.setFixedWidth(70)
-            del_btn.setStyleSheet("""
-                QPushButton { background-color: #442222; color: #ff8888; border-radius: 4px; padding: 4px; font-size: 12px; }
-                QPushButton:hover { background-color: #662222; color: #ffaaaa; }
-            """)
+            apply_theme_stylesheet(del_btn, lambda palette: _activity_small_button_style(palette, palette.danger_soft, palette.warning))
             del_btn.clicked.connect(lambda checked, gid=group_id: self._handle_delete_group(gid))
             
             btn_layout.addWidget(edit_btn)

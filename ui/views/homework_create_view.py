@@ -122,6 +122,15 @@ def _homework_tree_style(palette) -> str:
     """
 
 
+def _homework_preview_panel_style(palette) -> str:
+    return (
+        f"background-color: {palette.panel_alt_bg}; "
+        f"color: {palette.text}; "
+        f"border: 1px solid {palette.border_strong}; "
+        "border-radius: 6px; padding: 12px;"
+    )
+
+
 class QuestionPreviewDialog(QDialog):
     """题目预览对话框"""
     
@@ -140,28 +149,28 @@ class QuestionPreviewDialog(QDialog):
         # 题目信息
         info_layout = QHBoxLayout()
         info_label = QLabel(f"题型: {self.question_data.get('type', '未知')}    难度: {self.question_data.get('difficulty', '未知')}")
-        info_label.setStyleSheet("color: #888888; font-size: 13px;")
+        apply_theme_stylesheet(info_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         info_layout.addWidget(info_label)
         info_layout.addStretch()
         layout.addLayout(info_layout)
         
         # 题目内容
         content_label = QLabel("题目:")
-        content_label.setStyleSheet("color: #007acc; font-weight: bold;")
+        apply_theme_stylesheet(content_label, lambda palette: f"color: {palette.accent}; font-weight: bold;")
         layout.addWidget(content_label)
         
         content_text = QLabel(self.question_data.get("content", ""))
-        content_text.setStyleSheet("color: #ffffff; font-size: 14px;")
+        apply_theme_stylesheet(content_text, lambda palette: _homework_preview_panel_style(palette) + " font-size: 14px;")
         content_text.setWordWrap(True)
         layout.addWidget(content_text)
         
         # 模拟选项
         options_label = QLabel("选项:")
-        options_label.setStyleSheet("color: #007acc; font-weight: bold;")
+        apply_theme_stylesheet(options_label, lambda palette: f"color: {palette.accent}; font-weight: bold;")
         layout.addWidget(options_label)
         
         options_text = QLabel("A. 选项A\nB. 选项B\nC. 选项C\nD. 选项D")
-        options_text.setStyleSheet("color: #cccccc; font-size: 13px;")
+        apply_theme_stylesheet(options_text, lambda palette: _homework_preview_panel_style(palette).replace(f"color: {palette.text};", f"color: {palette.text_secondary};") + " font-size: 13px;")
         layout.addWidget(options_text)
         
         layout.addStretch()
@@ -171,40 +180,17 @@ class QuestionPreviewDialog(QDialog):
         btn_layout.addStretch()
         
         add_btn = QPushButton("加入选题")
-        add_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 20px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #005c99;
-            }
-        """)
+        apply_theme_stylesheet(add_btn, _homework_primary_button_style)
         add_btn.clicked.connect(self.accept)
         btn_layout.addWidget(add_btn)
         
         close_btn = QPushButton("关闭")
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 20px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-            }
-        """)
+        apply_theme_stylesheet(close_btn, _homework_secondary_button_style)
         close_btn.clicked.connect(self.reject)
         btn_layout.addWidget(close_btn)
         
         layout.addLayout(btn_layout)
+        bind_theme_tree(self)
 
 
 class HomeworkCreateView(QWidget):

@@ -3647,6 +3647,26 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(widget_calls, [(widget, "light")])
         widget.deleteLater()
 
+    def test_theme_tree_tracks_only_managed_or_styled_widgets(self):
+        from PyQt6.QtWidgets import QApplication, QWidget, QLabel
+        from ui.theme import apply_theme_stylesheet, bind_theme_tree
+
+        app = QApplication.instance() or QApplication([])
+        root = QWidget()
+        themed = QLabel("themed", root)
+        plain = QLabel("plain", root)
+        apply_theme_stylesheet(themed, lambda palette: f"color: {palette.text};")
+
+        bind_theme_tree(root)
+        binder = getattr(root, "_theme_tree_binder")
+        self.assertIn(themed, binder._widgets)
+        self.assertNotIn(plain, binder._widgets)
+
+        plain.setStyleSheet("color: #ffffff;")
+        app.processEvents()
+        self.assertIn(plain, binder._widgets)
+        root.deleteLater()
+
     def test_theme_tree_binding_rethemes_existing_widgets(self):
         from PyQt6.QtWidgets import QApplication, QWidget, QLabel
         from ui.theme import bind_theme_tree, refresh_theme_styles
@@ -3814,8 +3834,9 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("bind_theme_tree(self)", multi_source)
         self.assertIn("bind_theme_tree(self)", location_source)
         self.assertIn("bind_theme_tree(self)", learning_source)
-        self.assertIn('background-color: #4a4a4a;', location_source)
-        self.assertIn('background-color: #555555;', location_source)
+        self.assertIn("def _location_button_style(", location_source)
+        self.assertIn("apply_theme_stylesheet(btn_import", location_source)
+        self.assertIn("apply_theme_stylesheet(btn_export", location_source)
 
     def test_attendance_theme_sources_use_runtime_palette_updates(self):
         study_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/study_status_view.py").read_text(encoding="utf-8")
@@ -3885,23 +3906,31 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("def schedule_theme_refresh", theme_source)
         self.assertIn("timer.start(0)", theme_source)
         self.assertIn("schedule_theme_refresh(widget, mode)", theme_source)
+        self.assertIn('setattr(widget, "_theme_managed_widget", True)', theme_source)
+        self.assertIn('elif getattr(widget, "_theme_managed_widget", False) and binder is not None:', theme_source)
 
         self.assertIn("def _management_stat_button_style(", management_source)
         self.assertIn("apply_theme_stylesheet(btn, _management_stat_button_style)", management_source)
         self.assertIn("apply_theme_stylesheet(self.management_scroll, _management_container_style)", management_source)
         self.assertIn("apply_theme_stylesheet(self.manage_teachers_table, self._get_table_style)", management_source)
         self.assertIn("apply_theme_stylesheet(self.teachers_table, self._get_table_style)", management_source)
+        self.assertIn("apply_theme_stylesheet(dialog, _management_dialog_style)", management_source)
+        self.assertIn("apply_theme_stylesheet(name_edit, _management_input_style)", management_source)
 
         self.assertIn("def _homework_tree_style(", homework_source)
         self.assertIn("apply_theme_stylesheet(self.publish_tab_btn, lambda palette: self._tab_style(", homework_source)
         self.assertIn("apply_theme_stylesheet(self.question_tree, _homework_tree_style)", homework_source)
         self.assertIn("apply_theme_stylesheet(group, _homework_filter_panel_style)", homework_source)
         self.assertIn("apply_theme_stylesheet(self.course_combo, self._combo_style)", homework_source)
+        self.assertIn("apply_theme_stylesheet(add_btn, _homework_primary_button_style)", homework_source)
+        self.assertIn("apply_theme_stylesheet(close_btn, _homework_secondary_button_style)", homework_source)
 
         self.assertIn("def _activity_group_header_style(", activities_source)
         self.assertIn("def _activity_card_style(", activities_source)
         self.assertIn("apply_theme_stylesheet(group_header, _activity_group_header_style)", activities_source)
         self.assertIn("apply_theme_stylesheet(card, lambda palette: _activity_card_style(palette, highlighted=act.is_active))", activities_source)
+        self.assertIn("apply_theme_stylesheet(add_btn, lambda palette: _activity_small_button_style(palette, palette.accent, palette.accent_hover))", activities_source)
+        self.assertIn("apply_theme_stylesheet(del_btn, lambda palette: _activity_small_button_style(palette, palette.danger_soft, palette.warning))", activities_source)
 
         self.assertIn("def _breadcrumb_style(", cloud_source)
         self.assertIn("apply_theme_stylesheet(self.path_home_btn, lambda palette: self._breadcrumb_style(palette, current=False))", cloud_source)
@@ -3914,6 +3943,8 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("apply_theme_stylesheet(self.search_input, _question_bank_search_style)", question_bank_source)
         self.assertIn("apply_theme_stylesheet(self.question_list, _question_bank_list_style)", question_bank_source)
         self.assertIn("apply_theme_stylesheet(menu, _question_bank_menu_style)", question_bank_source)
+        self.assertIn("apply_theme_stylesheet(self.name_input, _question_bank_dialog_input_style)", question_bank_source)
+        self.assertIn("apply_theme_stylesheet(button_box, _question_bank_dialog_buttons_style)", question_bank_source)
 
     def test_cloud_drive_view_collects_checked_items_and_remembers_download_dir(self):
         from PyQt6.QtWidgets import QApplication

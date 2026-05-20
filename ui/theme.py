@@ -339,6 +339,10 @@ def _resolve_theme_stylesheet(widget: QWidget, mode: str | None = None) -> str:
 def apply_theme_stylesheet(widget: QWidget, css: str | Callable[[ThemePalette], str], mode: str | None = None):
     if widget is None:
         return
+    setattr(widget, "_theme_managed_widget", True)
+    binder = getattr(widget, "_theme_binder_ref", None)
+    if binder is not None:
+        binder.register_widget(widget)
     if callable(css):
         setattr(widget, "_theme_palette_stylesheet_factory", css)
         setattr(widget, "_theme_base_stylesheet", "")
@@ -424,6 +428,9 @@ def _sync_runtime_stylesheet(widget: QWidget):
         setattr(widget, "_theme_applied_stylesheet", current_css)
         return
 
+    binder = getattr(widget, "_theme_binder_ref", None)
+    if binder is not None:
+        binder.register_widget(widget)
     setattr(widget, "_theme_base_stylesheet", current_css)
     themed_css = themed_stylesheet(current_css, mode)
     if themed_css == current_css:
@@ -438,7 +445,7 @@ class _ThemeChildBinder(QObject):
         self._widgets: list[QWidget] = []
 
     def register_widget(self, widget: QWidget):
-        if widget is None:
+        if widget is None or widget in self._widgets:
             return
         self._widgets.append(widget)
 
@@ -473,6 +480,12 @@ def _bind_theme_widget(widget: QWidget, binder: _ThemeChildBinder | None = None)
 
     if binder is not None:
         widget.installEventFilter(binder)
+        setattr(widget, "_theme_binder_ref", binder)
+
+    if isinstance(current_css, str) and current_css:
+        if binder is not None:
+            binder.register_widget(widget)
+    elif getattr(widget, "_theme_managed_widget", False) and binder is not None:
         binder.register_widget(widget)
 
     if isinstance(current_css, str) and current_css and not hasattr(widget, "_theme_base_stylesheet"):

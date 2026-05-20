@@ -10,7 +10,102 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from core.config import LOCATION_DATA_FILE, DEFAULT_COMMON_LOCATIONS, DEFAULT_LOCATION_TEMPLATE
-from ui.theme import bind_theme_tree
+from ui.theme import apply_theme_stylesheet, bind_theme_tree
+
+
+def _location_tab_style(palette, accent: str | None = None) -> str:
+    active = accent or palette.accent
+    return f"""
+        QTabWidget::pane {{
+            border: 1px solid {palette.border_strong};
+            background: {palette.panel_bg};
+        }}
+        QTabBar::tab {{
+            background: {palette.disabled_bg};
+            color: {palette.text};
+            padding: 8px 20px;
+            margin-right: 2px;
+        }}
+        QTabBar::tab:selected {{
+            background: {active};
+            color: #ffffff;
+        }}
+    """
+
+
+def _location_group_style(palette, title_color: str | None = None) -> str:
+    return f"""
+        QGroupBox {{
+            color: {title_color or palette.accent};
+            font-weight: bold;
+            border: 1px solid {palette.border_strong};
+            border-radius: 5px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }}
+    """
+
+
+def _location_field_style(palette, disabled: bool = False, padding: int = 5) -> str:
+    bg = palette.disabled_bg if disabled else palette.panel_alt_bg
+    text = palette.disabled_text if disabled else palette.text
+    border = palette.border if disabled else palette.border_strong
+    return f"background: {bg}; color: {text}; border: 1px solid {border}; border-radius: 3px; padding: {padding}px;"
+
+
+def _location_combo_style(palette) -> str:
+    return f"""
+        QComboBox {{
+            background: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 3px;
+            padding: 5px;
+        }}
+        QComboBox::drop-down {{
+            border: none;
+        }}
+        QComboBox QAbstractItemView {{
+            background: {palette.panel_alt_bg};
+            color: {palette.text};
+            selection-background-color: {palette.accent};
+            selection-color: #ffffff;
+        }}
+    """
+
+
+def _location_button_style(palette, bg: str, hover: str) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {bg};
+            color: #ffffff;
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: bold;
+        }}
+        QPushButton:hover {{
+            background-color: {hover};
+        }}
+    """
+
+
+def _location_list_style(palette) -> str:
+    return f"""
+        QListWidget {{
+            background: {palette.panel_alt_bg};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+        }}
+        QListWidget::item {{
+            color: {palette.text};
+            padding: 8px;
+        }}
+        QListWidget::item:selected {{
+            background: {palette.accent};
+            color: #ffffff;
+        }}
+    """
 
 
 class LocationConfigDialog(QDialog):
@@ -107,21 +202,7 @@ class LocationConfigDialog(QDialog):
         
         # Tab Widget
         self.tab_widget = QTabWidget()
-        self.tab_widget.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #444;
-                background: #1e1e1e;
-            }
-            QTabBar::tab {
-                background: #2d2d2d;
-                color: #ffffff;
-                padding: 8px 20px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: #007acc;
-            }
-        """)
+        apply_theme_stylesheet(self.tab_widget, lambda palette: _location_tab_style(palette, palette.accent))
         
         # Tab 1: 位置模板配置
         tab_template = self._create_template_tab()
@@ -142,33 +223,12 @@ class LocationConfigDialog(QDialog):
         
         btn_save = QPushButton("💾 保存")
         btn_save.setFixedWidth(100)
-        btn_save.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border-radius: 4px;
-                padding: 8px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #1a8ad4;
-            }
-        """)
+        apply_theme_stylesheet(btn_save, lambda palette: _location_button_style(palette, palette.accent, palette.accent_hover))
         btn_save.clicked.connect(self._on_save)
         
         btn_cancel = QPushButton("❌ 取消")
         btn_cancel.setFixedWidth(100)
-        btn_cancel.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: white;
-                border-radius: 4px;
-                padding: 8px;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-            }
-        """)
+        apply_theme_stylesheet(btn_cancel, lambda palette: _location_button_style(palette, palette.panel_alt_bg, palette.hover_bg))
         btn_cancel.clicked.connect(self.reject)
         
         button_layout.addWidget(btn_save)
@@ -185,24 +245,15 @@ class LocationConfigDialog(QDialog):
         
         # 模式选择
         mode_group = QGroupBox("位置模式")
-        mode_group.setStyleSheet("""
-            QGroupBox {
-                color: #007acc;
-                font-weight: bold;
-                border: 1px solid #444;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-        """)
+        apply_theme_stylesheet(mode_group, _location_group_style)
         mode_layout = QVBoxLayout(mode_group)
         
         self.radio_weekly = QRadioButton("每周重复")
-        self.radio_weekly.setStyleSheet("color: white;")
+        apply_theme_stylesheet(self.radio_weekly, lambda palette: f"color: {palette.text};")
         self.radio_weekly.setChecked(True)
         
         self.radio_biweekly = QRadioButton("单双周不同")
-        self.radio_biweekly.setStyleSheet("color: white;")
+        apply_theme_stylesheet(self.radio_biweekly, lambda palette: f"color: {palette.text};")
         
         self.mode_button_group = QButtonGroup()
         self.mode_button_group.addButton(self.radio_weekly)
@@ -225,20 +276,7 @@ class LocationConfigDialog(QDialog):
         
         # Page 2: 单双周Tab
         self.weekly_tab = QTabWidget()
-        self.weekly_tab.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #444;
-                background: #1e1e1e;
-            }
-            QTabBar::tab {
-                background: #2d2d2d;
-                color: #ffffff;
-                padding: 6px 15px;
-            }
-            QTabBar::tab:selected {
-                background: #4ec9b0;
-            }
-        """)
+        apply_theme_stylesheet(self.weekly_tab, lambda palette: _location_tab_style(palette, palette.success))
         
         # 单周Tab
         self.odd_week_widget = self._create_week_slots_widget("odd")
@@ -262,22 +300,14 @@ class LocationConfigDialog(QDialog):
         # 课次数量选择（从主界面获取，禁用调整）
         count_layout = QHBoxLayout()
         count_label = QLabel(f"每周课次数:")
-        count_label.setStyleSheet("color: white;")
+        apply_theme_stylesheet(count_label, lambda palette: f"color: {palette.text};")
         count_layout.addWidget(count_label)
         
         self.weekly_slot_count = QSpinBox()
         self.weekly_slot_count.setRange(1, 10)
         self.weekly_slot_count.setValue(self.main_weekly_count)
         self.weekly_slot_count.setEnabled(False)  # 禁用调整，使用主界面设置
-        self.weekly_slot_count.setStyleSheet("""
-            QSpinBox {
-                background: #1a1a1a;
-                color: #888888;
-                border: 1px solid #333;
-                border-radius: 3px;
-                padding: 3px;
-            }
-        """)
+        apply_theme_stylesheet(self.weekly_slot_count, lambda palette: _location_field_style(palette, disabled=True, padding=3))
         count_layout.addWidget(self.weekly_slot_count)
         count_layout.addStretch()
         
@@ -285,15 +315,7 @@ class LocationConfigDialog(QDialog):
         
         # 课次位置列表
         slots_group = QGroupBox("课次位置配置")
-        slots_group.setStyleSheet("""
-            QGroupBox {
-                color: #ffffff;
-                border: 1px solid #444;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-        """)
+        apply_theme_stylesheet(slots_group, lambda palette: _location_group_style(palette, palette.text))
         slots_layout = QVBoxLayout(slots_group)
         
         # 创建课次配置区域
@@ -330,7 +352,7 @@ class LocationConfigDialog(QDialog):
         # 课次数量选择（从主界面获取，禁用调整）
         count_layout = QHBoxLayout()
         count_label = QLabel(f"每周课次数:")
-        count_label.setStyleSheet("color: white;")
+        apply_theme_stylesheet(count_label, lambda palette: f"color: {palette.text};")
         count_layout.addWidget(count_label)
         
         spin_count = QSpinBox()
@@ -338,15 +360,7 @@ class LocationConfigDialog(QDialog):
         # 使用主界面传入的单周或双周次数
         spin_count.setValue(self.main_odd_count if week_type == "odd" else self.main_even_count)
         spin_count.setEnabled(False)  # 禁用调整，使用主界面设置
-        spin_count.setStyleSheet("""
-            QSpinBox {
-                background: #1a1a1a;
-                color: #888888;
-                border: 1px solid #333;
-                border-radius: 3px;
-                padding: 3px;
-            }
-        """)
+        apply_theme_stylesheet(spin_count, lambda palette: _location_field_style(palette, disabled=True, padding=3))
         count_layout.addWidget(spin_count)
         count_layout.addStretch()
         
@@ -354,15 +368,7 @@ class LocationConfigDialog(QDialog):
         
         # 课次位置列表
         slots_group = QGroupBox("课次位置配置")
-        slots_group.setStyleSheet("""
-            QGroupBox {
-                color: #ffffff;
-                border: 1px solid #444;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-        """)
+        apply_theme_stylesheet(slots_group, lambda palette: _location_group_style(palette, palette.text))
         slots_layout = QVBoxLayout(slots_group)
         
         # 存储spinbox引用
@@ -442,29 +448,13 @@ class LocationConfigDialog(QDialog):
             
             # 课次标签
             label = QLabel(f"第{i+1}次课:")
-            label.setStyleSheet("color: white;")
+            apply_theme_stylesheet(label, lambda palette: f"color: {palette.text};")
             label.setFixedWidth(70)
             row_layout.addWidget(label)
             
             # 位置下拉框
             combo = QComboBox()
-            combo.setStyleSheet("""
-                QComboBox {
-                    background: #252526;
-                    color: white;
-                    border: 1px solid #444;
-                    border-radius: 3px;
-                    padding: 5px;
-                }
-                QComboBox::drop-down {
-                    border: none;
-                }
-                QComboBox QAbstractItemView {
-                    background: #252526;
-                    color: white;
-                    selection-background-color: #007acc;
-                }
-            """)
+            apply_theme_stylesheet(combo, _location_combo_style)
             
             # 添加"不限制"选项
             combo.addItem("不限制位置", None)
@@ -485,57 +475,36 @@ class LocationConfigDialog(QDialog):
         
         # 位置列表
         list_label = QLabel("常用位置列表:")
-        list_label.setStyleSheet("color: white; font-weight: bold;")
+        apply_theme_stylesheet(list_label, lambda palette: f"color: {palette.text}; font-weight: bold;")
         layout.addWidget(list_label)
         
         self.location_list = QListWidget()
-        self.location_list.setStyleSheet("""
-            QListWidget {
-                background: #252526;
-                border: 1px solid #444;
-                border-radius: 4px;
-            }
-            QListWidget::item {
-                color: white;
-                padding: 8px;
-            }
-            QListWidget::item:selected {
-                background: #007acc;
-            }
-        """)
+        apply_theme_stylesheet(self.location_list, _location_list_style)
         layout.addWidget(self.location_list)
         
         # 编辑区域
         edit_group = QGroupBox("位置信息")
-        edit_group.setStyleSheet("""
-            QGroupBox {
-                color: #007acc;
-                border: 1px solid #444;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-        """)
+        apply_theme_stylesheet(edit_group, _location_group_style)
         edit_layout = QGridLayout(edit_group)
         
         # 名称
         edit_layout.addWidget(QLabel("名称:"), 0, 0)
         self.edit_name = QLineEdit()
         self.edit_name.setPlaceholderText("如: 教学楼A-101")
-        self.edit_name.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 3px; padding: 5px;")
+        apply_theme_stylesheet(self.edit_name, lambda palette: _location_field_style(palette, padding=5))
         edit_layout.addWidget(self.edit_name, 0, 1, 1, 3)
         
         # 经纬度
         edit_layout.addWidget(QLabel("纬度:"), 1, 0)
         self.edit_lat = QLineEdit()
         self.edit_lat.setPlaceholderText("34.4034")
-        self.edit_lat.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 3px; padding: 5px;")
+        apply_theme_stylesheet(self.edit_lat, lambda palette: _location_field_style(palette, padding=5))
         edit_layout.addWidget(self.edit_lat, 1, 1)
         
         edit_layout.addWidget(QLabel("经度:"), 1, 2)
         self.edit_lng = QLineEdit()
         self.edit_lng.setPlaceholderText("113.7713")
-        self.edit_lng.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 3px; padding: 5px;")
+        apply_theme_stylesheet(self.edit_lng, lambda palette: _location_field_style(palette, padding=5))
         edit_layout.addWidget(self.edit_lng, 1, 3)
         
         # 范围
@@ -543,39 +512,17 @@ class LocationConfigDialog(QDialog):
         self.edit_range = QSpinBox()
         self.edit_range.setRange(10, 5000)
         self.edit_range.setValue(300)
-        self.edit_range.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 3px; padding: 3px;")
+        apply_theme_stylesheet(self.edit_range, lambda palette: _location_field_style(palette, padding=3))
         edit_layout.addWidget(self.edit_range, 2, 1)
         
         # 导入导出按钮（放在范围后面）
         btn_import = QPushButton("📥 导入")
-        btn_import.setStyleSheet("""
-            QPushButton {
-                background-color: #4a4a4a;
-                color: #ffffff;
-                border-radius: 4px;
-                padding: 5px 10px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #555555;
-            }
-        """)
+        apply_theme_stylesheet(btn_import, lambda palette: _location_button_style(palette, palette.border_strong, palette.text_muted))
         btn_import.clicked.connect(self._on_import)
         edit_layout.addWidget(btn_import, 2, 2)
         
         btn_export = QPushButton("📤 导出")
-        btn_export.setStyleSheet("""
-            QPushButton {
-                background-color: #4a4a4a;
-                color: #ffffff;
-                border-radius: 4px;
-                padding: 5px 10px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #555555;
-            }
-        """)
+        apply_theme_stylesheet(btn_export, lambda palette: _location_button_style(palette, palette.border_strong, palette.text_muted))
         btn_export.clicked.connect(self._on_export)
         edit_layout.addWidget(btn_export, 2, 3)
         
@@ -585,15 +532,15 @@ class LocationConfigDialog(QDialog):
         btn_layout = QHBoxLayout()
         
         btn_add = QPushButton("➕ 新增")
-        btn_add.setStyleSheet("background: #007acc; color: white; border-radius: 4px; padding: 6px;")
+        apply_theme_stylesheet(btn_add, lambda palette: _location_button_style(palette, palette.accent, palette.accent_hover))
         btn_add.clicked.connect(self._on_add_location)
         
         btn_update = QPushButton("✏️ 更新")
-        btn_update.setStyleSheet("background: #4ec9b0; color: white; border-radius: 4px; padding: 6px;")
+        apply_theme_stylesheet(btn_update, lambda palette: _location_button_style(palette, palette.success, palette.success_hover))
         btn_update.clicked.connect(self._on_update_location)
         
         btn_delete = QPushButton("🗑️ 删除")
-        btn_delete.setStyleSheet("background: #d13438; color: white; border-radius: 4px; padding: 6px;")
+        apply_theme_stylesheet(btn_delete, lambda palette: _location_button_style(palette, palette.danger, palette.warning))
         btn_delete.clicked.connect(self._on_delete_location)
         
         btn_layout.addWidget(btn_add)

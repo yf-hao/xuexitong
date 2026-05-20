@@ -185,6 +185,44 @@ def _question_bank_menu_style(palette) -> str:
     """
 
 
+def _question_bank_dialog_input_style(palette, readonly: bool = False) -> str:
+    bg = palette.disabled_bg if readonly else palette.panel_alt_bg
+    text = palette.text_muted if readonly else palette.text
+    return f"""
+        QLineEdit {{
+            background-color: {bg};
+            color: {text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            padding: 8px;
+        }}
+        QLineEdit:focus {{
+            border: 1px solid {palette.accent};
+        }}
+    """
+
+
+def _question_bank_dialog_buttons_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 20px;
+            min-width: 80px;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.accent_hover};
+        }}
+        QPushButton[text="Cancel"] {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+        }}
+    """
+
+
 class CreateFolderDialog(QDialog):
     """新建文件夹对话框"""
     
@@ -203,15 +241,8 @@ class CreateFolderDialog(QDialog):
         parent_label = QLabel("父级文件夹:")
         self.parent_display = QLineEdit(parent_folder)
         self.parent_display.setReadOnly(True)
-        self.parent_display.setStyleSheet("""
-            QLineEdit {
-                background-color: #2d2d30;
-                color: #888888;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-                padding: 8px;
-            }
-        """)
+        apply_theme_stylesheet(parent_label, lambda palette: f"color: {palette.text};")
+        apply_theme_stylesheet(self.parent_display, lambda palette: _question_bank_dialog_input_style(palette, readonly=True))
         layout.addWidget(parent_label)
         layout.addWidget(self.parent_display)
         
@@ -219,18 +250,8 @@ class CreateFolderDialog(QDialog):
         name_label = QLabel("文件夹名称:")
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("请输入文件夹名称")
-        self.name_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #252526;
-                color: #ffffff;
-                border: 1px solid #3a3f44;
-                border-radius: 4px;
-                padding: 8px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #007acc;
-            }
-        """)
+        apply_theme_stylesheet(name_label, lambda palette: f"color: {palette.text};")
+        apply_theme_stylesheet(self.name_input, _question_bank_dialog_input_style)
         layout.addWidget(name_label)
         layout.addWidget(self.name_input)
         
@@ -240,23 +261,9 @@ class CreateFolderDialog(QDialog):
         )
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
-        button_box.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 20px;
-                min-width: 80px;
-            }
-            QPushButton:hover {
-                background-color: #005c99;
-            }
-            QPushButton[text="Cancel"] {
-                background-color: #3e3e42;
-            }
-        """)
+        apply_theme_stylesheet(button_box, _question_bank_dialog_buttons_style)
         layout.addWidget(button_box)
+        bind_theme_tree(self)
     
     def get_folder_name(self) -> str:
         return self.name_input.text().strip()

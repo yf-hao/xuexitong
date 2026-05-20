@@ -94,6 +94,112 @@ def _management_outline_button_style(palette, accent: str | None = None, hover_b
         }}
     """
 
+
+def _management_dialog_style(palette) -> str:
+    return f"QDialog {{ background-color: {palette.panel_bg}; color: {palette.text}; }}"
+
+
+def _management_form_panel_style(palette, dashed: bool = False) -> str:
+    border = f"1px {'dashed' if dashed else 'solid'} {palette.border_strong}"
+    return f"background-color: {palette.panel_alt_bg}; border: {border}; border-radius: 10px; padding: 16px;"
+
+
+def _management_input_style(palette) -> str:
+    return f"""
+        QLineEdit, QTextEdit {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+        }}
+        QLineEdit:focus, QTextEdit:focus {{
+            border: 1px solid {palette.accent};
+        }}
+    """
+
+
+def _management_combo_style(palette) -> str:
+    return f"""
+        QComboBox {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+        }}
+        QComboBox::drop-down {{
+            width: 26px;
+            border-left: 1px solid {palette.border_strong};
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            selection-background-color: {palette.accent};
+            selection-color: #ffffff;
+        }}
+    """
+
+
+def _management_primary_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 22px;
+            font-size: 13px;
+            font-weight: bold;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.accent_hover};
+        }}
+        QPushButton:disabled {{
+            background-color: {palette.disabled_bg};
+            color: {palette.disabled_text};
+        }}
+    """
+
+
+def _management_secondary_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 6px;
+            padding: 10px 20px;
+            font-size: 13px;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.hover_bg};
+        }}
+    """
+
+
+def _management_cover_style(palette) -> str:
+    return f"background-color: {palette.disabled_bg}; border-radius: 8px;"
+
+
+def _management_list_widget_style(palette) -> str:
+    return f"""
+        QListWidget {{
+            background-color: transparent;
+            border: none;
+            padding: 4px;
+        }}
+        QListWidget::item {{
+            margin: 6px 2px;
+        }}
+        QListWidget::item:selected {{
+            background: transparent;
+        }}
+    """
+
 class ImportCourseListWorker(QThread):
     finished = pyqtSignal(object, str)
 
@@ -1519,11 +1625,7 @@ class ManagementView(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
         dialog.setMinimumSize(600, 900)
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #121212;
-            }
-        """)
+        apply_theme_stylesheet(dialog, _management_dialog_style)
 
         # 存储完整的单位信息（包括data和fid）到对话框对象中，供后续使用
         dialog.units_data = {}  # 映射：显示名称 -> {"name": "...", "data": "...", "fid": "..."}
@@ -1550,7 +1652,7 @@ class ManagementView(QWidget):
 
         # 课程封面区域
         cover_box = QFrame()
-        cover_box.setStyleSheet("background-color: #1e1e1e; border: 1px dashed #3a3f44; border-radius: 10px; padding: 16px;")
+        apply_theme_stylesheet(cover_box, lambda palette: _management_form_panel_style(palette, dashed=True))
         cover_box.setMinimumHeight(100)
         cover_layout = QHBoxLayout(cover_box)
         cover_layout.setContentsMargins(16, 16, 16, 16)
@@ -1559,12 +1661,7 @@ class ManagementView(QWidget):
         # 封面图片标签
         cover_label = QLabel()
         cover_label.setFixedSize(320, 180)  # 16:9 比例
-        cover_label.setStyleSheet("""
-            QLabel {
-                background-color: #2a2d2e;
-                border-radius: 8px;
-            }
-        """)
+        apply_theme_stylesheet(cover_label, _management_cover_style)
         cover_label.setScaledContents(False)
         cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -1575,20 +1672,7 @@ class ManagementView(QWidget):
 
         cover_btn = QPushButton("📷 上传封面")
         cover_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        cover_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2d2f33;
-                color: #80bfff;
-                border: 1px solid #3d434a;
-                padding: 8px 16px;
-                border-radius: 6px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #007acc;
-                color: white;
-            }
-        """)
+        apply_theme_stylesheet(cover_btn, _management_secondary_button_style)
         # 获取编辑模式的参数
         course_id = initial_data.get("courseid") or initial_data.get("courseId") if is_edit else ""
         cpi = initial_data.get("cpi") if is_edit else ""
@@ -1596,91 +1680,43 @@ class ManagementView(QWidget):
 
         ai_cover_btn = QPushButton("✨ AI生成封面")
         ai_cover_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        ai_cover_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2d2f33;
-                color: #ff9f43;
-                border: 1px solid #3d434a;
-                padding: 8px 16px;
-                border-radius: 6px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #ff9f43;
-                color: white;
-            }
-        """)
+        apply_theme_stylesheet(ai_cover_btn, _management_secondary_button_style)
         
         # 记下 cover_label 以便加载完成时重新缩放
         cover_label._target_size = (320, 180)
 
         # 表单区域
         form_container = QFrame()
-        form_container.setStyleSheet("background-color: #1e1e1e; border-radius: 10px; padding: 16px;")
+        apply_theme_stylesheet(form_container, _management_form_panel_style)
         form_layout = QGridLayout(form_container)
         form_layout.setHorizontalSpacing(20)
         form_layout.setVerticalSpacing(14)
         form_layout.setContentsMargins(8, 8, 8, 8)
 
-        # 样式定义
-        line_style = """
-            QLineEdit {
-                background-color: #252526;
-                color: #ffffff;
-                border: 1px solid #3a3f44;
-                border-radius: 6px;
-                padding: 8px 12px;
-                font-size: 13px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #007acc;
-            }
-        """
-        combo_style = """
-            QComboBox {
-                background-color: #252526;
-                color: #ffffff;
-                border: 1px solid #3a3f44;
-                border-radius: 6px;
-                padding: 8px 12px;
-                font-size: 13px;
-            }
-            QComboBox::drop-down {
-                width: 26px;
-                border-left: 1px solid #3a3f44;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1e1e1e;
-                border: 1px solid #3a3f44;
-                selection-background-color: #007acc;
-            }
-        """
-        label_style = "color: #bfc7d5; font-size: 13px;"
-
         # 课程名称
         name_label = QLabel("课程名称 *")
-        name_label.setStyleSheet(label_style)
+        apply_theme_stylesheet(name_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         name_edit = QLineEdit()
         name_edit.setPlaceholderText("请输入课程名称")
-        name_edit.setStyleSheet(line_style)
+        apply_theme_stylesheet(name_edit, _management_input_style)
         if fetched_name:
             name_edit.setText(fetched_name)
 
         # 课程英文名称
         english_name_label = QLabel("课程英文名称")
-        english_name_label.setStyleSheet(label_style)
+        apply_theme_stylesheet(english_name_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         english_name_edit = QLineEdit()
         english_name_edit.setPlaceholderText("请输入课程英文名称")
-        english_name_edit.setStyleSheet(line_style)
+        apply_theme_stylesheet(english_name_edit, _management_input_style)
         if fetched_english:
             english_name_edit.setText(fetched_english)
 
         # 课程教师
         teacher_label = QLabel("课程教师 *")
-        teacher_label.setStyleSheet(label_style)
+        apply_theme_stylesheet(teacher_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         teacher_edit = QLineEdit()
         teacher_edit.setPlaceholderText("请输入课程教师")
-        teacher_edit.setStyleSheet(line_style)
+        apply_theme_stylesheet(teacher_edit, _management_input_style)
 
         # 连接AI生成封面按钮
         # 获取编辑模式的参数（与cover_btn使用相同的参数）
@@ -1707,9 +1743,9 @@ class ManagementView(QWidget):
 
         # 所属单位
         unit_label = QLabel("所属单位 *")
-        unit_label.setStyleSheet(label_style)
+        apply_theme_stylesheet(unit_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         unit_combo = QComboBox()
-        unit_combo.setStyleSheet(combo_style)
+        apply_theme_stylesheet(unit_combo, _management_combo_style)
 
         if creation_data.get("success") and creation_data.get("units"):
             units_list = creation_data["units"]
@@ -1785,9 +1821,9 @@ class ManagementView(QWidget):
 
         # 所属院系（先创建占位，后面填充数据）
         dept_label = QLabel("所属院系 *")
-        dept_label.setStyleSheet(label_style)
+        apply_theme_stylesheet(dept_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         dept_combo = QComboBox()
-        dept_combo.setStyleSheet(combo_style)
+        apply_theme_stylesheet(dept_combo, _management_combo_style)
 
         # 添加单位切换事件：自动刷新院系列表（在dept_combo创建后定义）
         def on_unit_changed(text):
@@ -1877,9 +1913,9 @@ class ManagementView(QWidget):
 
         # 获取课程分类 (调用新接口)
         category_label = QLabel("课程分类 *")
-        category_label.setStyleSheet(label_style)
+        apply_theme_stylesheet(category_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         category_combo = QComboBox()
-        category_combo.setStyleSheet(combo_style)
+        apply_theme_stylesheet(category_combo, _management_combo_style)
 
         # 获取 courseId 和 cpi 用于分类接口
         params = self.crawler.session_manager.course_params or {}
@@ -1943,9 +1979,9 @@ class ManagementView(QWidget):
         semester_combo = None
         if not is_edit:
             semester_label = QLabel("选择学期 *")
-            semester_label.setStyleSheet(label_style)
+            apply_theme_stylesheet(semester_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
             semester_combo = QComboBox()
-            semester_combo.setStyleSheet(combo_style)
+            apply_theme_stylesheet(semester_combo, _management_combo_style)
             
             # 存储实际学期数据
             dialog.actual_semesters_data = {} 
@@ -1974,23 +2010,11 @@ class ManagementView(QWidget):
         desc_edit = None
         if is_edit:
             desc_label = QLabel("课程说明")
-            desc_label.setStyleSheet(label_style)
+            apply_theme_stylesheet(desc_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
             desc_edit = QTextEdit()
             desc_edit.setPlaceholderText("请输入课程说明...")
             desc_edit.setFixedHeight(80)
-            desc_edit.setStyleSheet("""
-                QTextEdit {
-                    background-color: #252526;
-                    color: #ffffff;
-                    border: 1px solid #3a3f44;
-                    border-radius: 6px;
-                    padding: 8px 12px;
-                    font-size: 13px;
-                }
-                QTextEdit:focus {
-                    border: 1px solid #007acc;
-                }
-            """)
+            apply_theme_stylesheet(desc_edit, _management_input_style)
             if fetched_desc:
                 desc_edit.setText(fetched_desc)
 
@@ -2030,38 +2054,13 @@ class ManagementView(QWidget):
         cancel_btn = QPushButton("取消")
         cancel_btn.setFixedWidth(90)
         cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        cancel_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3a3f44;
-                color: #d1d5db;
-                border: none;
-                border-radius: 6px;
-                padding: 10px 20px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #4a4f55;
-            }
-        """)
+        apply_theme_stylesheet(cancel_btn, _management_secondary_button_style)
 
         save_btn_text = "保存修改" if is_edit else "创建课程"
         save_btn = QPushButton(save_btn_text)
         save_btn.setFixedWidth(100)
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 10px 22px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #005c99;
-            }
-        """)
+        apply_theme_stylesheet(save_btn, _management_primary_button_style)
 
         button_layout.addWidget(cancel_btn)
         button_layout.addWidget(save_btn)
@@ -2096,6 +2095,7 @@ class ManagementView(QWidget):
         timer.start(100)
 
         # 显示对话框
+        bind_theme_tree(dialog)
         dialog.exec()
 
     def _handle_new_course_save(self, dialog, name_edit, teacher_edit, unit_combo, dept_combo, category_combo, cover_label, semester_combo=None):
@@ -2592,7 +2592,7 @@ class ManagementView(QWidget):
             dialog = QDialog(self)
             dialog.setWindowTitle("选择导入课程")
             dialog.setMinimumSize(800, 600)
-            dialog.setStyleSheet("QDialog { background-color: #121212; }")
+            apply_theme_stylesheet(dialog, _management_dialog_style)
 
             layout = QVBoxLayout(dialog)
             layout.setSpacing(12)
@@ -2601,11 +2601,7 @@ class ManagementView(QWidget):
             list_widget = QListWidget()
             list_widget.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
             list_widget.setSpacing(8)
-            list_widget.setStyleSheet(
-                "QListWidget { background-color: transparent; border: none; padding: 4px; }"
-                "QListWidget::item { margin: 6px 2px; }"
-                "QListWidget::item:selected { background: transparent; }"
-            )
+            apply_theme_stylesheet(list_widget, _management_list_widget_style)
 
             def set_card_selected(card: QFrame, selected: bool):
                 if selected:
@@ -2635,7 +2631,7 @@ class ManagementView(QWidget):
 
                 cover_label = QLabel()
                 cover_label.setFixedSize(96, 64)
-                cover_label.setStyleSheet("background-color: #2a2d31; border-radius: 6px;")
+                apply_theme_stylesheet(cover_label, _management_cover_style)
                 pm = self._load_cover_pixmap(item.get("cover"), width=96, height=64)
                 cover_label.setPixmap(pm.scaled(96, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
                 cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2645,13 +2641,13 @@ class ManagementView(QWidget):
                 info_layout.setContentsMargins(0, 0, 0, 0)
 
                 name_label = QLabel(item.get("name", ""))
-                name_label.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: bold;")
+                apply_theme_stylesheet(name_label, lambda palette: f"color: {palette.text}; font-size: 15px; font-weight: bold;")
 
                 num_term = QLabel(f"编号: {item.get('number','')} · 学期: {item.get('term','')}")
-                num_term.setStyleSheet("color: #a0a7b5; font-size: 12px;")
+                apply_theme_stylesheet(num_term, lambda palette: f"color: {palette.text_muted}; font-size: 12px;")
 
                 created = QLabel(f"建课时间: {item.get('created','')}")
-                created.setStyleSheet("color: #7f8695; font-size: 12px;")
+                apply_theme_stylesheet(created, lambda palette: f"color: {palette.text_muted}; font-size: 12px;")
 
                 info_layout.addWidget(name_label)
                 info_layout.addWidget(num_term)
@@ -2681,20 +2677,13 @@ class ManagementView(QWidget):
 
             close_btn = QPushButton("取消")
             close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            close_btn.setStyleSheet(
-                "QPushButton { background:#3a3f44; color:#d1d5db; border:none; border-radius:6px; padding:10px 16px; font-size:13px; }"
-                "QPushButton:hover { background-color: #4a4f55; }"
-            )
+            apply_theme_stylesheet(close_btn, _management_secondary_button_style)
             close_btn.clicked.connect(dialog.reject)
 
             import_btn = QPushButton("导入所选")
             import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             import_btn.setEnabled(False)
-            import_btn.setStyleSheet(
-                "QPushButton { background-color: #007acc; color: white; border: none; border-radius: 6px; padding: 10px 18px; font-weight: bold; font-size: 13px; }"
-                "QPushButton:disabled { background-color: #2f3540; color: #8d96a8; }"
-                "QPushButton:hover:!disabled { background-color: #005c99; }"
-            )
+            apply_theme_stylesheet(import_btn, _management_primary_button_style)
 
             btn_bar.addWidget(close_btn)
             btn_bar.addWidget(import_btn)
@@ -2767,6 +2756,7 @@ class ManagementView(QWidget):
                 loading_dialog.hide()
                 loading_dialog.deleteLater()
 
+            bind_theme_tree(dialog)
             dialog.exec()
 
             if worker in self.workers:
