@@ -43,7 +43,7 @@ SAMPLE_FOLDERS = [
                     {"id": "1-1-1", "name": "1.1 概念", "count": 10, "children": []},
                     {"id": "1-1-2", "name": "1.2 历史", "count": 8, "children": []},
                     {"id": "1-1-3", "name": "1.3 发展", "count": 7, "children": []},
-                ]
+                ],
             },
             {
                 "id": "1-2",
@@ -53,7 +53,7 @@ SAMPLE_FOLDERS = [
                     {"id": "1-2-1", "name": "2.1 变量", "count": 12, "children": []},
                     {"id": "1-2-2", "name": "2.2 数据类型", "count": 15, "children": []},
                     {"id": "1-2-3", "name": "2.3 运算符", "count": 8, "children": []},
-                ]
+                ],
             },
             {
                 "id": "1-3",
@@ -62,17 +62,127 @@ SAMPLE_FOLDERS = [
                 "children": [
                     {"id": "1-3-1", "name": "3.1 函数", "count": 20, "children": []},
                     {"id": "1-3-2", "name": "3.2 类与对象", "count": 20, "children": []},
-                ]
+                ],
             },
             {
                 "id": "1-4",
                 "name": "第四章 高级",
                 "count": 28,
-                "children": []
+                "children": [],
             },
-        ]
+        ],
     }
 ]
+
+
+def _question_bank_left_panel_style(palette) -> str:
+    return f"""
+        QFrame {{
+            background-color: {palette.panel_alt_bg};
+            border-right: 1px solid {palette.border_strong};
+        }}
+    """
+
+
+def _question_bank_search_style(palette) -> str:
+    return f"""
+        QLineEdit {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            padding: 6px 10px;
+            margin-right: 10px;
+        }}
+        QLineEdit:focus {{
+            border: 1px solid {palette.accent};
+        }}
+    """
+
+
+def _question_bank_folder_tree_style(palette) -> str:
+    return f"""
+        QTreeWidget {{
+            background-color: transparent;
+            color: {palette.text_secondary};
+            border: none;
+            font-size: 13px;
+        }}
+        QTreeWidget::item {{
+            padding: 5px;
+            border-radius: 4px;
+        }}
+        QTreeWidget::item:selected {{
+            background-color: {palette.hover_bg};
+            color: {palette.text};
+        }}
+        QTreeWidget::item:hover {{
+            background-color: {palette.hover_bg};
+        }}
+    """
+
+
+def _question_bank_right_panel_style(palette) -> str:
+    return f"background-color: {palette.panel_bg};"
+
+
+def _question_bank_list_style(palette) -> str:
+    return f"""
+        QTreeWidget {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text_secondary};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            font-size: 13px;
+            outline: none;
+            show-decoration-selected: 1;
+        }}
+        QTreeWidget::item {{
+            padding: 8px;
+            border-bottom: 1px solid {palette.border_strong};
+        }}
+        QTreeWidget::item:selected,
+        QTreeWidget::item:selected:active,
+        QTreeWidget::item:selected:!active {{
+            background-color: {palette.hover_bg};
+            color: {palette.text};
+            border: none;
+        }}
+        QTreeWidget::branch {{
+            background: transparent;
+            border: none;
+        }}
+        QTreeWidget::item:hover {{
+            background-color: {palette.hover_bg};
+        }}
+        QHeaderView::section {{
+            background-color: {palette.border};
+            color: {palette.text};
+            padding: 8px;
+            border: none;
+            border-bottom: 1px solid {palette.border_strong};
+            font-weight: bold;
+        }}
+    """
+
+
+def _question_bank_menu_style(palette) -> str:
+    return f"""
+        QMenu {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text_secondary};
+            border: 1px solid {palette.border_strong};
+            padding: 5px;
+        }}
+        QMenu::item {{
+            padding: 8px 20px;
+            border-radius: 4px;
+        }}
+        QMenu::item:selected {{
+            background-color: {palette.accent};
+            color: #ffffff;
+        }}
+    """
 
 
 class CreateFolderDialog(QDialog):
@@ -225,7 +335,7 @@ class QuestionBankView(QWidget):
     
     def setup_ui(self):
         """设置界面布局"""
-        self.setStyleSheet("background-color: #1e1e1e;")
+        apply_theme_stylesheet(self, lambda palette: f"background-color: {palette.panel_bg};")
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -254,12 +364,7 @@ class QuestionBankView(QWidget):
         """创建左侧文件夹面板"""
         panel = QFrame()
         panel.setMinimumWidth(150)  # 最小宽度，允许拖拽调整
-        panel.setStyleSheet("""
-            QFrame {
-                background-color: #252526;
-                border-right: 1px solid #3e3e42;
-            }
-        """)
+        apply_theme_stylesheet(panel, _question_bank_left_panel_style)
         
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 10, 0, 10)  # 右边距0，滚动条贴边
@@ -267,58 +372,20 @@ class QuestionBankView(QWidget):
         
         # 标题
         title = QLabel("📚 文件夹")
-        title.setStyleSheet("""
-            QLabel {
-                color: #ffffff;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                margin-right: 10px;
-            }
-        """)
+        apply_theme_stylesheet(title, lambda palette: f"color: {palette.text}; font-size: 14px; font-weight: bold; padding: 5px; margin-right: 10px;")
         layout.addWidget(title)
         
         # 搜索框
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索文件夹...")
-        self.search_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-                padding: 6px 10px;
-                margin-right: 10px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #007acc;
-            }
-        """)
+        apply_theme_stylesheet(self.search_input, _question_bank_search_style)
         self.search_input.textChanged.connect(self.filter_folders)
         layout.addWidget(self.search_input)
         
         # 文件夹树
         self.folder_tree = QTreeWidget()
         self.folder_tree.setHeaderHidden(True)
-        self.folder_tree.setStyleSheet("""
-            QTreeWidget {
-                background-color: transparent;
-                color: #cccccc;
-                border: none;
-                font-size: 13px;
-            }
-            QTreeWidget::item {
-                padding: 5px;
-                border-radius: 4px;
-            }
-            QTreeWidget::item:selected {
-                background-color: #094771;
-                color: #ffffff;
-            }
-            QTreeWidget::item:hover {
-                background-color: #2a2d2e;
-            }
-        """)
+        apply_theme_stylesheet(self.folder_tree, _question_bank_folder_tree_style)
         self.folder_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.folder_tree.customContextMenuRequested.connect(self.show_folder_menu)
         self.folder_tree.itemClicked.connect(self.on_folder_selected)
@@ -329,7 +396,7 @@ class QuestionBankView(QWidget):
     def create_right_panel(self) -> QWidget:
         """创建右侧题目列表展示面板（预留接口）"""
         panel = QFrame()
-        panel.setStyleSheet("background-color: #1e1e1e;")
+        apply_theme_stylesheet(panel, _question_bank_right_panel_style)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -337,24 +404,12 @@ class QuestionBankView(QWidget):
 
         # 标题
         self.question_title = QLabel("📝 题目列表")
-        self.question_title.setStyleSheet("""
-            QLabel {
-                color: #ffffff;
-                font-size: 18px;
-                font-weight: bold;
-            }
-        """)
+        apply_theme_stylesheet(self.question_title, lambda palette: f"color: {palette.text}; font-size: 18px; font-weight: bold;")
         layout.addWidget(self.question_title)
 
         # 初始提示
         self.dev_hint = QLabel("💡 请在左侧选择文件夹查看题目")
-        self.dev_hint.setStyleSheet("""
-            QLabel {
-                color: #888888;
-                font-size: 16px;
-                padding: 50px;
-            }
-        """)
+        apply_theme_stylesheet(self.dev_hint, lambda palette: f"color: {palette.text_muted}; font-size: 16px; padding: 50px;")
         self.dev_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.dev_hint)
 
@@ -372,43 +427,7 @@ class QuestionBankView(QWidget):
         self.question_list.setColumnWidth(2, 400)
         self.question_list.setColumnWidth(3, 80)
         self.question_list.setColumnWidth(4, 80)
-        self.question_list.setStyleSheet("""
-            QTreeWidget {
-                background-color: #252526;
-                color: #cccccc;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-                font-size: 13px;
-                outline: none;
-                show-decoration-selected: 1;
-            }
-            QTreeWidget::item {
-                padding: 8px;
-                border-bottom: 1px solid #3e3e42;
-            }
-            QTreeWidget::item:selected,
-            QTreeWidget::item:selected:active,
-            QTreeWidget::item:selected:!active {
-                background-color: #0f5d8c;
-                color: #ffffff;
-                border: none;
-            }
-            QTreeWidget::branch {
-                background: transparent;
-                border: none;
-            }
-            QTreeWidget::item:hover {
-                background-color: #2a2d2e;
-            }
-            QHeaderView::section {
-                background-color: #333333;
-                color: #ffffff;
-                padding: 8px;
-                border: none;
-                border-bottom: 1px solid #3e3e42;
-                font-weight: bold;
-            }
-        """)
+        apply_theme_stylesheet(self.question_list, _question_bank_list_style)
         # 双击打开题目详情，单击仅选中
         self.question_list.itemDoubleClicked.connect(self._on_question_activated)
         self._bind_question_open_shortcuts()
@@ -416,13 +435,7 @@ class QuestionBankView(QWidget):
 
         # 提示标签
         self.hint_label = QLabel("💡 选择左侧文件夹后，题目将显示在此处")
-        self.hint_label.setStyleSheet("""
-            QLabel {
-                color: #888888;
-                font-size: 13px;
-                padding: 20px;
-            }
-        """)
+        apply_theme_stylesheet(self.hint_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px; padding: 20px;")
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.hint_label)
 
@@ -713,21 +726,7 @@ class QuestionBankView(QWidget):
         """显示文件夹右键菜单"""
         item = self.folder_tree.itemAt(position)
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #252526;
-                color: #cccccc;
-                border: 1px solid #3e3e42;
-                padding: 5px;
-            }
-            QMenu::item {
-                padding: 8px 20px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #094771;
-            }
-        """)
+        apply_theme_stylesheet(menu, _question_bank_menu_style)
         
         if item:
             # 右键点击文件夹

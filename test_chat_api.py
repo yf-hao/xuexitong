@@ -3623,6 +3623,30 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("#ffffff", widget.styleSheet())
         widget.deleteLater()
 
+    def test_theme_refresh_coalesces_multiple_requests(self):
+        from PyQt6.QtWidgets import QApplication, QWidget
+        from ui import theme as theme_module
+
+        app = QApplication.instance() or QApplication([])
+        widget = QWidget()
+        calls = []
+        original = theme_module.refresh_theme_styles
+
+        def _fake_refresh(target, mode=None):
+            calls.append((target, mode))
+
+        theme_module.refresh_theme_styles = _fake_refresh
+        try:
+            theme_module.schedule_theme_refresh(widget, "dark")
+            theme_module.schedule_theme_refresh(widget, "light")
+            app.processEvents()
+        finally:
+            theme_module.refresh_theme_styles = original
+
+        widget_calls = [call for call in calls if call[0] is widget]
+        self.assertEqual(widget_calls, [(widget, "light")])
+        widget.deleteLater()
+
     def test_theme_tree_binding_rethemes_existing_widgets(self):
         from PyQt6.QtWidgets import QApplication, QWidget, QLabel
         from ui.theme import bind_theme_tree, refresh_theme_styles
@@ -3738,6 +3762,8 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("def _cached_themed_stylesheet", source)
         self.assertIn("if source in themed:", source)
         self.assertIn("pattern_map[source].sub(target, themed)", source)
+        self.assertIn("def schedule_theme_refresh", source)
+        self.assertIn("timer.start(0)", source)
         self.assertIn("binder.iter_widgets()", source)
         self.assertIn("register_widget", source)
 
@@ -3847,6 +3873,47 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("apply_theme_stylesheet(self.chk_enable_location, _signin_checkbox_style)", activities_source)
         self.assertIn("apply_theme_stylesheet(self.btn_generate, _signin_primary_action_style)", activities_source)
         self.assertIn("apply_theme_stylesheet(self.btn_batch_publish, _signin_success_action_style)", activities_source)
+
+    def test_remaining_theme_hotspots_use_palette_factories_and_coalesced_refresh(self):
+        theme_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/theme.py").read_text(encoding="utf-8")
+        management_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/management_view.py").read_text(encoding="utf-8")
+        homework_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/homework_create_view.py").read_text(encoding="utf-8")
+        activities_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/activities_view.py").read_text(encoding="utf-8")
+        cloud_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/cloud_drive_view.py").read_text(encoding="utf-8")
+        question_bank_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/question_bank_view.py").read_text(encoding="utf-8")
+
+        self.assertIn("def schedule_theme_refresh", theme_source)
+        self.assertIn("timer.start(0)", theme_source)
+        self.assertIn("schedule_theme_refresh(widget, mode)", theme_source)
+
+        self.assertIn("def _management_stat_button_style(", management_source)
+        self.assertIn("apply_theme_stylesheet(btn, _management_stat_button_style)", management_source)
+        self.assertIn("apply_theme_stylesheet(self.management_scroll, _management_container_style)", management_source)
+        self.assertIn("apply_theme_stylesheet(self.manage_teachers_table, self._get_table_style)", management_source)
+        self.assertIn("apply_theme_stylesheet(self.teachers_table, self._get_table_style)", management_source)
+
+        self.assertIn("def _homework_tree_style(", homework_source)
+        self.assertIn("apply_theme_stylesheet(self.publish_tab_btn, lambda palette: self._tab_style(", homework_source)
+        self.assertIn("apply_theme_stylesheet(self.question_tree, _homework_tree_style)", homework_source)
+        self.assertIn("apply_theme_stylesheet(group, _homework_filter_panel_style)", homework_source)
+        self.assertIn("apply_theme_stylesheet(self.course_combo, self._combo_style)", homework_source)
+
+        self.assertIn("def _activity_group_header_style(", activities_source)
+        self.assertIn("def _activity_card_style(", activities_source)
+        self.assertIn("apply_theme_stylesheet(group_header, _activity_group_header_style)", activities_source)
+        self.assertIn("apply_theme_stylesheet(card, lambda palette: _activity_card_style(palette, highlighted=act.is_active))", activities_source)
+
+        self.assertIn("def _breadcrumb_style(", cloud_source)
+        self.assertIn("apply_theme_stylesheet(self.path_home_btn, lambda palette: self._breadcrumb_style(palette, current=False))", cloud_source)
+        self.assertIn("apply_theme_stylesheet(menu, self._menu_style)", cloud_source)
+        self.assertIn("apply_theme_stylesheet(dialog, self._move_dialog_style)", cloud_source)
+        self.assertIn("apply_theme_stylesheet(button_box, self._dialog_button_box_style)", cloud_source)
+
+        self.assertIn("def _question_bank_left_panel_style(", question_bank_source)
+        self.assertIn("apply_theme_stylesheet(panel, _question_bank_left_panel_style)", question_bank_source)
+        self.assertIn("apply_theme_stylesheet(self.search_input, _question_bank_search_style)", question_bank_source)
+        self.assertIn("apply_theme_stylesheet(self.question_list, _question_bank_list_style)", question_bank_source)
+        self.assertIn("apply_theme_stylesheet(menu, _question_bank_menu_style)", question_bank_source)
 
     def test_cloud_drive_view_collects_checked_items_and_remembers_download_dir(self):
         from PyQt6.QtWidgets import QApplication

@@ -12,7 +12,114 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from ui.components.multi_select_combo import MultiSelectCombo
 from PyQt6.QtGui import QColor
-from ui.theme import bind_theme_tree, get_theme_palette
+from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette, refresh_theme_styles
+
+
+def _homework_secondary_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            padding: 5px 12px;
+            font-size: 12px;
+            font-weight: bold;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.hover_bg};
+            border: 1px solid {palette.accent};
+        }}
+        QPushButton:disabled {{
+            background-color: {palette.disabled_bg};
+            color: {palette.disabled_text};
+            border: 1px solid {palette.border};
+        }}
+    """
+
+
+def _homework_primary_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 20px;
+            font-size: 13px;
+            font-weight: bold;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.accent_hover};
+        }}
+    """
+
+
+def _homework_filter_panel_style(palette) -> str:
+    return f"""
+        QFrame {{
+            background-color: {palette.panel_alt_bg};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+        }}
+    """
+
+
+def _homework_tree_style(palette) -> str:
+    return f"""
+        QTreeWidget {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text_secondary};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            font-size: 13px;
+            outline: none;
+        }}
+        QTreeWidget::item {{
+            padding: 8px;
+            border: none;
+            border-bottom: 1px solid {palette.border_strong};
+        }}
+        QTreeWidget::item:selected {{
+            background-color: {palette.hover_bg};
+            color: {palette.text};
+            border: none;
+            border-bottom: 1px solid {palette.border_strong};
+        }}
+        QTreeWidget::item:hover {{
+            background-color: {palette.hover_bg};
+        }}
+        QTreeWidget::item:selected:active {{
+            border: none;
+        }}
+        QHeaderView::section {{
+            background-color: {palette.border};
+            color: {palette.text};
+            padding: 8px 12px;
+            border: none;
+            border-bottom: 1px solid {palette.border_strong};
+            font-weight: bold;
+        }}
+        QTreeWidget::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 2px solid {palette.border_strong};
+            border-radius: 3px;
+            background-color: {palette.panel_bg};
+        }}
+        QTreeWidget::indicator:hover {{
+            border: 2px solid {palette.accent};
+        }}
+        QTreeWidget::indicator:checked {{
+            background-color: {palette.accent};
+            border: 2px solid {palette.accent};
+            image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMiIgaGVpZ2h0PSIxMiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjMiPjxwYXRoIGQ9Ik0yMCA2TDkgMTdsLTUtNSIvPjwvc3ZnPg==);
+        }}
+        QTreeWidget::indicator:checked:hover {{
+            background-color: {palette.accent_hover};
+            border: 2px solid {palette.accent_hover};
+        }}
+    """
 
 
 class QuestionPreviewDialog(QDialog):
@@ -127,7 +234,7 @@ class HomeworkCreateView(QWidget):
     
     def setup_ui(self):
         """设置界面布局"""
-        self.setStyleSheet("background-color: #1e1e1e;")
+        apply_theme_stylesheet(self, lambda palette: f"background-color: {palette.panel_bg};")
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(15, 15, 15, 15)
@@ -139,13 +246,13 @@ class HomeworkCreateView(QWidget):
         
         self.publish_tab_btn = QPushButton("📚 作业库")
         self.publish_tab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.publish_tab_btn.setStyleSheet(self._tab_style(active=True))
+        apply_theme_stylesheet(self.publish_tab_btn, lambda palette: self._tab_style(palette, active=(self.current_tab == "library")))
         self.publish_tab_btn.clicked.connect(lambda: self.switch_tab("library"))
         tab_layout.addWidget(self.publish_tab_btn)
 
         self.create_tab_btn = QPushButton("📝 创建作业")
         self.create_tab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.create_tab_btn.setStyleSheet(self._tab_style(active=False))
+        apply_theme_stylesheet(self.create_tab_btn, lambda palette: self._tab_style(palette, active=(self.current_tab == "create")))
         self.create_tab_btn.clicked.connect(lambda: self.switch_tab("create"))
         tab_layout.addWidget(self.create_tab_btn)
         
@@ -165,18 +272,12 @@ class HomeworkCreateView(QWidget):
         # ====== 中部：全选/反选栏 ======
         select_layout = QHBoxLayout()
         self.select_all_cb = QCheckBox("全选当前题目")
-        self.select_all_cb.setStyleSheet("""
-            QCheckBox {
-                color: #ffffff;
-                font-size: 13px;
-                font-weight: bold;
-            }
-        """)
+        apply_theme_stylesheet(self.select_all_cb, lambda palette: f"color: {palette.text}; font-size: 13px; font-weight: bold;")
         self.select_all_cb.stateChanged.connect(self.on_select_all_changed)
         select_layout.addWidget(self.select_all_cb)
         
         self.question_count_label = QLabel("(共 0 题)")
-        self.question_count_label.setStyleSheet("color: #888888; font-size: 12px;")
+        apply_theme_stylesheet(self.question_count_label, lambda palette: f"color: {palette.text_muted}; font-size: 12px;")
         select_layout.addWidget(self.question_count_label)
         
         select_layout.addStretch()
@@ -186,21 +287,7 @@ class HomeworkCreateView(QWidget):
         # 返回上级按钮
         self.back_btn = QPushButton("⬅ 返回上级")
         self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.back_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #ffffff;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-                border: 1px solid #007acc;
-            }
-        """)
+        apply_theme_stylesheet(self.back_btn, _homework_secondary_button_style)
         self.back_btn.clicked.connect(self.go_back)
         self.back_btn.setVisible(False)
         select_layout.addWidget(self.back_btn)
@@ -208,21 +295,7 @@ class HomeworkCreateView(QWidget):
         # 反选按钮
         invert_btn = QPushButton("反选")
         invert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        invert_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #ffffff;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-                border: 1px solid #007acc;
-            }
-        """)
+        apply_theme_stylesheet(invert_btn, _homework_secondary_button_style)
         invert_btn.clicked.connect(self.invert_selection)
         select_layout.addWidget(invert_btn)
         
@@ -248,60 +321,7 @@ class HomeworkCreateView(QWidget):
         self.question_tree.setItemsExpandable(False)
         self.question_tree.header().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
         
-        self.question_tree.setStyleSheet("""
-            QTreeWidget {
-                background-color: #252526;
-                color: #cccccc;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-                font-size: 13px;
-                outline: none;
-            }
-            QTreeWidget::item {
-                padding: 8px;
-                border: none;
-                border-bottom: 1px solid #3e3e42;
-            }
-            QTreeWidget::item:selected {
-                background-color: #094771;
-                color: #ffffff;
-                border: none;
-                border-bottom: 1px solid #3e3e42;
-            }
-            QTreeWidget::item:hover {
-                background-color: #2a2d2e;
-            }
-            QTreeWidget::item:selected:active {
-                border: none;
-            }
-            QHeaderView::section {
-                background-color: #333333;
-                color: #ffffff;
-                padding: 8px 12px;
-                border: none;
-                border-bottom: 1px solid #3e3e42;
-                font-weight: bold;
-            }
-            QTreeWidget::indicator {
-                width: 16px;
-                height: 16px;
-                border: 2px solid #555555;
-                border-radius: 3px;
-                background-color: #1e1e1e;
-            }
-            QTreeWidget::indicator:hover {
-                border: 2px solid #007acc;
-            }
-            QTreeWidget::indicator:checked {
-                background-color: #007acc;
-                border: 2px solid #007acc;
-                image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMiIgaGVpZ2h0PSIxMiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjMiPjxwYXRoIGQ9Ik0yMCA2TDkgMTdsLTUtNSIvPjwvc3ZnPg==);
-            }
-            QTreeWidget::indicator:checked:hover {
-                background-color: #005c99;
-                border: 2px solid #005c99;
-            }
-        """)
+        apply_theme_stylesheet(self.question_tree, _homework_tree_style)
         self.question_tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.question_tree.itemChanged.connect(self.on_item_changed)  # 添加复选框状态变化处理
         content_layout.addWidget(self.question_tree)
@@ -313,7 +333,7 @@ class HomeworkCreateView(QWidget):
         
         # 已选统计
         self.selected_label = QLabel("📊 已选: 0 道题目")
-        self.selected_label.setStyleSheet("color: #ff9800; font-size: 14px; font-weight: bold;")
+        apply_theme_stylesheet(self.selected_label, lambda palette: f"color: {palette.warning}; font-size: 14px; font-weight: bold;")
         bottom_layout.addWidget(self.selected_label)
         
         bottom_layout.addStretch()
@@ -322,52 +342,18 @@ class HomeworkCreateView(QWidget):
         self.prev_btn = QPushButton("⬅ 上一页")
         self.prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.prev_btn.setEnabled(False)
-        self.prev_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #ffffff;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-            }
-            QPushButton:disabled {
-                background-color: #2d2d30;
-                color: #666666;
-                border: 1px solid #3e3e42;
-            }
-        """)
+        apply_theme_stylesheet(self.prev_btn, _homework_secondary_button_style)
         self.prev_btn.clicked.connect(self.prev_page)
         bottom_layout.addWidget(self.prev_btn)
         
         self.page_label = QLabel("第 1 页")
-        self.page_label.setStyleSheet("color: #cccccc; font-size: 13px; padding: 0 10px;")
+        apply_theme_stylesheet(self.page_label, lambda palette: f"color: {palette.text_secondary}; font-size: 13px; padding: 0 10px;")
         bottom_layout.addWidget(self.page_label)
         
         self.next_btn = QPushButton("下一页 ➡")
         self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.next_btn.setEnabled(False)
-        self.next_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #ffffff;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-            }
-            QPushButton:disabled {
-                background-color: #2d2d30;
-                color: #666666;
-                border: 1px solid #3e3e42;
-            }
-        """)
+        apply_theme_stylesheet(self.next_btn, _homework_secondary_button_style)
         self.next_btn.clicked.connect(self.next_page)
         bottom_layout.addWidget(self.next_btn)
         
@@ -376,20 +362,7 @@ class HomeworkCreateView(QWidget):
         # 创建作业按钮
         create_btn = QPushButton("创建作业")
         create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        create_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 30px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #005c99;
-            }
-        """)
+        apply_theme_stylesheet(create_btn, _homework_primary_button_style)
         create_btn.clicked.connect(self.create_homework)
         bottom_layout.addWidget(create_btn)
         
@@ -410,13 +383,7 @@ class HomeworkCreateView(QWidget):
     def create_filter_panel(self) -> QFrame:
         """创建筛选条件面板"""
         group = QFrame()
-        group.setStyleSheet("""
-            QFrame {
-                background-color: #252526;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-            }
-        """)
+        apply_theme_stylesheet(group, _homework_filter_panel_style)
         
         layout = QVBoxLayout(group)
         layout.setContentsMargins(15, 10, 15, 10)
@@ -424,7 +391,7 @@ class HomeworkCreateView(QWidget):
         
         # 标题
         title = QLabel("🔍 筛选条件")
-        title.setStyleSheet("color: #007acc; font-size: 14px; font-weight: bold;")
+        apply_theme_stylesheet(title, lambda palette: f"color: {palette.accent}; font-size: 14px; font-weight: bold;")
         layout.addWidget(title)
         
         # 第一行
@@ -438,7 +405,7 @@ class HomeworkCreateView(QWidget):
         self.course_combo.addItem("高等数学", "math")
         self.course_combo.addItem("线性代数", "linear")
         self.course_combo.setMaxVisibleItems(15)  # 最多显示15项，超过显示滚动条
-        self.course_combo.setStyleSheet(self._combo_style())
+        apply_theme_stylesheet(self.course_combo, self._combo_style)
         self.course_combo.blockSignals(False)  # 恢复信号
         self.course_combo.currentIndexChanged.connect(self.on_course_changed)
         row1.addWidget(self.course_combo)
@@ -523,7 +490,7 @@ class HomeworkCreateView(QWidget):
         self.page_size_combo.addItem("50条", 50)
         self.page_size_combo.addItem("100条", 100)
         self.page_size_combo.setCurrentIndex(0)  # 默认30条
-        self.page_size_combo.setStyleSheet(self._combo_style())
+        apply_theme_stylesheet(self.page_size_combo, self._combo_style)
         self.page_size_combo.setFixedWidth(80)
         row2.addWidget(self.page_size_combo)
         
@@ -532,37 +499,13 @@ class HomeworkCreateView(QWidget):
         # 搜索和重置按钮
         search_btn = QPushButton("🔍 搜索")
         search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        search_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 5px 15px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #005c99;
-            }
-        """)
+        apply_theme_stylesheet(search_btn, _homework_primary_button_style)
         search_btn.clicked.connect(lambda: self.on_search())
         row2.addWidget(search_btn)
         
         reset_btn = QPushButton("重置")
         reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        reset_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 5px 15px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-            }
-        """)
+        apply_theme_stylesheet(reset_btn, _homework_secondary_button_style)
         reset_btn.clicked.connect(self.on_reset)
         row2.addWidget(reset_btn)
         
@@ -570,60 +513,57 @@ class HomeworkCreateView(QWidget):
         
         return group
     
-    def _combo_style(self) -> str:
+    def _combo_style(self, palette) -> str:
         """下拉框样式"""
-        return """
-            QComboBox {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border: 1px solid #3e3e42;
+        return f"""
+            QComboBox {{
+                background-color: {palette.panel_bg};
+                color: {palette.text};
+                border: 1px solid {palette.border_strong};
                 border-radius: 4px;
                 padding: 5px 10px;
                 min-width: 100px;
-            }
-            QComboBox:hover {
-                border: 1px solid #007acc;
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox:hover {{
+                border: 1px solid {palette.accent};
+            }}
+            QComboBox::drop-down {{
                 border: none;
                 width: 20px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #252526;
-                color: #ffffff;
-                selection-background-color: #094771;
-                border: 1px solid #3e3e42;
-            }
-            QComboBox QAbstractItemView::item {
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text};
+                selection-background-color: {palette.hover_bg};
+                selection-color: {palette.text};
+                border: 1px solid {palette.border_strong};
+            }}
+            QComboBox QAbstractItemView::item {{
                 padding: 5px 10px;
                 min-height: 25px;
-            }
-            QComboBox QAbstractItemView::item:hover {
-                background-color: #094771;
-            }
-            QComboBox QAbstractItemView::scrollbar {
-                background-color: #1e1e1e;
-                width: 12px;
-                margin: 0;
-            }
-            QComboBox QAbstractItemView::scrollbar:vertical {
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {palette.hover_bg};
+            }}
+            QComboBox QAbstractItemView::scrollbar,
+            QComboBox QAbstractItemView::scrollbar:vertical {{
                 border: none;
-                background-color: #1e1e1e;
+                background-color: {palette.panel_bg};
                 width: 12px;
                 margin: 0;
-            }
-            QComboBox QAbstractItemView::scrollbar::handle:vertical {
-                background-color: #555555;
+            }}
+            QComboBox QAbstractItemView::scrollbar::handle:vertical {{
+                background-color: {palette.border_strong};
                 min-height: 30px;
                 border-radius: 6px;
-            }
-            QComboBox QAbstractItemView::scrollbar::handle:vertical:hover {
-                background-color: #666666;
-            }
+            }}
+            QComboBox QAbstractItemView::scrollbar::handle:vertical:hover {{
+                background-color: {palette.text_muted};
+            }}
             QComboBox QAbstractItemView::scrollbar::add-line:vertical,
-            QComboBox QAbstractItemView::scrollbar::sub-line:vertical {
+            QComboBox QAbstractItemView::scrollbar::sub-line:vertical {{
                 height: 0px;
-            }
+            }}
         """
     
     def on_item_changed(self, item: QTreeWidgetItem, column: int):
@@ -1427,8 +1367,8 @@ class HomeworkCreateView(QWidget):
         
         if tab_name == "create":
             self.current_tab = "create"
-            self.create_tab_btn.setStyleSheet(self._tab_style(active=True))
-            self.publish_tab_btn.setStyleSheet(self._tab_style(active=False))
+            refresh_theme_styles(self.create_tab_btn)
+            refresh_theme_styles(self.publish_tab_btn)
             self.create_container.setVisible(True)
             self.library_view.setVisible(False)
             # 手动切换到创建作业tab时，重置目标文件夹ID为0（根目录）
@@ -1439,42 +1379,41 @@ class HomeworkCreateView(QWidget):
             self.status_update.emit("切换到创建作业")
         elif tab_name == "library":
             self.current_tab = "library"
-            self.create_tab_btn.setStyleSheet(self._tab_style(active=False))
-            self.publish_tab_btn.setStyleSheet(self._tab_style(active=True))
+            refresh_theme_styles(self.create_tab_btn)
+            refresh_theme_styles(self.publish_tab_btn)
             self.create_container.setVisible(False)
             self.library_view.setVisible(True)
             self.library_view.on_show()  # 加载作业库
     
-    def _tab_style(self, active: bool) -> str:
+    def _tab_style(self, palette, active: bool) -> str:
         """Tab按钮样式"""
         if active:
-            return """
-                QPushButton {
-                    background-color: #007acc;
-                    color: white;
+            return f"""
+                QPushButton {{
+                    background-color: {palette.accent};
+                    color: #ffffff;
                     border: none;
                     border-radius: 4px 4px 0 0;
                     padding: 10px 25px;
                     font-size: 14px;
                     font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #005c99;
-                }
+                }}
+                QPushButton:hover {{
+                    background-color: {palette.accent_hover};
+                }}
             """
-        else:
-            return """
-                QPushButton {
-                    background-color: #2d2d30;
-                    color: #888888;
-                    border: none;
-                    border-radius: 4px 4px 0 0;
-                    padding: 10px 25px;
-                    font-size: 14px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #3e3e42;
-                    color: #cccccc;
-                }
-            """
+        return f"""
+            QPushButton {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.disabled_text};
+                border: none;
+                border-radius: 4px 4px 0 0;
+                padding: 10px 25px;
+                font-size: 14px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {palette.hover_bg};
+                color: {palette.text_secondary};
+            }}
+        """

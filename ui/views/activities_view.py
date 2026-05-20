@@ -191,6 +191,42 @@ def _signin_success_action_style(palette) -> str:
         }}
     """
 
+
+def _activity_group_header_style(palette) -> str:
+    return (
+        f"font-size: 14px; font-weight: bold; color: {palette.accent}; padding: 8px 5px 4px 5px; "
+        f"border-bottom: 1px solid {palette.border}; margin-top: 6px;"
+    )
+
+
+def _activity_card_style(palette, highlighted: bool = False) -> str:
+    border = palette.accent if highlighted else palette.border
+    return f"""
+        QFrame {{
+            background-color: {palette.panel_bg};
+            border: 1px solid {border};
+            border-radius: 8px;
+            padding: 10px;
+            margin-left: 15px;
+        }}
+    """
+
+
+def _activity_small_button_style(palette, bg: str, hover: str) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {bg};
+            color: #ffffff;
+            border-radius: 4px;
+            padding: 4px;
+            font-size: 12px;
+            font-weight: bold;
+        }}
+        QPushButton:hover {{
+            background-color: {hover};
+        }}
+    """
+
 class ActivitiesView(QWidget):
     def __init__(self, crawler, status_callback, get_course_callback, get_class_name_callback, get_class_id_callback, parent=None):
         super().__init__(parent)
@@ -603,25 +639,27 @@ class ActivitiesView(QWidget):
             
             card = QFrame()
             card.setObjectName("signin_card")
-            card.setStyleSheet(f"""
-                QFrame#signin_card {{ 
-                    background-color: {'#2d2d2d' if is_published else '#1e1e1e'}; 
-                    border: 1px solid {'#444' if is_published else '#333333'}; 
-                    border-radius: 8px; 
-                    padding: 10px; 
-                }}
-                QFrame#signin_card:hover {{ border: 1px solid {'#444' if is_published else '#007acc'}; }}
-            """)
+            apply_theme_stylesheet(card, lambda palette, published=is_published: _activity_card_style(palette, highlighted=not published))
             card_layout = QHBoxLayout(card)
             
             title_lbl = QLabel(f"📍 签到: {name}")
-            title_lbl.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {'#888888' if is_published else '#ffffff'};")
+            apply_theme_stylesheet(
+                title_lbl,
+                lambda palette, published=is_published: (
+                    f"font-size: 15px; font-weight: bold; color: {palette.disabled_text if published else palette.text};"
+                ),
+            )
             card_layout.addWidget(title_lbl)
             
             date_val = item.get("date") or item.get("dateRange", "")
             if date_val:
                 date_lbl = QLabel(f"({date_val})")
-                date_lbl.setStyleSheet(f"font-size: 12px; color: {'#555555' if is_published else '#aaaaaa'}; margin-left: 5px;")
+                apply_theme_stylesheet(
+                    date_lbl,
+                    lambda palette, published=is_published: (
+                        f"font-size: 12px; color: {palette.disabled_text if published else palette.text_muted}; margin-left: 5px;"
+                    ),
+                )
                 card_layout.addWidget(date_lbl)
                 
             card_layout.addStretch()
@@ -631,14 +669,14 @@ class ActivitiesView(QWidget):
             pub_btn.setEnabled(not is_published)
             
             if is_published:
-                pub_btn.setStyleSheet("""
-                    QPushButton { background-color: #3e3e42; color: #888888; border-radius: 4px; padding: 5px; font-size: 12px; }
-                """)
+                apply_theme_stylesheet(
+                    pub_btn,
+                    lambda palette: (
+                        f"background-color: {palette.disabled_bg}; color: {palette.disabled_text}; border-radius: 4px; padding: 5px; font-size: 12px;"
+                    ),
+                )
             else:
-                pub_btn.setStyleSheet("""
-                    QPushButton { background-color: #28a745; color: white; border-radius: 4px; padding: 5px; font-size: 12px; }
-                    QPushButton:hover { background-color: #218838; }
-                """)
+                apply_theme_stylesheet(pub_btn, lambda palette: _activity_small_button_style(palette, palette.success, palette.success_hover))
                 pub_btn.clicked.connect(lambda checked, n=name: self._handle_publish_action(n))
             
             card_layout.addWidget(pub_btn)
@@ -647,10 +685,23 @@ class ActivitiesView(QWidget):
             del_btn = QPushButton("删除")
             del_btn.setFixedWidth(60)
             del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            del_btn.setStyleSheet("""
-                QPushButton { background-color: #442222; color: #ff8888; border: 1px solid #ff4d4d; border-radius: 4px; padding: 5px; font-size: 12px; }
-                QPushButton:hover { background-color: #ff4d4d; color: white; }
-            """)
+            apply_theme_stylesheet(
+                del_btn,
+                lambda palette: f"""
+                    QPushButton {{
+                        background-color: {palette.danger_soft};
+                        color: {palette.danger};
+                        border: 1px solid {palette.danger};
+                        border-radius: 4px;
+                        padding: 5px;
+                        font-size: 12px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {palette.danger};
+                        color: #ffffff;
+                    }}
+                """,
+            )
             del_btn.clicked.connect(lambda checked, n=name, pub=is_published, aid=item.get('activeId'): self._handle_delete_action(n, pub, aid))
             card_layout.addWidget(del_btn)
 
@@ -1072,34 +1123,17 @@ class ActivitiesView(QWidget):
             group_acts.sort(key=lambda a: status_order.get(a.status, 9))
             # 分组标题
             group_header = QLabel(f"👥 {group_name} ({len(group_acts)})")
-            group_header.setStyleSheet("""
-                font-size: 14px;
-                font-weight: bold;
-                color: #007acc;
-                padding: 8px 5px 4px 5px;
-                border-bottom: 1px solid #333;
-                margin-top: 6px;
-            """)
+            apply_theme_stylesheet(group_header, _activity_group_header_style)
             self.activities_scroll_layout.addWidget(group_header)
             
             for act in group_acts:
                 card = QFrame()
                 card.setObjectName("activity_card")
-                status_color = "#4ec9b0" if act.is_active else ("#888" if act.is_ended else "#d4a72c")
-                card.setStyleSheet(f"""
-                    QFrame#activity_card {{
-                        background-color: #1e1e1e;
-                        border: 1px solid #333;
-                        border-radius: 8px;
-                        padding: 10px;
-                        margin-left: 15px;
-                    }}
-                    QFrame#activity_card:hover {{ border: 1px solid #007acc; }}
-                """)
+                apply_theme_stylesheet(card, lambda palette: _activity_card_style(palette, highlighted=act.is_active))
                 card_layout = QHBoxLayout(card)
                 
                 title_lbl = QLabel(f"📍 {act.title}")
-                title_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #ffffff;")
+                apply_theme_stylesheet(title_lbl, lambda palette: f"font-size: 15px; font-weight: bold; color: {palette.text};")
                 card_layout.addWidget(title_lbl)
                 
                 card_layout.addStretch()
@@ -1108,44 +1142,32 @@ class ActivitiesView(QWidget):
                     start_btn = QPushButton("开始")
                     start_btn.setFixedWidth(60)
                     start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    start_btn.setStyleSheet("""
-                        QPushButton { background-color: #007acc; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
-                        QPushButton:hover { background-color: #1a8ad4; }
-                    """)
+                    apply_theme_stylesheet(start_btn, lambda palette: _activity_small_button_style(palette, palette.accent, palette.accent_hover))
                     start_btn.clicked.connect(lambda checked, a=act: self._handle_start_active(a))
                     card_layout.addWidget(start_btn)
                     del_btn = QPushButton("删除")
                     del_btn.setFixedWidth(60)
                     del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    del_btn.setStyleSheet("""
-                        QPushButton { background-color: #555; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
-                        QPushButton:hover { background-color: #444; }
-                    """)
+                    apply_theme_stylesheet(del_btn, lambda palette: _activity_small_button_style(palette, palette.text_muted, palette.border_strong))
                     del_btn.clicked.connect(lambda checked, a=act: self._handle_delete_active(a))
                     card_layout.addWidget(del_btn)
                 elif act.is_active:
                     status_lbl = QLabel("进行中")
-                    status_lbl.setStyleSheet(f"font-size: 12px; color: {status_color}; margin-right: 10px;")
+                    apply_theme_stylesheet(status_lbl, lambda palette: f"font-size: 12px; color: {palette.success}; margin-right: 10px;")
                     card_layout.addWidget(status_lbl)
                     time_lbl = QLabel(act.time_range)
-                    time_lbl.setStyleSheet("font-size: 11px; color: #888;")
+                    apply_theme_stylesheet(time_lbl, lambda palette: f"font-size: 11px; color: {palette.text_muted};")
                     card_layout.addWidget(time_lbl)
                     detail_btn = QPushButton("签到详情")
                     detail_btn.setFixedWidth(76)
                     detail_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    detail_btn.setStyleSheet("""
-                        QPushButton { background-color: #4a6fa5; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
-                        QPushButton:hover { background-color: #3d5f90; }
-                    """)
+                    apply_theme_stylesheet(detail_btn, lambda palette: _activity_small_button_style(palette, palette.accent, palette.accent_hover))
                     detail_btn.clicked.connect(lambda checked, a=act: self._load_attendance_detail(a))
                     card_layout.addWidget(detail_btn)
                     end_btn = QPushButton("结束")
                     end_btn.setFixedWidth(60)
                     end_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    end_btn.setStyleSheet("""
-                        QPushButton { background-color: #d9534f; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
-                        QPushButton:hover { background-color: #c9302c; }
-                    """)
+                    apply_theme_stylesheet(end_btn, lambda palette: _activity_small_button_style(palette, palette.danger, palette.warning))
                     end_btn.clicked.connect(lambda checked, a=act: self._handle_end_active(a))
                     card_layout.addWidget(end_btn)
                     # 单击进行中的签到显示二维码
@@ -1153,18 +1175,20 @@ class ActivitiesView(QWidget):
                     card.mousePressEvent = lambda event, a=act: self._handle_active_card_click(event, a)
                 else:
                     status_lbl = QLabel(act.status_name)
-                    status_lbl.setStyleSheet(f"font-size: 12px; color: {status_color}; margin-right: 10px;")
+                    apply_theme_stylesheet(
+                        status_lbl,
+                        lambda palette: (
+                            f"font-size: 12px; color: {palette.disabled_text if act.is_ended else palette.warning}; margin-right: 10px;"
+                        ),
+                    )
                     card_layout.addWidget(status_lbl)
                     time_lbl = QLabel(act.time_range)
-                    time_lbl.setStyleSheet("font-size: 11px; color: #888;")
+                    apply_theme_stylesheet(time_lbl, lambda palette: f"font-size: 11px; color: {palette.text_muted};")
                     card_layout.addWidget(time_lbl)
                     del_btn = QPushButton("删除")
                     del_btn.setFixedWidth(60)
                     del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    del_btn.setStyleSheet("""
-                        QPushButton { background-color: #555; color: white; border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }
-                        QPushButton:hover { background-color: #444; }
-                    """)
+                    apply_theme_stylesheet(del_btn, lambda palette: _activity_small_button_style(palette, palette.text_muted, palette.border_strong))
                     del_btn.clicked.connect(lambda checked, a=act: self._handle_delete_active(a))
                     card_layout.addWidget(del_btn)
                     self._bind_ended_activity_detail_trigger(card, act, title_lbl, status_lbl, time_lbl)

@@ -549,24 +549,33 @@ class ChatView(QWidget):
                 logger.warning(f"ChatView: refresh_msync_info 失败 - {e}")
             finally:
                 try:
-                    self.msync_info_refresh_done.emit(auto_triggered, ok)
+                    signal = getattr(self, "msync_info_refresh_done", None)
+                    if signal is not None and hasattr(signal, "emit"):
+                        signal.emit(auto_triggered, ok)
+                    else:
+                        ChatView._on_msync_info_refresh_done(self, auto_triggered, ok)
                 except RuntimeError:
                     # 视图已销毁
                     pass
 
-        threading.Thread(
-            target=run_refresh,
-            name="chat-msync-info-refresh",
-            daemon=True,
-        ).start()
+        signal = getattr(self, "msync_info_refresh_done", None)
+        if signal is not None and hasattr(signal, "emit"):
+            threading.Thread(
+                target=run_refresh,
+                name="chat-msync-info-refresh",
+                daemon=True,
+            ).start()
+        else:
+            run_refresh()
 
     def _on_msync_info_refresh_done(self, auto_triggered: bool, ok: bool):
         self._message_refreshing = False
         if not auto_triggered and hasattr(self, "message_refresh_btn"):
             self.message_refresh_btn.setEnabled(True)
             self.message_refresh_btn.setText("刷新")
-        if not auto_triggered:
+        if not auto_triggered and hasattr(self, "loading_hint") and hasattr(self.loading_hint, "hide"):
             self.loading_hint.hide()
+        if not auto_triggered:
             self._load_message_list()
         self._ensure_msync_connected()
 

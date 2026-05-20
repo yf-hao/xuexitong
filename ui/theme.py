@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable
 
-from PyQt6.QtCore import QObject, QEvent, QSettings, pyqtSignal
+from PyQt6.QtCore import QObject, QEvent, QSettings, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -363,6 +363,31 @@ def refresh_theme_styles(widget: QWidget, mode: str | None = None):
             _set_widget_stylesheet(target, _resolve_theme_stylesheet(target, mode))
 
 
+def _flush_scheduled_theme_refresh(widget: QWidget):
+    if widget is None:
+        return
+
+    mode = getattr(widget, "_theme_pending_refresh_mode", None) or theme_manager().mode
+    setattr(widget, "_theme_pending_refresh_mode", None)
+    refresh_theme_styles(widget, mode)
+
+
+def schedule_theme_refresh(widget: QWidget, mode: str | None = None):
+    if widget is None:
+        return
+
+    setattr(widget, "_theme_pending_refresh_mode", mode or theme_manager().mode)
+    timer = getattr(widget, "_theme_refresh_timer", None)
+    if timer is None:
+        timer = QTimer(widget)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda current_widget=widget: _flush_scheduled_theme_refresh(current_widget))
+        setattr(widget, "_theme_refresh_timer", timer)
+
+    if not timer.isActive():
+        timer.start(0)
+
+
 def _set_widget_stylesheet(widget: QWidget, css: str):
     css = str(css or "")
     if getattr(widget, "_theme_applied_stylesheet", None) == css and widget.styleSheet() == css:
@@ -470,7 +495,7 @@ def bind_theme_tree(root: QWidget):
 
     if not getattr(root, "_theme_tree_connected", False):
         def _refresh(mode: str, widget=root):
-            refresh_theme_styles(widget, mode)
+            schedule_theme_refresh(widget, mode)
 
         manager = theme_manager()
         try:
@@ -482,4 +507,4 @@ def bind_theme_tree(root: QWidget):
         setattr(root, "_theme_tree_refresh", _refresh)
         setattr(root, "_theme_tree_connected", True)
 
-    refresh_theme_styles(root, theme_manager().mode)
+    schedule_theme_refresh(root, theme_manager().mode)

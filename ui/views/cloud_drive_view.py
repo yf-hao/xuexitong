@@ -260,6 +260,122 @@ class CloudDriveView(QWidget):
                 height: 0px;
             }}
         """
+
+    def _title_label_style(self, palette):
+        return f"font-size: 18px; font-weight: bold; color: {palette.text};"
+
+    def _meta_label_style(self, palette):
+        return f"color: {palette.text_muted}; font-size: 14px;"
+
+    def _breadcrumb_style(self, palette, current: bool = False):
+        if current:
+            return f"""
+                QLabel {{
+                    color: {palette.text};
+                    font-size: 13px;
+                    padding: 5px 10px;
+                    background-color: {palette.hover_bg};
+                    border-radius: 4px;
+                }}
+            """
+        return f"""
+            QLabel {{
+                color: {palette.accent};
+                font-size: 13px;
+                padding: 5px 10px;
+                background-color: {palette.panel_bg};
+                border-radius: 4px;
+            }}
+            QLabel:hover {{
+                background-color: {palette.hover_bg};
+                text-decoration: underline;
+            }}
+        """
+
+    def _menu_style(self, palette):
+        return f"""
+            QMenu {{
+                background-color: {palette.hover_bg};
+                color: {palette.text_secondary};
+                border: 1px solid {palette.border_strong};
+                border-radius: 6px;
+                padding: 5px;
+            }}
+            QMenu::item {{
+                padding: 8px 25px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {palette.accent};
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {palette.border_strong};
+                margin: 5px 10px;
+            }}
+        """
+
+    def _loading_label_style(self, palette):
+        return f"""
+            QLabel {{
+                color: {palette.accent};
+                background-color: {palette.card_bg};
+                border: 1px solid {palette.border};
+                border-radius: 12px;
+                padding: 40px;
+                font-size: 16px;
+            }}
+        """
+
+    def _move_dialog_style(self, palette):
+        return f"""
+            QDialog {{
+                background-color: {palette.panel_bg};
+            }}
+            QLabel {{
+                color: {palette.text_secondary};
+            }}
+            QTreeWidget {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text_secondary};
+                border: 1px solid {palette.border_strong};
+                border-radius: 6px;
+                padding: 5px;
+                font-size: 14px;
+            }}
+            QTreeWidget::item {{
+                padding: 4px 2px;
+                border-radius: 4px;
+                height: 24px;
+            }}
+            QTreeWidget::item:selected {{
+                background-color: {palette.accent};
+                color: #ffffff;
+            }}
+            QTreeWidget::item:hover:!selected {{
+                background-color: {palette.hover_bg};
+            }}
+        """
+
+    def _dialog_button_box_style(self, palette):
+        return f"""
+            QPushButton {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-size: 13px;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: {palette.accent_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {palette.accent_focus};
+            }}
+        """
     
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -270,19 +386,19 @@ class CloudDriveView(QWidget):
         header_layout = QHBoxLayout()
         
         title = QLabel("云盘")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        apply_theme_stylesheet(title, self._title_label_style)
         header_layout.addWidget(title)
         
         # 用户信息标签
         self.user_info_label = QLabel("")
-        self.user_info_label.setStyleSheet("color: #888888; font-size: 14px;")
+        apply_theme_stylesheet(self.user_info_label, self._meta_label_style)
         header_layout.addWidget(self.user_info_label)
         
         header_layout.addStretch()
         
         # 文件计数标签
         self.file_count_label = QLabel("共 0 项")
-        self.file_count_label.setStyleSheet("color: #888888; font-size: 14px;")
+        apply_theme_stylesheet(self.file_count_label, self._meta_label_style)
         header_layout.addWidget(self.file_count_label)
         
         layout.addLayout(header_layout)
@@ -292,19 +408,7 @@ class CloudDriveView(QWidget):
         self.path_layout.setSpacing(5)
         
         self.path_home_btn = QLabel("根目录")
-        self.path_home_btn.setStyleSheet("""
-            QLabel {
-                color: #007acc;
-                font-size: 13px;
-                padding: 5px 10px;
-                background-color: #1e1e1e;
-                border-radius: 4px;
-            }
-            QLabel:hover {
-                background-color: #2a2d2e;
-                text-decoration: underline;
-            }
-        """)
+        apply_theme_stylesheet(self.path_home_btn, lambda palette: self._breadcrumb_style(palette, current=False))
         self.path_home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.path_home_btn.mousePressEvent = lambda e: self.navigate_to_root()
         
@@ -382,16 +486,7 @@ class CloudDriveView(QWidget):
         # 加载提示标签
         self.loading_label = QLabel("正在加载云盘文件...")
         self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.loading_label.setStyleSheet("""
-            QLabel {
-                color: #007acc;
-                background-color: #1a1a1a;
-                border: 1px solid #333333;
-                border-radius: 12px;
-                padding: 40px;
-                font-size: 16px;
-            }
-        """)
+        apply_theme_stylesheet(self.loading_label, self._loading_label_style)
         layout.addWidget(self.loading_label)
         self.loading_label.hide()
         bind_theme_tree(self)
@@ -661,28 +756,7 @@ class CloudDriveView(QWidget):
         
         # 创建右键菜单
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2a2d2e;
-                color: #e1e1e1;
-                border: 1px solid #3e3e42;
-                border-radius: 6px;
-                padding: 5px;
-            }
-            QMenu::item {
-                padding: 8px 25px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #007acc;
-                color: #ffffff;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #3e3e42;
-                margin: 5px 10px;
-            }
-        """)
+        apply_theme_stylesheet(menu, self._menu_style)
         
         # 添加菜单项
         download_action = QAction("⬇️ 下载", self)
@@ -1156,34 +1230,7 @@ class CloudDriveView(QWidget):
             dialog = QDialog(self)
             dialog.setWindowTitle(f"移动 '{item_name}' 到")
             dialog.setMinimumSize(450, 550)
-            dialog.setStyleSheet("""
-                QDialog {
-                    background-color: #1e1e1e;
-                }
-                QLabel {
-                    color: #e1e1e1;
-                }
-                QTreeWidget {
-                    background-color: #252526;
-                    color: #e1e1e1;
-                    border: 1px solid #3e3e42;
-                    border-radius: 6px;
-                    padding: 5px;
-                    font-size: 14px;
-                }
-                QTreeWidget::item {
-                    padding: 4px 2px;
-                    border-radius: 4px;
-                    height: 24px;
-                }
-                QTreeWidget::item:selected {
-                    background-color: #007acc;
-                    color: #ffffff;
-                }
-                QTreeWidget::item:hover:!selected {
-                    background-color: #2a2d2e;
-                }
-            """)
+            apply_theme_stylesheet(dialog, self._move_dialog_style)
             
             layout = QVBoxLayout(dialog)
             
@@ -1278,23 +1325,7 @@ class CloudDriveView(QWidget):
             button_box = QDialogButtonBox(
                 QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
             )
-            button_box.setStyleSheet("""
-                QPushButton {
-                    background-color: #007acc;
-                    color: #ffffff;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 8px 20px;
-                    font-size: 13px;
-                    min-width: 80px;
-                }
-                QPushButton:hover {
-                    background-color: #005a9e;
-                }
-                QPushButton:pressed {
-                    background-color: #004578;
-                }
-            """)
+            apply_theme_stylesheet(button_box, self._dialog_button_box_style)
             
             def on_accept():
                 selected_items = folder_tree.selectedItems()
@@ -1471,7 +1502,7 @@ class CloudDriveView(QWidget):
         for folder_id, folder_name in self.path_stack:
             # 添加分隔符
             separator = QLabel(">")
-            separator.setStyleSheet("color: #888888; font-size: 13px;")
+            apply_theme_stylesheet(separator, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
             self.path_layout.insertWidget(insert_pos, separator)
             insert_pos += 1
             
@@ -1481,31 +1512,11 @@ class CloudDriveView(QWidget):
             if is_last:
                 # 最后一个：显示为白色背景
                 path_label = QLabel(folder_name)
-                path_label.setStyleSheet("""
-                    QLabel {
-                        color: #ffffff;
-                        font-size: 13px;
-                        padding: 5px 10px;
-                        background-color: #2a2d2e;
-                        border-radius: 4px;
-                    }
-                """)
+                apply_theme_stylesheet(path_label, lambda palette: self._breadcrumb_style(palette, current=True))
             else:
                 # 可点击：显示为蓝色链接样式
                 path_label = QLabel(folder_name)
-                path_label.setStyleSheet("""
-                    QLabel {
-                        color: #007acc;
-                        font-size: 13px;
-                        padding: 5px 10px;
-                        background-color: #1e1e1e;
-                        border-radius: 4px;
-                    }
-                    QLabel:hover {
-                        background-color: #2a2d2e;
-                        text-decoration: underline;
-                    }
-                """)
+                apply_theme_stylesheet(path_label, lambda palette: self._breadcrumb_style(palette, current=False))
                 path_label.setCursor(Qt.CursorShape.PointingHandCursor)
                 # 绑定点击事件
                 path_label.mousePressEvent = lambda e, fid=folder_id, fname=folder_name: self.navigate_to_folder(fid, fname)

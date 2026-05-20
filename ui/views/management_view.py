@@ -16,8 +16,83 @@ from ui.workers import (
     RenameClazzWorker, ParseStudentExcelWorker, AddStudentsBatchWorker,
     GetWeightWorker, WeightWorker, DeleteClazzWorker
 )
-from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE, MAIN_STYLE
-from ui.theme import bind_theme_tree
+from ui.styles import MAIN_STYLE
+from ui.theme import apply_theme_stylesheet, bind_theme_tree
+
+
+def _management_stat_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border};
+            padding: 25px;
+            border-radius: 12px;
+            font-size: 18px;
+            font-weight: bold;
+            min-width: 180px;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.hover_bg};
+            border: 1px solid {palette.accent};
+            color: {palette.accent};
+        }}
+        QPushButton:disabled {{
+            color: {palette.disabled_text};
+            background-color: {palette.disabled_bg};
+        }}
+    """
+
+
+def _management_container_style(palette) -> str:
+    return f"""
+        QFrame {{
+            background-color: {palette.card_bg};
+            border: 1px solid {palette.border};
+            border-radius: 12px;
+        }}
+    """
+
+
+def _management_status_label_style(palette, color: str) -> str:
+    return f"color: {color}; padding: 20px; font-size: 14px;"
+
+
+def _management_class_card_style(palette, is_current: bool) -> str:
+    border = palette.accent if is_current else palette.border
+    return f"""
+        QFrame#stats_card {{
+            background-color: {palette.panel_alt_bg};
+            border: 1px solid {border};
+            border-radius: 10px;
+            padding: 10px;
+        }}
+        QFrame#stats_card:hover {{
+            border: 1px solid {palette.accent};
+            background-color: {palette.hover_bg};
+        }}
+    """
+
+
+def _management_outline_button_style(palette, accent: str | None = None, hover_bg: str | None = None) -> str:
+    accent = accent or palette.accent
+    hover_bg = hover_bg or accent
+    return f"""
+        QPushButton {{
+            background-color: transparent;
+            color: {accent};
+            border: 1px solid {accent};
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: normal;
+            min-width: 60px;
+        }}
+        QPushButton:hover {{
+            background-color: {hover_bg};
+            color: #ffffff;
+        }}
+    """
 
 class ImportCourseListWorker(QThread):
     finished = pyqtSignal(object, str)
@@ -106,7 +181,7 @@ class ManagementView(QWidget):
         ]
         
         for btn in self.buttons:
-            btn.setStyleSheet(STAT_BUTTON_STYLE)
+            apply_theme_stylesheet(btn, _management_stat_button_style)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
         self.layout.addWidget(self.btn_class_management, 0, 0)
@@ -116,7 +191,7 @@ class ManagementView(QWidget):
         
         # Result area
         self.management_scroll = QFrame()
-        self.management_scroll.setStyleSheet(STAT_CARD_CONTAINER_STYLE)
+        apply_theme_stylesheet(self.management_scroll, _management_container_style)
         self.management_scroll_layout = QVBoxLayout(self.management_scroll)
         self.management_scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.management_scroll_layout.setSpacing(10)
@@ -157,7 +232,7 @@ class ManagementView(QWidget):
         self.clear_management_list()
         
         loading_label = QLabel("正在同步班级管理列表，请稍候...")
-        loading_label.setStyleSheet("color: #007acc; padding: 20px; font-size: 14px;")
+        apply_theme_stylesheet(loading_label, lambda palette: _management_status_label_style(palette, palette.accent))
         self.management_scroll_layout.addWidget(loading_label)
         
         params = self.crawler.session_manager.course_params
@@ -188,30 +263,33 @@ class ManagementView(QWidget):
         
         if not class_list:
             error_label = QLabel("未找到班级数据或同步失败。")
-            error_label.setStyleSheet("color: #ff4d4d; padding: 20px;")
+            apply_theme_stylesheet(error_label, lambda palette: _management_status_label_style(palette, palette.danger))
             self.management_scroll_layout.addWidget(error_label)
             return
         
         for item in class_list:
+            current_clazz_id = self.crawler.session_manager.course_params.get('clazzid')
+            is_current = str(item['id']) == str(current_clazz_id)
             card = QFrame()
 
             card.setObjectName("stats_card") 
-            card.setStyleSheet(STAT_CARD_STYLE)
+            apply_theme_stylesheet(card, lambda palette, current=is_current: _management_class_card_style(palette, current))
             layout = QHBoxLayout(card)
-            
-            # Highlight current class if id matches
-            current_clazz_id = self.crawler.session_manager.course_params.get('clazzid')
-            is_current = str(item['id']) == str(current_clazz_id)
             
             name_text = f"🏢 {item['name']}"
             if is_current:
                 name_text += " (当前)"
                 
             name_label = QLabel(name_text)
-            name_label.setStyleSheet(f"color: {'#00bfff' if is_current else '#ffffff'}; font-size: 15px; font-weight: bold;")
+            apply_theme_stylesheet(
+                name_label,
+                lambda palette, current=is_current: (
+                    f"color: {palette.accent_soft if current else palette.text}; font-size: 15px; font-weight: bold;"
+                ),
+            )
             
             id_label = QLabel(f"ID: {item['id']}")
-            id_label.setStyleSheet("color: #888888; font-size: 12px;")
+            apply_theme_stylesheet(id_label, lambda palette: f"color: {palette.text_muted}; font-size: 12px;")
             
             layout.addWidget(name_label)
             layout.addStretch()
@@ -227,28 +305,17 @@ class ManagementView(QWidget):
             btn_rename.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
             
-            common_btn_style = """
-                QPushButton {
-                    background-color: transparent;
-                    color: #007acc;
-                    border: 1px solid #007acc;
-                    padding: 4px 8px;
-                    border-radius: 4px;
-                    font-size: 13px;
-                    font-weight: normal;
-                    min-width: 60px;
-                }
-                QPushButton:hover {
-                    background-color: #007acc;
-                    color: white;
-                }
-            """
-            delete_btn_style = common_btn_style.replace("#007acc", "#888888")
-            
-            btn_add_student.setStyleSheet(common_btn_style)
-            btn_distribute.setStyleSheet(common_btn_style)
-            btn_rename.setStyleSheet(common_btn_style)
-            btn_delete.setStyleSheet(delete_btn_style)
+            apply_theme_stylesheet(btn_add_student, _management_outline_button_style)
+            apply_theme_stylesheet(btn_distribute, _management_outline_button_style)
+            apply_theme_stylesheet(btn_rename, _management_outline_button_style)
+            apply_theme_stylesheet(
+                btn_delete,
+                lambda palette: _management_outline_button_style(
+                    palette,
+                    palette.text_muted,
+                    palette.border_strong,
+                ),
+            )
             
             layout.addWidget(btn_add_student)
             layout.addWidget(btn_distribute)
@@ -830,40 +897,25 @@ class ManagementView(QWidget):
         self._render_manage_teachers_view()
 
     def _update_nav_btn_styles(self):
-        # 简单样式切换
-        base_style = """
-            QPushButton {
-                background-color: #2d2d30;
-                color: #cccccc;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #3e3e42;
-            }
-        """
-        checked_style = """
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: 1px solid #007acc;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-        """
-        
-        self.btn_manage_teachers.setStyleSheet(checked_style if self.btn_manage_teachers.isChecked() else base_style)
-        self.btn_add_teacher.setStyleSheet(checked_style if self.btn_add_teacher.isChecked() else base_style)
-
         # 互斥选中
         if self.sender() == self.btn_manage_teachers:
             self.btn_add_teacher.setChecked(False)
         elif self.sender() == self.btn_add_teacher:
             self.btn_manage_teachers.setChecked(False)
+
+        def _nav_style(palette, checked: bool) -> str:
+            if checked:
+                return (
+                    f"background-color: {palette.accent}; color: #ffffff; border: 1px solid {palette.accent}; "
+                    "border-radius: 4px; padding: 8px 16px; font-size: 14px; font-weight: bold;"
+                )
+            return (
+                f"background-color: {palette.panel_alt_bg}; color: {palette.text_secondary}; border: 1px solid {palette.border_strong}; "
+                "border-radius: 4px; padding: 8px 16px; font-size: 14px;"
+            )
+
+        apply_theme_stylesheet(self.btn_manage_teachers, lambda palette: _nav_style(palette, self.btn_manage_teachers.isChecked()))
+        apply_theme_stylesheet(self.btn_add_teacher, lambda palette: _nav_style(palette, self.btn_add_teacher.isChecked()))
 
     def _render_manage_teachers_view(self):
         # 清空内容区域
@@ -891,7 +943,7 @@ class ManagementView(QWidget):
         self.manage_teachers_table.setAlternatingRowColors(True)
         self.manage_teachers_table.verticalHeader().setVisible(False)
         self.manage_teachers_table.horizontalHeader().setVisible(True)
-        self.manage_teachers_table.setStyleSheet(self._get_table_style())
+        apply_theme_stylesheet(self.manage_teachers_table, self._get_table_style)
         
         layout.addWidget(self.manage_teachers_table)
         self.teacher_content_layout.addWidget(container)
@@ -904,36 +956,42 @@ class ManagementView(QWidget):
         self.btn_remove_teacher = QPushButton("移除教师")
         self.btn_remove_teacher.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_remove_teacher.setEnabled(False)
-        self.btn_remove_teacher.setStyleSheet("""
-            QPushButton {
-                background-color: #d9534f;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 20px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #c9302c; }
-            QPushButton:disabled { background-color: #3e3e42; color: #888888; }
-        """)
+        apply_theme_stylesheet(
+            self.btn_remove_teacher,
+            lambda palette: f"""
+                QPushButton {{
+                    background-color: {palette.danger};
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 10px 20px;
+                    font-size: 14px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{ background-color: {palette.warning}; }}
+                QPushButton:disabled {{ background-color: {palette.disabled_bg}; color: {palette.disabled_text}; }}
+            """,
+        )
         
         self.btn_transfer_course = QPushButton("转让课程")
         self.btn_transfer_course.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_transfer_course.setEnabled(False)
-        self.btn_transfer_course.setStyleSheet("""
-            QPushButton {
-                background-color: #f0ad4e;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 20px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #ec971f; }
-            QPushButton:disabled { background-color: #3e3e42; color: #888888; }
-        """)
+        apply_theme_stylesheet(
+            self.btn_transfer_course,
+            lambda palette: f"""
+                QPushButton {{
+                    background-color: {palette.warning};
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 10px 20px;
+                    font-size: 14px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{ background-color: {palette.danger}; }}
+                QPushButton:disabled {{ background-color: {palette.disabled_bg}; color: {palette.disabled_text}; }}
+            """,
+        )
 
         action_layout.addStretch()
         action_layout.addWidget(self.btn_remove_teacher)
@@ -1027,7 +1085,7 @@ class ManagementView(QWidget):
         self.teachers_table.setAlternatingRowColors(True)
         self.teachers_table.verticalHeader().setVisible(False)
         self.teachers_table.horizontalHeader().setVisible(True)
-        self.teachers_table.setStyleSheet(self._get_table_style())
+        apply_theme_stylesheet(self.teachers_table, self._get_table_style)
 
         layout.addWidget(self.teachers_table)
 
@@ -1068,36 +1126,37 @@ class ManagementView(QWidget):
             if widget:
                 widget.deleteLater()
 
-    def _get_table_style(self):
-        return """
-            QTableWidget {
+    def _get_table_style(self, palette):
+        return f"""
+            QTableWidget {{
                 background-color: transparent;
                 border: none;
-                gridline-color: #3e3e42;
+                gridline-color: {palette.border_strong};
                 font-size: 14px;
-            }
-            QTableWidget::item {
+                color: {palette.text_secondary};
+            }}
+            QTableWidget::item {{
                 padding: 10px;
-                border-bottom: 1px solid #3e3e42;
-            }
-            QTableWidget::item:selected {
-                background-color: #202531;
-                color: white;
-                border: 1px solid #007acc;
-            }
-            QHeaderView {
+                border-bottom: 1px solid {palette.border_strong};
+            }}
+            QTableWidget::item:selected {{
+                background-color: {palette.hover_bg};
+                color: {palette.text};
+                border: 1px solid {palette.accent};
+            }}
+            QHeaderView {{
                 background-color: transparent;
                 border: none;
-            }
-            QHeaderView::section {
-                background-color: #252526;
+            }}
+            QHeaderView::section {{
+                background-color: {palette.panel_alt_bg};
                 padding: 8px;
                 border: none;
-                border-bottom: 2px solid #007acc;
+                border-bottom: 2px solid {palette.accent};
                 font-weight: bold;
-                color: #cccccc;
+                color: {palette.text_secondary};
                 min-height: 35px;
-            }
+            }}
         """
 
     def _on_manage_teachers_loaded(self, success, message, teachers):
