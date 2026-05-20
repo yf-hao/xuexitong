@@ -17,7 +17,7 @@ from ui.workers import (
     GetWeightWorker, WeightWorker, DeleteClazzWorker
 )
 from ui.styles import MAIN_STYLE
-from ui.theme import apply_theme_stylesheet, bind_theme_tree
+from ui.theme import apply_theme_stylesheet, bind_theme_tree, refresh_theme_styles
 
 
 def _management_stat_button_style(palette) -> str:
@@ -93,6 +93,10 @@ def _management_outline_button_style(palette, accent: str | None = None, hover_b
             color: #ffffff;
         }}
     """
+
+
+def _management_scroll_area_style(palette) -> str:
+    return "border: none; background: transparent;"
 
 
 def _management_dialog_style(palette) -> str:
@@ -185,6 +189,14 @@ def _management_cover_style(palette) -> str:
     return f"background-color: {palette.disabled_bg}; border-radius: 8px;"
 
 
+def _management_cover_status_style(palette, status: str = "ready") -> str:
+    if status == "loading":
+        return f"color: {palette.warning}; font-size: 13px; padding: 40px;"
+    if status == "error":
+        return f"color: {palette.danger}; font-size: 13px; padding: 40px;"
+    return _management_cover_style(palette)
+
+
 def _management_list_widget_style(palette) -> str:
     return f"""
         QListWidget {{
@@ -199,6 +211,104 @@ def _management_list_widget_style(palette) -> str:
             background: transparent;
         }}
     """
+
+
+def _management_teacher_card_style(palette, selected: bool = False) -> str:
+    border = palette.accent if selected else palette.border
+    background = palette.hover_bg if selected else palette.panel_alt_bg
+    return f"""
+        QFrame {{
+            background-color: {background};
+            border: 1px solid {border};
+            border-radius: 10px;
+            padding: 10px;
+        }}
+        QFrame:hover {{
+            border: 1px solid {palette.accent};
+            background-color: {palette.hover_bg};
+        }}
+    """
+
+
+def _management_checkbox_style(palette, accent: str | None = None, text_color: str | None = None) -> str:
+    accent = accent or palette.accent
+    text_color = text_color or palette.text_secondary
+    return f"""
+        QCheckBox {{
+            color: {text_color};
+            font-size: 13px;
+        }}
+        QCheckBox::indicator {{
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+        }}
+        QCheckBox::indicator:unchecked {{
+            border: 2px solid {palette.border_strong};
+            background-color: {palette.panel_bg};
+        }}
+        QCheckBox::indicator:checked {{
+            border: 2px solid {accent};
+            background-color: {accent};
+        }}
+    """
+
+
+def _management_weight_spin_style(palette) -> str:
+    return f"""
+        QSpinBox {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border};
+            padding: 2px 5px;
+            border-radius: 3px;
+        }}
+        QSpinBox:hover {{
+            border: 1px solid {palette.border_strong};
+        }}
+        QSpinBox:focus {{
+            background-color: {palette.panel_alt_bg};
+            border: 1px solid {palette.accent};
+        }}
+    """
+
+
+def _management_total_label_style(palette, is_valid: bool) -> str:
+    color = palette.success if is_valid else palette.danger
+    return f"font-size: 16px; font-weight: bold; color: {color};"
+
+
+def _management_action_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: none;
+            border-radius: 10px;
+            padding: 12px 14px;
+            font-size: 15px;
+            font-weight: bold;
+            min-height: 80px;
+            text-align: center;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.hover_bg};
+        }}
+        QPushButton:pressed {{
+            background-color: {palette.disabled_bg};
+        }}
+        QPushButton:disabled {{
+            color: {palette.disabled_text};
+        }}
+    """
+
+
+def _management_action_title_style(palette) -> str:
+    return f"font-size: 17px; font-weight: bold; color: {palette.text}; margin-bottom: 8px;"
+
+
+def _management_action_subtitle_style(palette) -> str:
+    return f"font-size: 14px; font-weight: normal; color: {palette.text_muted}; line-height: 1.2;"
 
 class ImportCourseListWorker(QThread):
     finished = pyqtSignal(object, str)
@@ -305,7 +415,7 @@ class ManagementView(QWidget):
         self.management_scroll_area = QScrollArea()
         self.management_scroll_area.setWidgetResizable(True)
         self.management_scroll_area.setWidget(self.management_scroll)
-        self.management_scroll_area.setStyleSheet("border: none; background: transparent;")
+        apply_theme_stylesheet(self.management_scroll_area, _management_scroll_area_style)
         
         self.layout.addWidget(self.management_scroll_area, 1, 0, 1, 4)
         
@@ -586,21 +696,7 @@ class ManagementView(QWidget):
         top_bar.addStretch()
         btn_new_class = QPushButton("➕ 新建班级")
         btn_new_class.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_new_class.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #007acc;
-                border: 1px solid #007acc;
-                padding: 6px 10px;
-                border-radius: 4px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #007acc;
-                color: white;
-            }
-        """)
+        apply_theme_stylesheet(btn_new_class, _management_outline_button_style)
         btn_new_class.clicked.connect(self._handle_new_class)
         top_bar.addWidget(btn_new_class)
         self.management_scroll_layout.addWidget(bar)
@@ -622,23 +718,19 @@ class ManagementView(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"分配班级 - {name}")
         dialog.setMinimumSize(600, 400)
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #121212;
-            }
-        """)
+        apply_theme_stylesheet(dialog, _management_dialog_style)
         
         layout = QVBoxLayout(dialog)
         
         # 标题
         title_label = QLabel(f"请选择要分配班级 '{name}' 的教师：")
-        title_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #cccccc; padding: 10px;")
+        apply_theme_stylesheet(title_label, lambda palette: f"font-size: 14px; font-weight: bold; color: {palette.text_secondary}; padding: 10px;")
         layout.addWidget(title_label)
         
         # 教师列表
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet("border: none; background-color: transparent;")
+        apply_theme_stylesheet(scroll_area, _management_scroll_area_style)
         
         teachers_container = QWidget()
         teachers_layout = QVBoxLayout(teachers_container)
@@ -650,19 +742,7 @@ class ManagementView(QWidget):
         for teacher in teachers:
             # 创建教师卡片
             card = QFrame()
-            card.setObjectName("teacher_card")
-            card.setStyleSheet("""
-                QFrame#teacher_card {
-                    background-color: #252526;
-                    border: 1px solid #333333;
-                    border-radius: 10px;
-                    padding: 10px;
-                }
-                QFrame#teacher_card:hover {
-                    border: 1px solid #007acc;
-                    background-color: #2a2d2e;
-                }
-            """)
+            apply_theme_stylesheet(card, lambda palette: _management_teacher_card_style(palette, False))
             
             card_layout = QHBoxLayout(card)
             card_layout.setContentsMargins(0, 0, 0, 0)
@@ -671,26 +751,7 @@ class ManagementView(QWidget):
             # 复选框
             checkbox = QCheckBox()
             checkbox.setChecked(teacher.get("selected", False))
-            checkbox.setStyleSheet("""
-                QCheckBox {
-                    color: #cccccc;
-                    font-size: 13px;
-                }
-                QCheckBox::indicator {
-                    width: 20px;
-                    height: 20px;
-                }
-                QCheckBox::indicator:unchecked {
-                    border: 2px solid #3e3e42;
-                    background-color: #1e1e1e;
-                    border-radius: 4px;
-                }
-                QCheckBox::indicator:checked {
-                    border: 2px solid #007acc;
-                    background-color: #007acc;
-                    border-radius: 4px;
-                }
-            """)
+            apply_theme_stylesheet(checkbox, _management_checkbox_style)
             self.teacher_checkboxes[teacher["id"]] = checkbox
             
             # 教师信息
@@ -699,10 +760,10 @@ class ManagementView(QWidget):
             info_layout.setContentsMargins(0, 0, 0, 0)
             
             name_label = QLabel(teacher['name'])
-            name_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #ffffff;")
+            apply_theme_stylesheet(name_label, lambda palette: f"font-size: 15px; font-weight: bold; color: {palette.text};")
             
             details_label = QLabel(f"工号: {teacher['workId']}  角色: {teacher['role']}  机构: {teacher.get('organization', '')}")
-            details_label.setStyleSheet("font-size: 13px; color: #888888;")
+            apply_theme_stylesheet(details_label, lambda palette: f"font-size: 13px; color: {palette.text_muted};")
             
             info_layout.addWidget(name_label)
             info_layout.addWidget(details_label)
@@ -726,37 +787,11 @@ class ManagementView(QWidget):
         # 确定和取消按钮
         cancel_btn = QPushButton("取消")
         cancel_btn.setFixedWidth(80)
-        cancel_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #cccccc;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 12px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #4a4a5a;
-                color: white;
-            }
-        """)
+        apply_theme_stylesheet(cancel_btn, _management_secondary_button_style)
         
         confirm_btn = QPushButton("确定")
         confirm_btn.setFixedWidth(80)
-        confirm_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 12px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #005c99;
-            }
-        """)
+        apply_theme_stylesheet(confirm_btn, _management_primary_button_style)
         
         button_layout.addWidget(cancel_btn)
         button_layout.addWidget(confirm_btn)
@@ -767,6 +802,7 @@ class ManagementView(QWidget):
         confirm_btn.clicked.connect(lambda: self._confirm_assign_teachers(dialog, clazz_id, name, course_id))
         
         # 显示对话框
+        bind_theme_tree(dialog)
         dialog_result = dialog.exec()
         
     
@@ -807,7 +843,7 @@ class ManagementView(QWidget):
         self.clear_management_list()
         
         loading_label = QLabel("正在从学习通同步权重数据，请稍候...")
-        loading_label.setStyleSheet("color: #007acc; padding: 20px; font-size: 14px;")
+        apply_theme_stylesheet(loading_label, lambda palette: _management_status_label_style(palette, palette.accent))
         self.management_scroll_layout.addWidget(loading_label)
         
         worker = GetWeightWorker(self.crawler)
@@ -823,7 +859,7 @@ class ManagementView(QWidget):
         self.grade_spinboxes = {}
         
         container = QFrame()
-        container.setStyleSheet("background-color: #252526; border-radius: 8px; padding: 10px;")
+        apply_theme_stylesheet(container, _management_form_panel_style)
         layout = QVBoxLayout(container)
         layout.setSpacing(10)
         
@@ -850,24 +886,14 @@ class ManagementView(QWidget):
             item_hbox.setSpacing(10)
             
             label = QLabel(name)
-            label.setStyleSheet("color: #cccccc; font-size: 13px;")
+            apply_theme_stylesheet(label, lambda palette: f"color: {palette.text_secondary}; font-size: 13px;")
             
             spin = QSpinBox()
             spin.setRange(0, 100)
             spin.setValue(current_val)
             spin.setSuffix("%")
             spin.setFixedWidth(70)
-            spin.setStyleSheet("""
-                QSpinBox {
-                    background-color: #3e3e42;
-                    color: white;
-                    border: 1px solid #333333;
-                    padding: 2px 5px;
-                    border-radius: 3px;
-                }
-                QSpinBox:hover { border: 1px solid #444444; }
-                QSpinBox:focus { background-color: #45454a; border: 1px solid #007acc; }
-            """)
+            apply_theme_stylesheet(spin, _management_weight_spin_style)
             spin.valueChanged.connect(self.update_total_weight)
             self.grade_spinboxes[name] = spin
             
@@ -884,24 +910,23 @@ class ManagementView(QWidget):
         bottom_layout.setContentsMargins(5, 5, 5, 5)
         
         self.total_label = QLabel("总计: 0%")
-        self.total_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #ff4d4d;")
+        self.total_label.setProperty("_weight_total_valid", False)
+        apply_theme_stylesheet(
+            self.total_label,
+            lambda palette, label=self.total_label: _management_total_label_style(
+                palette, bool(label.property("_weight_total_valid"))
+            ),
+        )
         
         self.sync_all_classes_cb = QCheckBox("同步至当前课程所有班级")
-        self.sync_all_classes_cb.setStyleSheet("color: #007acc; font-size: 12px; margin-right: 15px;")
+        apply_theme_stylesheet(
+            self.sync_all_classes_cb,
+            lambda palette: _management_checkbox_style(palette, palette.accent, palette.accent),
+        )
         
         self.save_weight_btn = QPushButton("保存权重")
         self.save_weight_btn.setFixedWidth(100)
-        self.save_weight_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                padding: 6px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:disabled { background-color: #3e3e42; color: #888888; }
-        """)
+        apply_theme_stylesheet(self.save_weight_btn, _management_primary_button_style)
         self.save_weight_btn.clicked.connect(self.save_grade_weights)
         
         bottom_layout.addWidget(self.total_label)
@@ -917,13 +942,9 @@ class ManagementView(QWidget):
     def update_total_weight(self):
         total = sum(spin.value() for spin in self.grade_spinboxes.values())
         self.total_label.setText(f"当前总计: {total} %")
-        
-        if total == 100:
-            self.total_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #4ec9b0;") # Green
-            self.save_weight_btn.setEnabled(True)
-        else:
-            self.total_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #ff4d4d;") # Red
-            self.save_weight_btn.setEnabled(False)
+        self.total_label.setProperty("_weight_total_valid", total == 100)
+        refresh_theme_styles(self.total_label)
+        self.save_weight_btn.setEnabled(total == 100)
 
     def save_grade_weights(self):
         weights = {name: spin.value() for name, spin in self.grade_spinboxes.items()}
@@ -1147,33 +1168,11 @@ class ManagementView(QWidget):
         
         search_input = QLineEdit()
         search_input.setPlaceholderText("请输入教师姓名或工号")
-        search_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #252526;
-                color: #ffffff;
-                border: 1px solid #3a3f44;
-                border-radius: 6px;
-                padding: 8px 12px;
-                font-size: 14px;
-                min-width: 200px;
-            }
-            QLineEdit:focus { border: 1px solid #007acc; }
-        """)
+        apply_theme_stylesheet(search_input, lambda palette: _management_input_style(palette) + " QLineEdit { min-width: 200px; }")
         
         search_btn = QPushButton("搜索")
         search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        search_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 20px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #005c99; }
-        """)
+        apply_theme_stylesheet(search_btn, _management_primary_button_style)
         
         search_layout.addWidget(search_input)
         search_layout.addWidget(search_btn)
@@ -1199,19 +1198,7 @@ class ManagementView(QWidget):
         self.btn_confirm_add = QPushButton("添加选中教师")
         self.btn_confirm_add.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_confirm_add.setEnabled(False)
-        self.btn_confirm_add.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #005c99; }
-            QPushButton:disabled { background-color: #3e3e42; color: #888888; }
-        """)
+        apply_theme_stylesheet(self.btn_confirm_add, _management_primary_button_style)
         self.btn_confirm_add.clicked.connect(self._add_selected_teacher)
         layout.addWidget(self.btn_confirm_add)
 
@@ -1475,24 +1462,7 @@ class ManagementView(QWidget):
         btn_new_course.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_new_course.setFixedWidth(110)
         btn_new_course.setFixedHeight(34)
-        btn_new_course.setStyleSheet(
-            """
-            QPushButton {
-                background-color: transparent;
-                color: #007acc;
-                border: 1px solid #007acc;
-                padding: 6px 10px;
-                border-radius: 4px;
-                font-size: 13px;
-                font-weight: bold;
-                min-width: 110px;
-            }
-            QPushButton:hover {
-                background-color: #007acc;
-                color: white;
-            }
-            """
-        )
+        apply_theme_stylesheet(btn_new_course, _management_outline_button_style)
         btn_new_course.clicked.connect(self._open_new_course_dialog)
         top_bar.addWidget(btn_new_course)
 
@@ -1500,31 +1470,14 @@ class ManagementView(QWidget):
         btn_clone_course.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_clone_course.setFixedWidth(110)
         btn_clone_course.setFixedHeight(34)
-        btn_clone_course.setStyleSheet(
-            """
-            QPushButton {
-                background-color: transparent;
-                color: #007acc;
-                border: 1px solid #007acc;
-                padding: 6px 10px;
-                border-radius: 4px;
-                font-size: 13px;
-                font-weight: bold;
-                min-width: 110px;
-            }
-            QPushButton:hover {
-                background-color: #007acc;
-                color: white;
-            }
-            """
-        )
+        apply_theme_stylesheet(btn_clone_course, _management_outline_button_style)
         btn_clone_course.clicked.connect(self._handle_clone_course)
         top_bar.addWidget(btn_clone_course)
         self.management_scroll_layout.addLayout(top_bar)
 
         # 2. 课程信息区（卡片式）
         container = QFrame()
-        container.setStyleSheet("background-color: #1e1f22; border-radius: 10px; padding: 16px;")
+        apply_theme_stylesheet(container, _management_form_panel_style)
         layout = QVBoxLayout(container)
         layout.setSpacing(16)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -1661,7 +1614,13 @@ class ManagementView(QWidget):
         # 封面图片标签
         cover_label = QLabel()
         cover_label.setFixedSize(320, 180)  # 16:9 比例
-        apply_theme_stylesheet(cover_label, _management_cover_style)
+        cover_label.setProperty("_cover_status", "ready")
+        apply_theme_stylesheet(
+            cover_label,
+            lambda palette, label=cover_label: _management_cover_status_style(
+                palette, str(label.property("_cover_status") or "ready")
+            ),
+        )
         cover_label.setScaledContents(False)
         cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -2405,7 +2364,8 @@ class ManagementView(QWidget):
 
             # 4. 在封面区域显示加载信息
             cover_label.setText("✨ AI正在生成封面\n请稍候，这可能需要几秒钟...")
-            cover_label.setStyleSheet("color: #ff9f43; font-size: 13px; padding: 40px;")
+            cover_label.setProperty("_cover_status", "loading")
+            refresh_theme_styles(cover_label)
 
             # 5. 强制刷新UI
             QApplication.processEvents()
@@ -2422,7 +2382,8 @@ class ManagementView(QWidget):
                     # 加载生成的图片
                     self._load_cover_image(cover_label, image_url)
                     # 恢复封面标签的样式
-                    cover_label.setStyleSheet("background-color: #2a2d31; border-radius: 6px;")
+                    cover_label.setProperty("_cover_status", "ready")
+                    refresh_theme_styles(cover_label)
                     # 保存URL到label属性中，供后续使用
                     cover_label._last_url = image_url
                     self.status_callback("AI封面生成成功")
@@ -2435,12 +2396,14 @@ class ManagementView(QWidget):
                             QMessageBox.warning(dialog, "提示", f"AI生成成功但更新课程失败: {msg}")
                 else:
                     cover_label.setText("生成失败")
-                    cover_label.setStyleSheet("")
+                    cover_label.setProperty("_cover_status", "error")
+                    refresh_theme_styles(cover_label)
                     QMessageBox.warning(dialog, "失败", "AI生成成功但未获取到图片URL")
             else:
                 error_msg = result.get("error", "生成失败")
                 cover_label.setText("生成失败\n请重试")
-                cover_label.setStyleSheet("color: #ff4d4d;")
+                cover_label.setProperty("_cover_status", "error")
+                refresh_theme_styles(cover_label)
                 QMessageBox.warning(dialog, "失败", f"AI生成失败: {error_msg}")
                 self.status_callback(f"AI生成失败: {error_msg}")
 
@@ -2455,7 +2418,7 @@ class ManagementView(QWidget):
     def _create_course_form_widget(self, data: dict, parent=None, readonly: bool = False, title: str = "课程信息"):
         """卡片式按钮区：导入课程、基本信息、结课、删除。"""
         frame = QFrame(parent)
-        frame.setStyleSheet("background-color: transparent; border: none;")
+        apply_theme_stylesheet(frame, lambda palette: "background-color: transparent; border: none;")
 
         outer_layout = QVBoxLayout(frame)
         outer_layout.setSpacing(14)
@@ -2463,7 +2426,7 @@ class ManagementView(QWidget):
         outer_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         header = QLabel(title)
-        header.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: bold;")
+        apply_theme_stylesheet(header, lambda palette: f"color: {palette.text}; font-size: 18px; font-weight: bold;")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         outer_layout.addWidget(header)
 
@@ -2471,23 +2434,6 @@ class ManagementView(QWidget):
         btn_row_layout.setSpacing(14)
         btn_row_layout.setContentsMargins(6, 6, 6, 6)
         btn_row_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        btn_style = (
-            " QPushButton {"
-            "  background-color: #2d2f33;"
-            "  color: #e4e9f0;"
-            "  border: none;"
-            "  border-radius: 10px;"
-            "  padding: 12px 14px;"
-            "  font-size: 15px;"
-            "  font-weight: bold;"
-            "  min-height: 80px;"
-            "  text-align: center;"
-            " }"
-            " QPushButton:hover { background-color: #3a3f44; }"
-            " QPushButton:pressed { background-color: #2a2d31; }"
-            " QPushButton:disabled { color: #555555; }"
-        )
 
         buttons = [
             ("📥 导入课程", "导入已有课程资源(不含章节)", self._handle_import_course),
@@ -2500,23 +2446,26 @@ class ManagementView(QWidget):
             btn = QPushButton()
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            btn.setStyleSheet(btn_style)
+            apply_theme_stylesheet(btn, _management_action_button_style)
 
             # 使用布局和标签实现富文本（主标题大字体，副标题小字体）
             btn_layout = QVBoxLayout(btn)
             btn_layout.setContentsMargins(0, 0, 0, 0)
             btn_layout.setSpacing(2)
 
-            # 这里的 HTML 样式可以让主标题大一点，副标题保持较小且颜色淡一些
-            content_label = QLabel(
-                f'<div style="text-align: center; margin: 0;">'
-                f'  <div style="font-size: 17px; font-weight: bold; color: #ffffff; margin-bottom: 8px;">{title_text}</div>'
-                f'  <div style="font-size: 14px; font-weight: normal; color: #a0a7b5; line-height: 1.2;">{subtitle}</div>'
-                f'</div>'
-            )
-            content_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            content_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            btn_layout.addWidget(content_label)
+            title_label = QLabel(title_text)
+            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            apply_theme_stylesheet(title_label, _management_action_title_style)
+
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            subtitle_label.setWordWrap(True)
+            subtitle_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            apply_theme_stylesheet(subtitle_label, _management_action_subtitle_style)
+
+            btn_layout.addWidget(title_label)
+            btn_layout.addWidget(subtitle_label)
 
             if handler:
                 btn.clicked.connect(handler)
@@ -2604,15 +2553,8 @@ class ManagementView(QWidget):
             apply_theme_stylesheet(list_widget, _management_list_widget_style)
 
             def set_card_selected(card: QFrame, selected: bool):
-                if selected:
-                    card.setStyleSheet(
-                        "QFrame { background-color: #202531; border: 2px solid #007acc; border-radius: 10px; }"
-                    )
-                else:
-                    card.setStyleSheet(
-                        "QFrame { background-color: #1f1f24; border: 1px solid #2f2f36; border-radius: 10px; }"
-                        "QFrame:hover { border: 1px solid #3a3f44; }"
-                    )
+                card.setProperty("_selected", selected)
+                refresh_theme_styles(card)
 
             total = len(items)
             for idx, item in enumerate(items):
@@ -2624,6 +2566,13 @@ class ManagementView(QWidget):
                 list_item.setData(Qt.ItemDataRole.UserRole, item)
 
                 card = QFrame()
+                card.setProperty("_selected", False)
+                apply_theme_stylesheet(
+                    card,
+                    lambda palette, current_card=card: _management_teacher_card_style(
+                        palette, bool(current_card.property("_selected"))
+                    ),
+                )
                 set_card_selected(card, False)
                 card_layout = QHBoxLayout(card)
                 card_layout.setContentsMargins(12, 10, 12, 10)
@@ -2940,45 +2889,30 @@ class ManagementView(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("选择克隆方式")
         dialog.setFixedWidth(400)
-        dialog.setStyleSheet("background-color: #1e1f22; color: #ffffff;")
+        apply_theme_stylesheet(dialog, _management_dialog_style)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(15)
         layout.setContentsMargins(30, 30, 30, 30)
         
         label = QLabel("校验通过！请选择克隆目标：")
-        label.setStyleSheet("font-size: 15px; font-weight: bold; margin-bottom: 5px;")
+        apply_theme_stylesheet(label, lambda palette: f"font-size: 15px; font-weight: bold; color: {palette.text}; margin-bottom: 5px;")
         layout.addWidget(label)
-        
-        btn_style = """
-            QPushButton {
-                background-color: transparent;
-                color: #007acc;
-                border: 1px solid #007acc;
-                padding: 10px;
-                border-radius: 6px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #007acc;
-                color: white;
-            }
-        """
         
         btn_self = QPushButton("📁 克隆给自己")
         btn_self.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_self.setStyleSheet(btn_style)
+        apply_theme_stylesheet(btn_self, _management_outline_button_style)
         btn_self.setFixedHeight(46)
         btn_self.clicked.connect(lambda: [dialog.done(1), self._perform_clone(tokens, "self")])
         layout.addWidget(btn_self)
         
         btn_others = QPushButton("👥 克隆给他人")
         btn_others.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_others.setStyleSheet(btn_style)
+        apply_theme_stylesheet(btn_others, _management_outline_button_style)
         btn_others.setFixedHeight(46)
         btn_others.clicked.connect(lambda: self._handle_clone_to_others(dialog, tokens))
         layout.addWidget(btn_others)
         
+        bind_theme_tree(dialog)
         dialog.exec()
 
     def _handle_clone_to_others(self, dialog, tokens):

@@ -291,6 +291,40 @@ _FAST_TRANSLATION_HINTS = (
 )
 
 
+_THEME_NEUTRAL_DECLARATION_PREFIXES = (
+    "background: transparent",
+    "background-color: transparent",
+    "border: none",
+    "outline: none",
+    "margin",
+    "padding",
+    "spacing",
+    "min-width",
+    "max-width",
+    "min-height",
+    "max-height",
+    "width",
+    "height",
+    "border-radius",
+    "text-align",
+)
+
+
+def _stylesheet_is_theme_neutral(css: str) -> bool:
+    lowered = re.sub(r"\s+", " ", str(css or "").strip().lower())
+    if not lowered:
+        return True
+
+    declarations = [part.strip() for part in lowered.split(";") if part.strip()]
+    if not declarations:
+        return True
+
+    return all(
+        any(declaration.startswith(prefix) for prefix in _THEME_NEUTRAL_DECLARATION_PREFIXES)
+        for declaration in declarations
+    )
+
+
 @lru_cache(maxsize=len(THEME_MODES))
 def _formatted_replacements(mode: str) -> tuple[tuple[str, str], ...]:
     palette = get_theme_palette(mode)
@@ -308,6 +342,9 @@ def _compiled_replacement_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
 @lru_cache(maxsize=512)
 def _cached_themed_stylesheet(mode: str, css: str) -> str:
     if mode != "light" or not css:
+        return css
+
+    if _stylesheet_is_theme_neutral(css):
         return css
 
     if not any(hint in css for hint in _FAST_TRANSLATION_HINTS):
@@ -412,6 +449,10 @@ def _sync_runtime_stylesheet(widget: QWidget):
     if not isinstance(current_css, str) or not current_css:
         return
 
+    if _stylesheet_is_theme_neutral(current_css):
+        setattr(widget, "_theme_applied_stylesheet", current_css)
+        return
+
     if current_css == getattr(widget, "_theme_applied_stylesheet", None):
         return
 
@@ -482,13 +523,18 @@ def _bind_theme_widget(widget: QWidget, binder: _ThemeChildBinder | None = None)
         widget.installEventFilter(binder)
         setattr(widget, "_theme_binder_ref", binder)
 
-    if isinstance(current_css, str) and current_css:
+    if isinstance(current_css, str) and current_css and not _stylesheet_is_theme_neutral(current_css):
         if binder is not None:
             binder.register_widget(widget)
     elif getattr(widget, "_theme_managed_widget", False) and binder is not None:
         binder.register_widget(widget)
 
-    if isinstance(current_css, str) and current_css and not hasattr(widget, "_theme_base_stylesheet"):
+    if (
+        isinstance(current_css, str)
+        and current_css
+        and not _stylesheet_is_theme_neutral(current_css)
+        and not hasattr(widget, "_theme_base_stylesheet")
+    ):
         setattr(widget, "_theme_base_stylesheet", current_css)
         _set_widget_stylesheet(widget, _resolve_theme_stylesheet(widget, theme_manager().mode))
 

@@ -9,6 +9,122 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from ui.theme import apply_theme_stylesheet, bind_theme_tree
 
 
+def _combo_frame_style(palette) -> str:
+    return f"""
+        MultiSelectCombo {{
+            background-color: {palette.panel_bg};
+            border: 1px solid {palette.border};
+            border-radius: 4px;
+        }}
+        MultiSelectCombo:hover {{
+            border: 1px solid {palette.accent};
+        }}
+    """
+
+
+def _combo_header_style(palette) -> str:
+    return f"""
+        QFrame {{
+            background-color: transparent;
+            border: none;
+        }}
+        QFrame:hover {{
+            background-color: {palette.hover_bg};
+        }}
+    """
+
+
+def _combo_dropdown_style(palette) -> str:
+    return f"""
+        QFrame {{
+            background-color: {palette.panel_alt_bg};
+            border: 1px solid {palette.border};
+            border-radius: 4px;
+        }}
+    """
+
+
+def _combo_action_button_style(palette, accent: bool = True) -> str:
+    color = palette.accent if accent else palette.text_muted
+    hover = palette.accent_hover if accent else palette.text
+    return f"""
+        QPushButton {{
+            background-color: transparent;
+            color: {color};
+            border: none;
+            font-size: 12px;
+        }}
+        QPushButton:hover {{
+            color: {hover};
+            text-decoration: underline;
+        }}
+    """
+
+
+def _combo_scroll_style(palette) -> str:
+    return f"""
+        QScrollArea {{
+            border: none;
+            background-color: transparent;
+        }}
+        QScrollBar:vertical {{
+            background-color: {palette.panel_bg};
+            width: 10px;
+            margin: 0;
+        }}
+        QScrollBar::handle:vertical {{
+            background-color: {palette.border_strong};
+            min-height: 20px;
+            border-radius: 5px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background-color: {palette.text_muted};
+        }}
+        QScrollBar::add-line:vertical,
+        QScrollBar::sub-line:vertical {{
+            height: 0px;
+        }}
+    """
+
+
+def _combo_group_label_style(palette) -> str:
+    return f"color: {palette.accent}; font-size: 13px; font-weight: bold;"
+
+
+def _combo_item_row_style(palette) -> str:
+    return f"""
+        QFrame {{
+            background-color: transparent;
+            border-radius: 3px;
+        }}
+        QFrame:hover {{
+            background-color: {palette.hover_bg};
+        }}
+    """
+
+
+def _combo_check_style(palette) -> str:
+    return f"""
+        QCheckBox {{
+            spacing: 0px;
+        }}
+        QCheckBox::indicator {{
+            width: 12px;
+            height: 12px;
+        }}
+        QCheckBox::indicator:unchecked {{
+            border: 1px solid {palette.text_muted};
+            border-radius: 2px;
+            background-color: transparent;
+        }}
+        QCheckBox::indicator:checked {{
+            border: 1px solid {palette.accent};
+            border-radius: 2px;
+            background-color: {palette.accent};
+        }}
+    """
+
+
 class MultiSelectCombo(QFrame):
     """多选下拉框组件"""
     
@@ -25,16 +141,7 @@ class MultiSelectCombo(QFrame):
     def setup_ui(self):
         """设置界面"""
         self.setFixedHeight(35)
-        self.setStyleSheet("""
-            MultiSelectCombo {
-                background-color: #1e1e1e;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-            }
-            MultiSelectCombo:hover {
-                border: 1px solid #007acc;
-            }
-        """)
+        apply_theme_stylesheet(self, _combo_frame_style)
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -43,26 +150,18 @@ class MultiSelectCombo(QFrame):
         # 头部显示区域（点击展开下拉）
         self.header = QFrame()
         self.header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.header.setStyleSheet("""
-            QFrame {
-                background-color: transparent;
-                border: none;
-            }
-            QFrame:hover {
-                background-color: rgba(255, 255, 255, 0.05);
-            }
-        """)
+        apply_theme_stylesheet(self.header, _combo_header_style)
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(10, 8, 10, 8)
         
         self.display_label = QLabel(self.placeholder)
-        self.display_label.setStyleSheet("color: #888888; font-size: 13px;")
+        apply_theme_stylesheet(self.display_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         header_layout.addWidget(self.display_label)
         header_layout.addStretch()
         
         # 下拉箭头
         self.arrow_label = QLabel("▼")
-        self.arrow_label.setStyleSheet("color: #888888; font-size: 10px;")
+        apply_theme_stylesheet(self.arrow_label, lambda palette: f"color: {palette.text_muted}; font-size: 10px;")
         header_layout.addWidget(self.arrow_label)
         
         main_layout.addWidget(self.header)
@@ -70,13 +169,7 @@ class MultiSelectCombo(QFrame):
         # 下拉面板（默认隐藏）
         self.dropdown_panel = QFrame()
         self.dropdown_panel.setWindowFlags(Qt.WindowType.Popup)
-        self.dropdown_panel.setStyleSheet("""
-            QFrame {
-                background-color: #252526;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-            }
-        """)
+        apply_theme_stylesheet(self.dropdown_panel, _combo_dropdown_style)
         
         # 处理下拉面板失去焦点事件
         self.dropdown_panel.installEventFilter(self)
@@ -90,34 +183,12 @@ class MultiSelectCombo(QFrame):
         select_all_layout.setContentsMargins(10, 5, 10, 5)
         
         self.select_all_btn = QPushButton("全选")
-        self.select_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #007acc;
-                border: none;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                color: #005c99;
-                text-decoration: underline;
-            }
-        """)
+        apply_theme_stylesheet(self.select_all_btn, lambda palette: _combo_action_button_style(palette, True))
         self.select_all_btn.clicked.connect(self.select_all)
         select_all_layout.addWidget(self.select_all_btn)
         
         self.select_none_btn = QPushButton("全不选")
-        self.select_none_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #888888;
-                border: none;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                color: #cccccc;
-                text-decoration: underline;
-            }
-        """)
+        apply_theme_stylesheet(self.select_none_btn, lambda palette: _combo_action_button_style(palette, False))
         self.select_none_btn.clicked.connect(self.select_none)
         select_all_layout.addWidget(self.select_none_btn)
         select_all_layout.addStretch()
@@ -127,7 +198,7 @@ class MultiSelectCombo(QFrame):
         # 分隔线
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("background-color: #3e3e42; max-height: 1px;")
+        apply_theme_stylesheet(line, lambda palette: f"background-color: {palette.border}; max-height: 1px;")
         dropdown_layout.addWidget(line)
         
         # 选项列表容器
@@ -141,29 +212,7 @@ class MultiSelectCombo(QFrame):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.options_container)
-        scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollBar:vertical {
-                background-color: #1e1e1e;
-                width: 10px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #555555;
-                min-height: 20px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background-color: #666666;
-            }
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-        """)
+        apply_theme_stylesheet(scroll, _combo_scroll_style)
         scroll.setMaximumHeight(300)
         dropdown_layout.addWidget(scroll)
         
@@ -176,19 +225,14 @@ class MultiSelectCombo(QFrame):
         """添加分组标题（不可选择）"""
         # 创建分组标题行
         group_widget = QFrame()
-        group_widget.setStyleSheet("""
-            QFrame {
-                background-color: transparent;
-                border: none;
-            }
-        """)
+        apply_theme_stylesheet(group_widget, lambda palette: "background-color: transparent; border: none;")
         group_layout = QHBoxLayout(group_widget)
         group_layout.setContentsMargins(10 + indent * 15, 8, 10, 5)
         group_layout.setSpacing(0)
         
         # 分组标题文本
         label = QLabel(text)
-        label.setStyleSheet("color: #007acc; font-size: 13px; font-weight: bold;")
+        apply_theme_stylesheet(label, _combo_group_label_style)
         group_layout.addWidget(label)
         group_layout.addStretch()
         
@@ -218,15 +262,7 @@ class MultiSelectCombo(QFrame):
         """
         # 创建选项行
         item_widget = QFrame()
-        item_widget.setStyleSheet("""
-            QFrame {
-                background-color: transparent;
-                border-radius: 3px;
-            }
-            QFrame:hover {
-                background-color: #2a2d2e;
-            }
-        """)
+        apply_theme_stylesheet(item_widget, _combo_item_row_style)
         item_widget.setCursor(Qt.CursorShape.PointingHandCursor if is_parent else Qt.CursorShape.ArrowCursor)
         item_layout = QHBoxLayout(item_widget)
         item_layout.setContentsMargins(5 + indent * 20, 5, 5, 5)
@@ -235,46 +271,26 @@ class MultiSelectCombo(QFrame):
         # 如果是父节点，添加折叠图标
         if is_parent:
             fold_label = QLabel("▼")
-            fold_label.setStyleSheet("color: #888888; font-size: 10px;")
+            apply_theme_stylesheet(fold_label, lambda palette: f"color: {palette.text_muted}; font-size: 10px;")
             fold_label.setFixedWidth(12)
             item_layout.addWidget(fold_label)
         
         # 复选框
         checkbox = QCheckBox()
         checkbox.setChecked(checked)
-        checkbox.setStyleSheet("""
-            QCheckBox {
-                spacing: 0px;
-            }
-            QCheckBox::indicator {
-                width: 12px;
-                height: 12px;
-            }
-            QCheckBox::indicator:unchecked {
-                border: 1px solid #888888;
-                border-radius: 2px;
-                background-color: transparent;
-            }
-            QCheckBox::indicator:checked {
-                border: 1px solid #007acc;
-                border-radius: 2px;
-                background-color: #007acc;
-            }
-            QCheckBox::indicator:checked::after {
-                content: "✓";
-                color: white;
-                font-size: 8px;
-            }
-        """)
+        apply_theme_stylesheet(checkbox, _combo_check_style)
         checkbox.stateChanged.connect(lambda: self.on_item_changed(value))
         item_layout.addWidget(checkbox)
         
         # 文本标签（总是显示数量）
         display_text = f"{text} ({count})"
         label = QLabel(display_text)
-        label.setStyleSheet("color: #cccccc; font-size: 13px;")
-        if is_parent:
-            label.setStyleSheet("color: #007acc; font-size: 13px; font-weight: bold;")
+        apply_theme_stylesheet(
+            label,
+            (lambda palette: _combo_group_label_style(palette))
+            if is_parent
+            else (lambda palette: f"color: {palette.text_secondary}; font-size: 13px;"),
+        )
         item_layout.addWidget(label)
         item_layout.addStretch()
         
@@ -386,7 +402,7 @@ class MultiSelectCombo(QFrame):
         
         if not selected:
             self.display_label.setText(self.placeholder)
-            apply_theme_stylesheet(self.display_label, "color: #888888; font-size: 13px;")
+            apply_theme_stylesheet(self.display_label, lambda palette: f"color: {palette.text_muted}; font-size: 13px;")
         elif len(selected) == total_count:
             # 全部选中时显示"全部X"（根据placeholder）
             if "题型" in self.placeholder:
@@ -399,14 +415,14 @@ class MultiSelectCombo(QFrame):
                 self.display_label.setText("全部课程")
             else:
                 self.display_label.setText("全部")
-            apply_theme_stylesheet(self.display_label, "color: #ffffff; font-size: 13px;")
+            apply_theme_stylesheet(self.display_label, lambda palette: f"color: {palette.text}; font-size: 13px;")
         else:
             # 部分选中时显示选中的项
             text = "，".join(selected)
             if len(text) > 15:
                 text = text[:15] + "..."
             self.display_label.setText(text)
-            apply_theme_stylesheet(self.display_label, "color: #ffffff; font-size: 13px;")
+            apply_theme_stylesheet(self.display_label, lambda palette: f"color: {palette.text}; font-size: 13px;")
             
     def emit_selection(self):
         """发送选中变化信号"""

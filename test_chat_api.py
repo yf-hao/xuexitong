@@ -3667,6 +3667,20 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn(plain, binder._widgets)
         root.deleteLater()
 
+    def test_theme_tree_skips_neutral_stylesheets(self):
+        from PyQt6.QtWidgets import QApplication, QWidget, QLabel
+        from ui.theme import bind_theme_tree
+
+        app = QApplication.instance() or QApplication([])
+        root = QWidget()
+        neutral = QLabel("neutral", root)
+        neutral.setStyleSheet("background: transparent; border: none;")
+
+        bind_theme_tree(root)
+        binder = getattr(root, "_theme_tree_binder")
+        self.assertNotIn(neutral, binder._widgets)
+        root.deleteLater()
+
     def test_theme_tree_binding_rethemes_existing_widgets(self):
         from PyQt6.QtWidgets import QApplication, QWidget, QLabel
         from ui.theme import bind_theme_tree, refresh_theme_styles
@@ -3834,6 +3848,8 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("bind_theme_tree(self)", multi_source)
         self.assertIn("bind_theme_tree(self)", location_source)
         self.assertIn("bind_theme_tree(self)", learning_source)
+        self.assertIn("def _combo_frame_style(", multi_source)
+        self.assertIn("apply_theme_stylesheet(self.dropdown_panel, _combo_dropdown_style)", multi_source)
         self.assertIn("def _location_button_style(", location_source)
         self.assertIn("apply_theme_stylesheet(btn_import", location_source)
         self.assertIn("apply_theme_stylesheet(btn_export", location_source)
@@ -3859,7 +3875,8 @@ class ChatAPITests(unittest.TestCase):
         source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/components/multi_select_combo.py").read_text(encoding="utf-8")
 
         self.assertIn("bind_theme_tree(self.dropdown_panel)", source)
-        self.assertIn('apply_theme_stylesheet(self.display_label, "color: #ffffff; font-size: 13px;")', source)
+        self.assertIn("def _combo_frame_style(", source)
+        self.assertIn('apply_theme_stylesheet(self.display_label, lambda palette: f"color: {palette.text}; font-size: 13px;")', source)
 
     def test_cloud_drive_view_source_supports_batch_download_and_persistent_directory(self):
         source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/cloud_drive_view.py").read_text(encoding="utf-8")
@@ -3908,6 +3925,8 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("schedule_theme_refresh(widget, mode)", theme_source)
         self.assertIn('setattr(widget, "_theme_managed_widget", True)', theme_source)
         self.assertIn('elif getattr(widget, "_theme_managed_widget", False) and binder is not None:', theme_source)
+        self.assertIn("def _stylesheet_is_theme_neutral", theme_source)
+        self.assertIn("if _stylesheet_is_theme_neutral(css):", theme_source)
 
         self.assertIn("def _management_stat_button_style(", management_source)
         self.assertIn("apply_theme_stylesheet(btn, _management_stat_button_style)", management_source)
@@ -3916,6 +3935,9 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("apply_theme_stylesheet(self.teachers_table, self._get_table_style)", management_source)
         self.assertIn("apply_theme_stylesheet(dialog, _management_dialog_style)", management_source)
         self.assertIn("apply_theme_stylesheet(name_edit, _management_input_style)", management_source)
+        self.assertIn("def _management_teacher_card_style(", management_source)
+        self.assertIn("refresh_theme_styles(self.total_label)", management_source)
+        self.assertIn("apply_theme_stylesheet(btn_new_course, _management_outline_button_style)", management_source)
 
         self.assertIn("def _homework_tree_style(", homework_source)
         self.assertIn("apply_theme_stylesheet(self.publish_tab_btn, lambda palette: self._tab_style(", homework_source)
@@ -3945,6 +3967,7 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("apply_theme_stylesheet(menu, _question_bank_menu_style)", question_bank_source)
         self.assertIn("apply_theme_stylesheet(self.name_input, _question_bank_dialog_input_style)", question_bank_source)
         self.assertIn("apply_theme_stylesheet(button_box, _question_bank_dialog_buttons_style)", question_bank_source)
+        self.assertIn('apply_theme_stylesheet(self, "background-color: #1e1e1e;")', question_bank_source)
 
     def test_cloud_drive_view_collects_checked_items_and_remembers_download_dir(self):
         from PyQt6.QtWidgets import QApplication

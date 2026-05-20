@@ -1542,7 +1542,6 @@ class QuestionDetailDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("题目详情")
         self.setMinimumHeight(560)
-        self.setStyleSheet("background-color: #1e1e1e;")
         self.question_items = question_items or []
         self.current_index = current_index
         self.load_question_callback = load_question_callback
