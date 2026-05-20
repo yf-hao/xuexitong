@@ -293,6 +293,7 @@ class ChatView(QWidget):
     send_message = pyqtSignal(str, str)  # (target_id, message_text)
     msync_message_received = pyqtSignal(dict)
     startup_gate_check_requested = pyqtSignal()
+    msync_info_refresh_done = pyqtSignal(bool, bool)  # (auto_triggered, ok)
 
     def __init__(self, crawler, parent=None):
         super().__init__(parent)
@@ -348,6 +349,7 @@ class ChatView(QWidget):
         self._startup_badge_gate_timer.timeout.connect(self._on_startup_badge_gate_timeout)
         self.msync_message_received.connect(self._on_msync_message)
         self.startup_gate_check_requested.connect(self._on_startup_gate_check_requested)
+        self.msync_info_refresh_done.connect(self._on_msync_info_refresh_done)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -382,7 +384,7 @@ class ChatView(QWidget):
         message_header_layout.addStretch()
         self.message_refresh_btn = QPushButton("刷新")
         self.message_refresh_btn.setObjectName("message_refresh_btn")
-        self.message_refresh_btn.setFixedHeight(40)
+        self.message_refresh_btn.setFixedHeight(50)
         self.message_refresh_btn.setFixedWidth(64)
         self.message_refresh_btn.clicked.connect(self._refresh_message_tab)
         message_header_layout.addWidget(self.message_refresh_btn)
@@ -489,9 +491,11 @@ class ChatView(QWidget):
 
     def on_show(self):
         """视图被切换到时调用，异步加载会话列表。"""
-        # 先同步获取凭证，确保 token 只请求一次
+        # 仅尝试缓存快路径；真正的凭证拉取放到后台线程（_ensure_msync_connected 内），
+        # 避免阻塞 UI 主线程导致 Windows DWM 出现 ghost window 闪烁。
         try:
-            self.crawler.get_im_credentials()
+            if hasattr(self.crawler, "get_im_credentials_cached"):
+                self.crawler.get_im_credentials_cached()
         except Exception:
             pass
         if not self._raw_sessions and not getattr(self, "_startup_badge_gate_completed", False):
@@ -543,15 +547,35 @@ class ChatView(QWidget):
         if not auto_triggered:
             self.loading_hint.setText("正在刷新消息连接...")
             self.loading_hint.show()
-        try:
-            if hasattr(self.crawler, "refresh_msync_info"):
-                self.crawler.refresh_msync_info()
-        finally:
-            self._message_refreshing = False
-            if not auto_triggered and hasattr(self, "message_refresh_btn"):
-                self.message_refresh_btn.setEnabled(True)
-                self.message_refresh_btn.setText("刷新")
+
+        def run_refresh():
+            ok = True
+            try:
+                if hasattr(self.crawler, "refresh_msync_info"):
+                    self.crawler.refresh_msync_info()
+            except Exception as e:
+                ok = False
+                logger.warning(f"ChatView: refresh_msync_info 失败 - {e}")
+            finally:
+                try:
+                    self.msync_info_refresh_done.emit(auto_triggered, ok)
+                except RuntimeError:
+                    # 视图已销毁
+                    pass
+
+        threading.Thread(
+            target=run_refresh,
+            name="chat-msync-info-refresh",
+            daemon=True,
+        ).start()
+
+    def _on_msync_info_refresh_done(self, auto_triggered: bool, ok: bool):
+        self._message_refreshing = False
+        if not auto_triggered and hasattr(self, "message_refresh_btn"):
+            self.message_refresh_btn.setEnabled(True)
+            self.message_refresh_btn.setText("刷新")
         if not auto_triggered:
+            self.loading_hint.hide()
             self._load_message_list()
         self._ensure_msync_connected()
 
@@ -2164,6 +2188,11 @@ class ChatView(QWidget):
 
         def connect_in_background():
             try:
+                # 缓存未命中时由后台线程负责拉取凭证，避免 on_show / 刷新链路阻塞主线程
+                try:
+                    self.crawler.get_im_credentials()
+                except Exception as cred_err:
+                    logger.warning(f"ChatView: 后台拉取 IM 凭证失败 - {cred_err}")
                 self.crawler.connect_msync(
                     on_message=lambda msg: self.msync_message_received.emit(msg),
                     on_error=lambda e: logger.error(f"MSync error: {e}"),

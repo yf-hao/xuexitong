@@ -1,12 +1,14 @@
 """
 云盘视图
 """
+import os
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QTableWidget, QTableWidgetItem, QHeaderView, 
     QAbstractItemView, QFrame, QMenu, QFileDialog, QMessageBox, QInputDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSettings, QStandardPaths
 from PyQt6.QtGui import QColor, QAction
 from ui.theme import bind_theme_tree, get_theme_palette, theme_manager
 
@@ -38,17 +40,106 @@ class DownloadThread(QThread):
             })
 
 
+class BatchDownloadThread(QThread):
+    """批量下载线程"""
+
+    finished_signal = pyqtSignal(dict)
+
+    def __init__(self, crawler, items, cloud_info, current_folder_id, save_path):
+        super().__init__()
+        self.crawler = crawler
+        self.items = items
+        self.cloud_info = cloud_info
+        self.current_folder_id = current_folder_id
+        self.save_path = save_path
+
+    def run(self):
+        summary = {
+            "success": True,
+            "save_path": self.save_path,
+            "total_items": len(self.items),
+            "completed_items": 0,
+            "downloaded_files": 0,
+            "failed_items": [],
+        }
+
+        try:
+            for item in self.items:
+                item_name = item.get("name", "未知")
+                if item.get("isfile"):
+                    result = self.crawler.download_file(
+                        file_id=item.get("id"),
+                        encrypted_id=item.get("encryptedId"),
+                        puid=self.cloud_info.get("currentPuid"),
+                        current_folder_id=self.current_folder_id,
+                        token=self.cloud_info.get("token"),
+                        save_path=self.save_path,
+                    )
+                    if result.get("success"):
+                        summary["completed_items"] += 1
+                        summary["downloaded_files"] += 1
+                    else:
+                        summary["failed_items"].append({
+                            "name": item_name,
+                            "error": result.get("error", "未知错误"),
+                        })
+                else:
+                    result = self.crawler.download_folder(
+                        folder_id=item.get("id"),
+                        folder_name=item_name,
+                        puid=self.cloud_info.get("currentPuid"),
+                        enc=self.cloud_info.get("encstr"),
+                        token=self.cloud_info.get("token"),
+                        save_path=self.save_path,
+                    )
+                    if result.get("success"):
+                        summary["completed_items"] += 1
+                        summary["downloaded_files"] += result.get("downloaded_files", 0)
+                        failed_files = result.get("failed_files", [])
+                        if failed_files:
+                            summary["failed_items"].append({
+                                "name": item_name,
+                                "error": result.get("message", "部分文件下载失败"),
+                            })
+                    else:
+                        summary["failed_items"].append({
+                            "name": item_name,
+                            "error": result.get("error", "未知错误"),
+                        })
+
+            self.finished_signal.emit(summary)
+        except Exception as e:
+            self.finished_signal.emit({
+                "success": False,
+                "save_path": self.save_path,
+                "total_items": len(self.items),
+                "completed_items": summary["completed_items"],
+                "downloaded_files": summary["downloaded_files"],
+                "failed_items": summary["failed_items"],
+                "error": str(e),
+            })
+
+
 class CloudDriveView(QWidget):
     """云盘视图"""
-    
+
+    CHECKBOX_COLUMN = 0
+    NAME_COLUMN = 1
+    TYPE_COLUMN = 2
+    SIZE_COLUMN = 3
+    MODIFY_TIME_COLUMN = 4
+    DOWNLOAD_DIR_SETTING_KEY = "cloud_drive/download_dir"
+
     status_update = pyqtSignal(str)
     
     def __init__(self, crawler, parent=None):
         super().__init__(parent)
         self.crawler = crawler
+        self.settings = QSettings("HaoSoft", "XuexitongManager")
         self.cloud_info = None
         self.current_folder_id = None  # 当前文件夹ID
         self.path_stack = []  # 路径栈：[(folder_id, folder_name), ...]
+        self.download_thread = None
         self.setup_ui()
     
     def setup_ui(self):
@@ -147,6 +238,28 @@ class CloudDriveView(QWidget):
         self.new_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.new_folder_btn.clicked.connect(self.create_folder)
         self.path_layout.addWidget(self.new_folder_btn)
+
+        self.download_btn = QPushButton("⬇️ 下载")
+        self.download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2a2d2e;
+                color: #e1e1e1;
+                border: 1px solid #3e3e42;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #3e3e42;
+                border: 1px solid #007acc;
+            }
+            QPushButton:pressed {
+                background-color: #1e1e1e;
+            }
+        """)
+        self.download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.download_btn.clicked.connect(self.download_selected_items)
+        self.path_layout.addWidget(self.download_btn)
         
         layout.addLayout(self.path_layout)
         
@@ -164,8 +277,8 @@ class CloudDriveView(QWidget):
         
         # 文件列表表格
         self.file_table = QTableWidget()
-        self.file_table.setColumnCount(4)
-        self.file_table.setHorizontalHeaderLabels(["名称", "类型", "大小", "修改时间"])
+        self.file_table.setColumnCount(5)
+        self.file_table.setHorizontalHeaderLabels(["选择", "名称", "类型", "大小", "修改时间"])
         
         # 设置表格样式 - 深色主题
         self.file_table.setStyleSheet("""
@@ -191,6 +304,25 @@ class CloudDriveView(QWidget):
             }
             QTableWidget::item:hover:!selected {
                 background-color: #2a2d2e;
+            }
+            QTableWidget::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #3e3e42;
+                background-color: #1e1e1e;
+            }
+            QTableWidget::indicator:hover {
+                border: 1px solid #007acc;
+                background-color: #2a2d2e;
+            }
+            QTableWidget::indicator:checked {
+                border: 1px solid #007acc;
+                background-color: #007acc;
+            }
+            QTableWidget::indicator:checked:hover {
+                border: 1px solid #005a9e;
+                background-color: #005a9e;
             }
             QHeaderView::section {
                 background-color: #252526;
@@ -222,10 +354,12 @@ class CloudDriveView(QWidget):
         
         # 设置列宽
         header = self.file_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # 名称列自动伸展
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # 类型列
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # 大小列
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # 时间列
+        header.setSectionResizeMode(self.CHECKBOX_COLUMN, QHeaderView.ResizeMode.Fixed)
+        self.file_table.setColumnWidth(self.CHECKBOX_COLUMN, 56)
+        header.setSectionResizeMode(self.NAME_COLUMN, QHeaderView.ResizeMode.Stretch)  # 名称列自动伸展
+        header.setSectionResizeMode(self.TYPE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)  # 类型列
+        header.setSectionResizeMode(self.SIZE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)  # 大小列
+        header.setSectionResizeMode(self.MODIFY_TIME_COLUMN, QHeaderView.ResizeMode.ResizeToContents)  # 时间列
         header.sectionClicked.connect(self.on_header_clicked)  # 表头点击事件
         
         # 排序状态
@@ -390,7 +524,7 @@ class CloudDriveView(QWidget):
         if self.sort_column == -1:
             # 默认排序：按 topsort 降序
             sorted_list = sorted(file_list, key=lambda x: x.get("topsort", 0), reverse=True)
-        elif self.sort_column == 3:
+        elif self.sort_column == self.MODIFY_TIME_COLUMN:
             # 按修改时间排序
             sorted_list = sorted(file_list, key=lambda x: x.get("modifyDate", 0), 
                                reverse=(self.sort_order == Qt.SortOrder.DescendingOrder))
@@ -400,6 +534,16 @@ class CloudDriveView(QWidget):
         self.file_table.setRowCount(len(sorted_list))
         
         for row, item in enumerate(sorted_list):
+            checkbox_item = QTableWidgetItem()
+            checkbox_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+            checkbox_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.file_table.setItem(row, self.CHECKBOX_COLUMN, checkbox_item)
+
             # 名称列
             name = item.get("name", "未知")
             icon = self.get_file_icon(item)
@@ -412,7 +556,7 @@ class CloudDriveView(QWidget):
             name_item = QTableWidgetItem(display_name)
             name_item.setData(Qt.ItemDataRole.UserRole, item)  # 存储原始数据
             name_item.setForeground(primary_text)
-            self.file_table.setItem(row, 0, name_item)
+            self.file_table.setItem(row, self.NAME_COLUMN, name_item)
             
             # 类型列
             if item.get("isfile"):
@@ -423,7 +567,7 @@ class CloudDriveView(QWidget):
             type_item = QTableWidgetItem(type_text)
             type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             type_item.setForeground(secondary_text)
-            self.file_table.setItem(row, 1, type_item)
+            self.file_table.setItem(row, self.TYPE_COLUMN, type_item)
             
             # 大小列
             if item.get("isfile") and item.get("filesize", 0) > 0:
@@ -433,7 +577,7 @@ class CloudDriveView(QWidget):
             size_item = QTableWidgetItem(size_text)
             size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             size_item.setForeground(secondary_text)
-            self.file_table.setItem(row, 2, size_item)
+            self.file_table.setItem(row, self.SIZE_COLUMN, size_item)
             
             # 修改时间列
             modify_date = item.get("modifyDate", 0)
@@ -449,7 +593,7 @@ class CloudDriveView(QWidget):
             time_item = QTableWidgetItem(time_text)
             time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             time_item.setForeground(secondary_text)
-            self.file_table.setItem(row, 3, time_item)
+            self.file_table.setItem(row, self.MODIFY_TIME_COLUMN, time_item)
     
     def format_file_size(self, size):
         """格式化文件大小"""
@@ -464,8 +608,8 @@ class CloudDriveView(QWidget):
     
     def on_header_clicked(self, column):
         """表头点击事件"""
-        # 只处理修改时间列（列3）
-        if column == 3:
+        # 只处理修改时间列
+        if column == self.MODIFY_TIME_COLUMN:
             if self.sort_column == column:
                 # 切换排序顺序
                 self.sort_order = Qt.SortOrder.AscendingOrder if self.sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
@@ -483,7 +627,10 @@ class CloudDriveView(QWidget):
     
     def on_cell_double_clicked(self, row, column):
         """双击单元格事件"""
-        item = self.file_table.item(row, 0)
+        if column == self.CHECKBOX_COLUMN:
+            return
+
+        item = self.file_table.item(row, self.NAME_COLUMN)
         if not item:
             return
         
@@ -499,13 +646,17 @@ class CloudDriveView(QWidget):
     
     def show_context_menu(self, position):
         """显示右键菜单"""
-        # 获取当前选中的行
-        current_row = self.file_table.currentRow()
-        if current_row < 0:
-            return
+        clicked_item = self.file_table.itemAt(position)
+        if clicked_item is not None:
+            current_row = clicked_item.row()
+            self.file_table.selectRow(current_row)
+        else:
+            current_row = self.file_table.currentRow()
+            if current_row < 0:
+                return
         
         # 获取当前项的数据
-        item = self.file_table.item(current_row, 0)
+        item = self.file_table.item(current_row, self.NAME_COLUMN)
         if not item:
             return
         
@@ -581,6 +732,100 @@ class CloudDriveView(QWidget):
         
         # 在鼠标位置显示菜单
         menu.exec(self.file_table.viewport().mapToGlobal(position))
+
+    def _get_row_file_data(self, row):
+        item = self.file_table.item(row, self.NAME_COLUMN)
+        if not item:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def _get_default_download_dir(self):
+        saved_dir = str(self.settings.value(self.DOWNLOAD_DIR_SETTING_KEY, "") or "").strip()
+        if saved_dir and os.path.isdir(saved_dir):
+            return saved_dir
+
+        default_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+        if default_dir:
+            return default_dir
+        return os.path.join(os.path.expanduser("~"), "Downloads")
+
+    def _remember_download_dir(self, path):
+        if path:
+            self.settings.setValue(self.DOWNLOAD_DIR_SETTING_KEY, path)
+
+    def get_checked_items(self):
+        checked_items = []
+        for row in range(self.file_table.rowCount()):
+            checkbox_item = self.file_table.item(row, self.CHECKBOX_COLUMN)
+            if checkbox_item and checkbox_item.checkState() == Qt.CheckState.Checked:
+                file_data = self._get_row_file_data(row)
+                if file_data:
+                    checked_items.append(file_data)
+        return checked_items
+
+    def download_selected_items(self):
+        """批量下载勾选的文件和文件夹"""
+        if not self.cloud_info:
+            QMessageBox.warning(self, "错误", "云盘信息未加载")
+            return
+
+        selected_items = self.get_checked_items()
+        if not selected_items:
+            QMessageBox.information(self, "提示", "请先勾选要下载的文件或文件夹")
+            return
+
+        save_path = QFileDialog.getExistingDirectory(
+            self,
+            "选择下载目录",
+            self._get_default_download_dir(),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not save_path:
+            return
+
+        self._remember_download_dir(save_path)
+        self.status_update.emit(f"正在批量下载 {len(selected_items)} 个项目...")
+
+        self.download_thread = BatchDownloadThread(
+            self.crawler,
+            selected_items,
+            self.cloud_info,
+            self.current_folder_id,
+            save_path,
+        )
+
+        def on_batch_download_finished(result):
+            if not result.get("success"):
+                self.status_update.emit(f"下载失败: {result.get('error')}")
+                QMessageBox.critical(self, "批量下载失败", f"错误: {result.get('error')}")
+                return
+
+            total_items = result.get("total_items", 0)
+            completed_items = result.get("completed_items", 0)
+            downloaded_files = result.get("downloaded_files", 0)
+            failed_items = result.get("failed_items", [])
+
+            if failed_items:
+                failed_names = [f"{item['name']}: {item['error']}" for item in failed_items[:5]]
+                message = (
+                    f"批量下载完成：成功 {completed_items}/{total_items} 个项目\n"
+                    f"共下载 {downloaded_files} 个文件\n\n"
+                    f"保存到:\n{result.get('save_path')}\n\n"
+                    f"失败项目：\n" + "\n".join(failed_names)
+                )
+                if len(failed_items) > 5:
+                    message += f"\n... 等 {len(failed_items)} 个项目"
+                QMessageBox.warning(self, "批量下载完成（部分失败）", message)
+            else:
+                self.status_update.emit(f"批量下载成功: {downloaded_files} 个文件")
+                QMessageBox.information(
+                    self,
+                    "批量下载成功",
+                    f"已保存到:\n{result.get('save_path')}\n\n共下载 {downloaded_files} 个文件",
+                )
+
+        self.download_thread.finished_signal.connect(on_batch_download_finished)
+        self.download_thread.start()
     
     def download_file(self, file_data):
         """下载文件或文件夹"""
@@ -596,12 +841,14 @@ class CloudDriveView(QWidget):
             save_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "保存文件",
-                item_name,
-                "所有文件 (*.*)"
+                os.path.join(self._get_default_download_dir(), item_name),
+                "所有文件 (*.*)",
             )
             
             if not save_path:
                 return
+
+            self._remember_download_dir(os.path.dirname(save_path) or self._get_default_download_dir())
             
             self.status_update.emit(f"正在下载 {item_name}...")
             
@@ -641,12 +888,14 @@ class CloudDriveView(QWidget):
             save_path = QFileDialog.getExistingDirectory(
                 self,
                 "选择保存位置",
-                "",
-                QFileDialog.Option.ShowDirsOnly
+                self._get_default_download_dir(),
+                QFileDialog.Option.ShowDirsOnly,
             )
             
             if not save_path:
                 return
+
+            self._remember_download_dir(save_path)
             
             self.status_update.emit(f"正在打包下载 {item_name}...")
             
@@ -1204,7 +1453,7 @@ class CloudDriveView(QWidget):
     def update_path_navigation(self):
         """更新路径导航栏，显示完整路径"""
         # 清空当前路径（保留根目录按钮、stretch和右侧按钮）
-        # 布局顺序：根目录按钮 | 路径元素... | stretch | 上传按钮 | 新建文件夹按钮
+        # 布局顺序：根目录按钮 | 路径元素... | stretch | 上传按钮 | 新建文件夹按钮 | 下载按钮
         
         # 找到 stretch 的位置
         stretch_index = -1

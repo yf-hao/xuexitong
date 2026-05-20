@@ -220,6 +220,7 @@ _DECLARATION_REPLACEMENTS = [
     ("background: #1e1e1e;", "background: {panel_bg};"),
     ("background: #18191c;", "background: {panel_bg};"),
     ("background: #1a1a1a;", "background: {card_bg};"),
+    ("color: white;", "color: {text};"),
     ("color: #ffffff;", "color: {text};"),
     ("color: #fff;", "color: {text};"),
     ("color: #e6e6e6;", "color: {text_secondary};"),

@@ -550,14 +550,14 @@ class LocationConfigDialog(QDialog):
         btn_import = QPushButton("📥 导入")
         btn_import.setStyleSheet("""
             QPushButton {
-                background: #4a4a4a;
-                color: white;
+                background-color: #4a4a4a;
+                color: #ffffff;
                 border-radius: 4px;
                 padding: 5px 10px;
                 font-size: 12px;
             }
             QPushButton:hover {
-                background: #5a5a5a;
+                background-color: #555555;
             }
         """)
         btn_import.clicked.connect(self._on_import)
@@ -566,14 +566,14 @@ class LocationConfigDialog(QDialog):
         btn_export = QPushButton("📤 导出")
         btn_export.setStyleSheet("""
             QPushButton {
-                background: #4a4a4a;
-                color: white;
+                background-color: #4a4a4a;
+                color: #ffffff;
                 border-radius: 4px;
                 padding: 5px 10px;
                 font-size: 12px;
             }
             QPushButton:hover {
-                background: #5a5a5a;
+                background-color: #555555;
             }
         """)
         btn_export.clicked.connect(self._on_export)

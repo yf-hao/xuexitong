@@ -36,6 +36,7 @@ from core.msync_client import (
 )
 from ui.views.chat_view import ChatView
 from ui.views.activities_view import ActivitiesView
+from ui.views.cloud_drive_view import CloudDriveView
 from ui.views.study_status_view import StudyStatusView, NumericTableWidgetItem
 from ui.dialogs.absence_stats_dialog import AbsenceStatsDialog
 from ui.dialogs.homework_reminder_dialog import DEFAULT_ABSENCE_REMINDER_TEMPLATE, DEFAULT_HOMEWORK_REMINDER_TEMPLATE
@@ -3703,6 +3704,14 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(theme_label("light"), "亮色")
         self.assertEqual(theme_label("dark"), "暗色")
 
+    def test_theme_stylesheet_rethemes_white_keyword_text(self):
+        from ui.theme import themed_stylesheet
+
+        themed = themed_stylesheet("QComboBox { background: #252526; color: white; }", "light")
+
+        self.assertIn("color:", themed)
+        self.assertNotIn("color: white;", themed)
+
     def test_main_views_source_bind_theme_tree(self):
         for path in [
             "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/activities_view.py",
@@ -3740,6 +3749,8 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("bind_theme_tree(self)", multi_source)
         self.assertIn("bind_theme_tree(self)", location_source)
         self.assertIn("bind_theme_tree(self)", learning_source)
+        self.assertIn('background-color: #4a4a4a;', location_source)
+        self.assertIn('background-color: #555555;', location_source)
 
     def test_attendance_theme_sources_use_runtime_palette_updates(self):
         study_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/study_status_view.py").read_text(encoding="utf-8")
@@ -3763,6 +3774,57 @@ class ChatAPITests(unittest.TestCase):
 
         self.assertIn("bind_theme_tree(self.dropdown_panel)", source)
         self.assertIn('apply_theme_stylesheet(self.display_label, "color: #ffffff; font-size: 13px;")', source)
+
+    def test_cloud_drive_view_source_supports_batch_download_and_persistent_directory(self):
+        source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/cloud_drive_view.py").read_text(encoding="utf-8")
+
+        self.assertIn('self.download_btn = QPushButton("⬇️ 下载")', source)
+        self.assertIn("self.download_btn.clicked.connect(self.download_selected_items)", source)
+        self.assertIn('self.file_table.setColumnCount(5)', source)
+        self.assertIn('self.file_table.setHorizontalHeaderLabels(["选择", "名称", "类型", "大小", "修改时间"])', source)
+        self.assertIn("QTableWidget::indicator {", source)
+        self.assertIn("QTableWidget::indicator:checked {", source)
+        self.assertIn("background-color: #007acc;", source)
+        self.assertIn("class BatchDownloadThread(QThread):", source)
+        self.assertIn('QSettings("HaoSoft", "XuexitongManager")', source)
+        self.assertIn("QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)", source)
+        self.assertIn("def download_selected_items(self):", source)
+        self.assertIn("def get_checked_items(self):", source)
+
+    def test_cloud_drive_view_collects_checked_items_and_remembers_download_dir(self):
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        values = {}
+
+        class _FakeSettings:
+            def value(self, key, default=None):
+                return values.get(key, default)
+
+            def setValue(self, key, value):
+                values[key] = value
+
+        items = [
+            {"id": "f1", "name": "课件.txt", "isfile": True, "suffix": "txt", "filesize": 128, "modifyDate": 0, "topsort": 0},
+            {"id": "d1", "name": "资料", "isfile": False, "modifyDate": 0, "topsort": 0},
+        ]
+
+        with patch("ui.views.cloud_drive_view.QSettings", return_value=_FakeSettings()), \
+             patch("ui.views.cloud_drive_view.QStandardPaths.writableLocation", return_value="/system/Downloads"), \
+             patch("ui.views.cloud_drive_view.os.path.isdir", side_effect=lambda path: path in {"/system/Downloads", "/custom/downloads"}):
+            view = CloudDriveView(SimpleNamespace())
+            view.display_file_list(items)
+
+            self.assertEqual(view._get_default_download_dir(), "/system/Downloads")
+
+            view.file_table.item(0, CloudDriveView.CHECKBOX_COLUMN).setCheckState(Qt.CheckState.Checked)
+            view.file_table.item(1, CloudDriveView.CHECKBOX_COLUMN).setCheckState(Qt.CheckState.Checked)
+            self.assertEqual([item["name"] for item in view.get_checked_items()], ["课件.txt", "资料"])
+
+            view._remember_download_dir("/custom/downloads")
+            self.assertEqual(values[CloudDriveView.DOWNLOAD_DIR_SETTING_KEY], "/custom/downloads")
+            self.assertEqual(view._get_default_download_dir(), "/custom/downloads")
+            view.deleteLater()
 
     def test_homework_publish_dialog_collects_publish_settings(self):
         from PyQt6.QtWidgets import QApplication

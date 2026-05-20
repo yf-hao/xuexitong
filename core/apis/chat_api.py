@@ -346,6 +346,27 @@ class ChatAPI:
 
     # ── 凭证获取 ──
 
+    def get_im_credentials_cached(self):
+        """仅从全局缓存读取凭证，不发起任何 HTTP 请求。
+
+        命中返回 dict（与 get_im_credentials 同结构），未命中返回 None。
+        用于 UI 主线程的快路径，避免阻塞主线程触发 Windows ghost window。
+        """
+        global _credentials_ts, _credentials_cache
+
+        with _credentials_lock:
+            now = time.time()
+            if now - _credentials_ts < 30 and _credentials_cache:
+                self.session_manager.course_params.update({
+                    "im_tuid": _credentials_cache["tuid"],
+                    "im_puid": _credentials_cache["puid"],
+                    "im_token": _credentials_cache["token"],
+                })
+                if _credentials_cache.get("class_chat_map"):
+                    self.session_manager.course_params["im_class_chat"] = dict(_credentials_cache["class_chat_map"])
+                return dict(_credentials_cache)
+        return None
+
     def get_im_credentials(self):
         """
         从 https://im.chaoxing.com/webim/me 页面提取 IM 凭证

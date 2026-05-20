@@ -8,7 +8,7 @@ class LoginWindow(QDialog):
         super().__init__()
         self.crawler = crawler
         self.setWindowTitle(APP_TITLE)
-        self.setFixedSize(380, 420)
+        self.setMinimumSize(380, 420)
         
         apply_theme_stylesheet(self, """
             QDialog {
@@ -143,6 +143,10 @@ class LoginWindow(QDialog):
         layout.addWidget(self.login_btn)
         
         self.setLayout(layout)
+        # 用 adjustSize 让布局根据真实字体/DPI 计算需要的高度，
+        # 再锁成固定大小——避免 Windows 下中文字体偏高导致按钮被截断。
+        self.adjustSize()
+        self.setFixedSize(self.size())
         theme_manager().theme_changed.connect(self._apply_theme)
         self._apply_theme(theme_manager().mode)
 
