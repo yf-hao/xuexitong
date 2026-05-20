@@ -3606,6 +3606,23 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("background-color: #0969da;", themed)
         self.assertIn("background-color: #cf222e;", themed)
 
+    def test_theme_helper_supports_palette_factory_styles(self):
+        from PyQt6.QtWidgets import QApplication, QWidget
+        from ui.theme import apply_theme_stylesheet, refresh_theme_styles
+
+        app = QApplication.instance() or QApplication([])
+        widget = QWidget()
+
+        apply_theme_stylesheet(widget, lambda palette: f"background-color: {palette.panel_bg}; color: {palette.text};")
+        refresh_theme_styles(widget, mode="light")
+        self.assertIn("#ffffff", widget.styleSheet())
+        self.assertIn("#1f2328", widget.styleSheet())
+
+        refresh_theme_styles(widget, mode="dark")
+        self.assertIn("#1e1e1e", widget.styleSheet())
+        self.assertIn("#ffffff", widget.styleSheet())
+        widget.deleteLater()
+
     def test_theme_tree_binding_rethemes_existing_widgets(self):
         from PyQt6.QtWidgets import QApplication, QWidget, QLabel
         from ui.theme import bind_theme_tree, refresh_theme_styles
@@ -3712,6 +3729,18 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("color:", themed)
         self.assertNotIn("color: white;", themed)
 
+    def test_theme_source_uses_cached_fast_translation_and_bound_widget_iteration(self):
+        source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/theme.py").read_text(encoding="utf-8")
+
+        self.assertIn("_FAST_TRANSLATION_HINTS", source)
+        self.assertIn("def _formatted_replacements", source)
+        self.assertIn("def _compiled_replacement_patterns", source)
+        self.assertIn("def _cached_themed_stylesheet", source)
+        self.assertIn("if source in themed:", source)
+        self.assertIn("pattern_map[source].sub(target, themed)", source)
+        self.assertIn("binder.iter_widgets()", source)
+        self.assertIn("register_widget", source)
+
     def test_main_views_source_bind_theme_tree(self):
         for path in [
             "/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/activities_view.py",
@@ -3724,6 +3753,16 @@ class ChatAPITests(unittest.TestCase):
         ]:
             source = Path(path).read_text(encoding="utf-8")
             self.assertIn("bind_theme_tree(self)", source)
+
+    def test_question_bank_view_source_themes_delete_and_detail_dialog(self):
+        source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/question_bank_view.py").read_text(encoding="utf-8")
+
+        self.assertIn("apply_theme_stylesheet(self.btn_delete", source)
+        self.assertIn("background-color: #442222;", source)
+        self.assertIn("background-color: #d9534f;", source)
+        self.assertIn("theme_manager().theme_changed.connect(self._on_theme_changed)", source)
+        self.assertIn("get_theme_palette(theme_manager().mode)", source)
+        self.assertIn("radial-gradient(circle at top", source)
 
     def test_study_status_and_absence_dialog_source_use_theme_helpers(self):
         study_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/study_status_view.py").read_text(encoding="utf-8")
@@ -3782,14 +3821,32 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("self.download_btn.clicked.connect(self.download_selected_items)", source)
         self.assertIn('self.file_table.setColumnCount(5)', source)
         self.assertIn('self.file_table.setHorizontalHeaderLabels(["选择", "名称", "类型", "大小", "修改时间"])', source)
-        self.assertIn("QTableWidget::indicator {", source)
-        self.assertIn("QTableWidget::indicator:checked {", source)
-        self.assertIn("background-color: #007acc;", source)
+        self.assertIn("def _file_table_style", source)
+        self.assertIn("apply_theme_stylesheet(self.file_table, self._file_table_style)", source)
+        self.assertIn("apply_theme_stylesheet(self.upload_btn, self._primary_button_style)", source)
+        self.assertIn("apply_theme_stylesheet(self.new_folder_btn, self._secondary_button_style)", source)
         self.assertIn("class BatchDownloadThread(QThread):", source)
         self.assertIn('QSettings("HaoSoft", "XuexitongManager")', source)
         self.assertIn("QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)", source)
         self.assertIn("def download_selected_items(self):", source)
         self.assertIn("def get_checked_items(self):", source)
+
+    def test_hot_views_source_use_palette_factories_for_theme_styles(self):
+        chat_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/chat_view.py").read_text(encoding="utf-8")
+        activities_source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui/views/activities_view.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _chat_style(", chat_source)
+        self.assertIn("apply_theme_stylesheet(self, _chat_style)", chat_source)
+
+        self.assertIn("def _activities_stat_button_style(", activities_source)
+        self.assertIn("def _signin_config_box_style(", activities_source)
+        self.assertIn("apply_theme_stylesheet(btn, _activities_stat_button_style)", activities_source)
+        self.assertIn("apply_theme_stylesheet(self.activities_scroll, _activities_container_style)", activities_source)
+        self.assertIn("apply_theme_stylesheet(config_box, _signin_config_box_style)", activities_source)
+        self.assertIn("apply_theme_stylesheet(self.group_combo, lambda palette: _signin_combo_style(palette, 5))", activities_source)
+        self.assertIn("apply_theme_stylesheet(self.chk_enable_location, _signin_checkbox_style)", activities_source)
+        self.assertIn("apply_theme_stylesheet(self.btn_generate, _signin_primary_action_style)", activities_source)
+        self.assertIn("apply_theme_stylesheet(self.btn_batch_publish, _signin_success_action_style)", activities_source)
 
     def test_cloud_drive_view_collects_checked_items_and_remembers_download_dir(self):
         from PyQt6.QtWidgets import QApplication

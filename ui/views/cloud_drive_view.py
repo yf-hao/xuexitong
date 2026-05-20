@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSettings, QStandardPaths
 from PyQt6.QtGui import QColor, QAction
-from ui.theme import bind_theme_tree, get_theme_palette, theme_manager
+from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager
 
 
 class DownloadThread(QThread):
@@ -141,6 +141,125 @@ class CloudDriveView(QWidget):
         self.path_stack = []  # 路径栈：[(folder_id, folder_name), ...]
         self.download_thread = None
         self.setup_ui()
+
+    def _primary_button_style(self, palette):
+        return f"""
+            QPushButton {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-size: 13px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {palette.accent_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {palette.accent_focus};
+            }}
+        """
+
+    def _secondary_button_style(self, palette):
+        return f"""
+            QPushButton {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text_secondary};
+                border: 1px solid {palette.border};
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {palette.hover_bg};
+                border: 1px solid {palette.accent};
+            }}
+            QPushButton:pressed {{
+                background-color: {palette.panel_bg};
+            }}
+        """
+
+    def _file_container_style(self, palette):
+        return f"""
+            QFrame {{
+                background-color: {palette.card_bg};
+                border: 1px solid {palette.border};
+                border-radius: 12px;
+            }}
+        """
+
+    def _file_table_style(self, palette):
+        return f"""
+            QTableWidget {{
+                background-color: transparent;
+                border: none;
+                border-radius: 12px;
+                gridline-color: transparent;
+                color: {palette.text_secondary};
+                font-size: 14px;
+            }}
+            QTableWidget::item {{
+                padding: 15px 10px;
+                border-bottom: 1px solid {palette.border};
+            }}
+            QTableWidget::item:selected {{
+                background-color: {palette.accent};
+                color: #ffffff;
+            }}
+            QTableWidget::item:selected:!active {{
+                background-color: {palette.accent};
+                color: #ffffff;
+            }}
+            QTableWidget::item:hover:!selected {{
+                background-color: {palette.hover_bg};
+            }}
+            QTableWidget::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid {palette.border};
+                background-color: {palette.panel_bg};
+            }}
+            QTableWidget::indicator:hover {{
+                border: 1px solid {palette.accent};
+                background-color: {palette.hover_bg};
+            }}
+            QTableWidget::indicator:checked {{
+                border: 1px solid {palette.accent};
+                background-color: {palette.accent};
+            }}
+            QTableWidget::indicator:checked:hover {{
+                border: 1px solid {palette.accent_hover};
+                background-color: {palette.accent_hover};
+            }}
+            QHeaderView::section {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text_muted};
+                padding: 12px 10px;
+                border: none;
+                border-bottom: 2px solid {palette.border};
+                font-weight: bold;
+                font-size: 14px;
+            }}
+            QTableWidget QScrollBar:vertical {{
+                background-color: {palette.panel_bg};
+                width: 12px;
+                border-radius: 6px;
+            }}
+            QTableWidget QScrollBar::handle:vertical {{
+                background-color: {palette.border_strong};
+                border-radius: 6px;
+                min-height: 20px;
+            }}
+            QTableWidget QScrollBar::handle:vertical:hover {{
+                background-color: {palette.text_muted};
+            }}
+            QTableWidget QScrollBar::add-line:vertical,
+            QTableWidget QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+        """
     
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -195,68 +314,20 @@ class CloudDriveView(QWidget):
         # 上传文件按钮
         from PyQt6.QtWidgets import QPushButton
         self.upload_btn = QPushButton("📤 上传文件")
-        self.upload_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: #ffffff;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #005a9e;
-            }
-            QPushButton:pressed {
-                background-color: #004578;
-            }
-        """)
+        apply_theme_stylesheet(self.upload_btn, self._primary_button_style)
         self.upload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.upload_btn.clicked.connect(self.upload_file)
         self.path_layout.addWidget(self.upload_btn)
         
         # 新建文件夹按钮
         self.new_folder_btn = QPushButton("📁 新建文件夹")
-        self.new_folder_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2d2e;
-                color: #e1e1e1;
-                border: 1px solid #3e3e42;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #3e3e42;
-                border: 1px solid #007acc;
-            }
-            QPushButton:pressed {
-                background-color: #1e1e1e;
-            }
-        """)
+        apply_theme_stylesheet(self.new_folder_btn, self._secondary_button_style)
         self.new_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.new_folder_btn.clicked.connect(self.create_folder)
         self.path_layout.addWidget(self.new_folder_btn)
 
         self.download_btn = QPushButton("⬇️ 下载")
-        self.download_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2d2e;
-                color: #e1e1e1;
-                border: 1px solid #3e3e42;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #3e3e42;
-                border: 1px solid #007acc;
-            }
-            QPushButton:pressed {
-                background-color: #1e1e1e;
-            }
-        """)
+        apply_theme_stylesheet(self.download_btn, self._secondary_button_style)
         self.download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.download_btn.clicked.connect(self.download_selected_items)
         self.path_layout.addWidget(self.download_btn)
@@ -265,13 +336,7 @@ class CloudDriveView(QWidget):
         
         # 文件列表容器
         self.file_container = QFrame()
-        self.file_container.setStyleSheet("""
-            QFrame {
-                background-color: #1a1a1a;
-                border: 1px solid #333333;
-                border-radius: 12px;
-            }
-        """)
+        apply_theme_stylesheet(self.file_container, self._file_container_style)
         container_layout = QVBoxLayout(self.file_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -280,77 +345,7 @@ class CloudDriveView(QWidget):
         self.file_table.setColumnCount(5)
         self.file_table.setHorizontalHeaderLabels(["选择", "名称", "类型", "大小", "修改时间"])
         
-        # 设置表格样式 - 深色主题
-        self.file_table.setStyleSheet("""
-            QTableWidget {
-                background-color: transparent;
-                border: none;
-                border-radius: 12px;
-                gridline-color: transparent;
-                color: #e1e1e1;
-                font-size: 14px;
-            }
-            QTableWidget::item {
-                padding: 15px 10px;
-                border-bottom: 1px solid #252526;
-            }
-            QTableWidget::item:selected {
-                background-color: #007acc;
-                color: #ffffff;
-            }
-            QTableWidget::item:selected:!active {
-                background-color: #007acc;
-                color: #ffffff;
-            }
-            QTableWidget::item:hover:!selected {
-                background-color: #2a2d2e;
-            }
-            QTableWidget::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid #3e3e42;
-                background-color: #1e1e1e;
-            }
-            QTableWidget::indicator:hover {
-                border: 1px solid #007acc;
-                background-color: #2a2d2e;
-            }
-            QTableWidget::indicator:checked {
-                border: 1px solid #007acc;
-                background-color: #007acc;
-            }
-            QTableWidget::indicator:checked:hover {
-                border: 1px solid #005a9e;
-                background-color: #005a9e;
-            }
-            QHeaderView::section {
-                background-color: #252526;
-                color: #bbbbbb;
-                padding: 12px 10px;
-                border: none;
-                border-bottom: 2px solid #333333;
-                font-weight: bold;
-                font-size: 14px;
-            }
-            QTableWidget QScrollBar:vertical {
-                background-color: #1e1e1e;
-                width: 12px;
-                border-radius: 6px;
-            }
-            QTableWidget QScrollBar::handle:vertical {
-                background-color: #444444;
-                border-radius: 6px;
-                min-height: 20px;
-            }
-            QTableWidget QScrollBar::handle:vertical:hover {
-                background-color: #555555;
-            }
-            QTableWidget QScrollBar::add-line:vertical,
-            QTableWidget QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-        """)
+        apply_theme_stylesheet(self.file_table, self._file_table_style)
         
         # 设置列宽
         header = self.file_table.horizontalHeader()

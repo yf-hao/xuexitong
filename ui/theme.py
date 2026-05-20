@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from typing import Callable
 
 from PyQt6.QtCore import QObject, QEvent, QSettings, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
@@ -278,45 +280,97 @@ _DECLARATION_REPLACEMENTS = [
 ]
 
 
-def themed_stylesheet(css: str, mode: str | None = None) -> str:
-    css = str(css or "")
-    mode = mode or theme_manager().mode
-    if mode != "light":
-        return css
+_FAST_TRANSLATION_HINTS = (
+    "#",
+    "white",
+    "background-color",
+    "alternate-background-color",
+    "selection-background-color",
+    "border:",
+    "color:",
+)
+
+
+@lru_cache(maxsize=len(THEME_MODES))
+def _formatted_replacements(mode: str) -> tuple[tuple[str, str], ...]:
     palette = get_theme_palette(mode)
+    return tuple((source, target.format(**palette.__dict__)) for source, target in _DECLARATION_REPLACEMENTS)
+
+
+@lru_cache(maxsize=1)
+def _compiled_replacement_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    return tuple(
+        (source, re.compile(rf"(?<![-\\w]){re.escape(source)}"))
+        for source, _ in _DECLARATION_REPLACEMENTS
+    )
+
+
+@lru_cache(maxsize=512)
+def _cached_themed_stylesheet(mode: str, css: str) -> str:
+    if mode != "light" or not css:
+        return css
+
+    if not any(hint in css for hint in _FAST_TRANSLATION_HINTS):
+        return css
+
     themed = css
-    for source, target in _DECLARATION_REPLACEMENTS:
-        themed = re.sub(
-            rf"(?<![-\\w]){re.escape(source)}",
-            target.format(**palette.__dict__),
-            themed,
-        )
+    pattern_map = dict(_compiled_replacement_patterns())
+    for source, target in _formatted_replacements(mode):
+        if source in themed:
+            themed = pattern_map[source].sub(target, themed)
     return themed
 
 
-def apply_theme_stylesheet(widget: QWidget, css: str, mode: str | None = None):
+def themed_stylesheet(css: str, mode: str | None = None) -> str:
+    css = str(css or "")
+    mode = mode or theme_manager().mode
+    return _cached_themed_stylesheet(mode, css)
+
+
+def _resolve_theme_stylesheet(widget: QWidget, mode: str | None = None) -> str:
+    factory = getattr(widget, "_theme_palette_stylesheet_factory", None)
+    if callable(factory):
+        return str(factory(get_theme_palette(mode or theme_manager().mode)) or "")
+
+    base_css = getattr(widget, "_theme_base_stylesheet", "")
+    return themed_stylesheet(str(base_css or ""), mode)
+
+
+def apply_theme_stylesheet(widget: QWidget, css: str | Callable[[ThemePalette], str], mode: str | None = None):
     if widget is None:
         return
-    setattr(widget, "_theme_base_stylesheet", str(css or ""))
-    _set_widget_stylesheet(widget, themed_stylesheet(css, mode))
+    if callable(css):
+        setattr(widget, "_theme_palette_stylesheet_factory", css)
+        setattr(widget, "_theme_base_stylesheet", "")
+    else:
+        setattr(widget, "_theme_palette_stylesheet_factory", None)
+        setattr(widget, "_theme_base_stylesheet", str(css or ""))
+    _set_widget_stylesheet(widget, _resolve_theme_stylesheet(widget, mode))
 
 
 def refresh_theme_styles(widget: QWidget, mode: str | None = None):
     if widget is None:
         return
-    base_css = getattr(widget, "_theme_base_stylesheet", None)
-    if isinstance(base_css, str):
-        _set_widget_stylesheet(widget, themed_stylesheet(base_css, mode))
-    for child in widget.findChildren(QWidget):
-        child_css = getattr(child, "_theme_base_stylesheet", None)
-        if isinstance(child_css, str):
-            _set_widget_stylesheet(child, themed_stylesheet(child_css, mode))
+
+    binder = getattr(widget, "_theme_tree_binder", None)
+    targets = binder.iter_widgets() if binder is not None else [widget, *widget.findChildren(QWidget)]
+    for target in targets:
+        if target is None:
+            continue
+        has_factory = callable(getattr(target, "_theme_palette_stylesheet_factory", None))
+        base_css = getattr(target, "_theme_base_stylesheet", None)
+        if has_factory or isinstance(base_css, str):
+            _set_widget_stylesheet(target, _resolve_theme_stylesheet(target, mode))
 
 
 def _set_widget_stylesheet(widget: QWidget, css: str):
+    css = str(css or "")
+    if getattr(widget, "_theme_applied_stylesheet", None) == css and widget.styleSheet() == css:
+        return
     setattr(widget, "_theme_style_syncing", True)
     try:
-        widget.setStyleSheet(str(css or ""))
+        widget.setStyleSheet(css)
+        setattr(widget, "_theme_applied_stylesheet", css)
     finally:
         setattr(widget, "_theme_style_syncing", False)
 
@@ -329,18 +383,51 @@ def _sync_runtime_stylesheet(widget: QWidget):
     if not isinstance(current_css, str) or not current_css:
         return
 
+    if current_css == getattr(widget, "_theme_applied_stylesheet", None):
+        return
+
     mode = theme_manager().mode
+    factory = getattr(widget, "_theme_palette_stylesheet_factory", None)
+    if callable(factory):
+        if current_css == _resolve_theme_stylesheet(widget, mode):
+            return
+        setattr(widget, "_theme_palette_stylesheet_factory", None)
+
     base_css = getattr(widget, "_theme_base_stylesheet", None)
-    if isinstance(base_css, str) and current_css == themed_stylesheet(base_css, mode):
+    expected_css = themed_stylesheet(base_css, mode) if isinstance(base_css, str) else ""
+    if isinstance(base_css, str) and current_css == expected_css:
+        setattr(widget, "_theme_applied_stylesheet", current_css)
         return
 
     setattr(widget, "_theme_base_stylesheet", current_css)
     themed_css = themed_stylesheet(current_css, mode)
-    if themed_css != current_css:
-        _set_widget_stylesheet(widget, themed_css)
+    if themed_css == current_css:
+        setattr(widget, "_theme_applied_stylesheet", current_css)
+        return
+    _set_widget_stylesheet(widget, themed_css)
 
 
 class _ThemeChildBinder(QObject):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._widgets: list[QWidget] = []
+
+    def register_widget(self, widget: QWidget):
+        if widget is None:
+            return
+        self._widgets.append(widget)
+
+    def iter_widgets(self) -> list[QWidget]:
+        alive = []
+        for widget in self._widgets:
+            try:
+                widget.objectName()
+            except RuntimeError:
+                continue
+            alive.append(widget)
+        self._widgets = alive
+        return list(alive)
+
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.ChildAdded:
             child = event.child()
@@ -348,7 +435,6 @@ class _ThemeChildBinder(QObject):
                 _bind_theme_widget(child, self)
                 for descendant in child.findChildren(QWidget):
                     _bind_theme_widget(descendant, self)
-                refresh_theme_styles(child, theme_manager().mode)
         elif event.type() == QEvent.Type.StyleChange and isinstance(watched, QWidget):
             _sync_runtime_stylesheet(watched)
         return False
@@ -362,10 +448,11 @@ def _bind_theme_widget(widget: QWidget, binder: _ThemeChildBinder | None = None)
 
     if binder is not None:
         widget.installEventFilter(binder)
+        binder.register_widget(widget)
 
     if isinstance(current_css, str) and current_css and not hasattr(widget, "_theme_base_stylesheet"):
         setattr(widget, "_theme_base_stylesheet", current_css)
-        _set_widget_stylesheet(widget, themed_stylesheet(current_css, theme_manager().mode))
+        _set_widget_stylesheet(widget, _resolve_theme_stylesheet(widget, theme_manager().mode))
 
 
 def bind_theme_tree(root: QWidget):

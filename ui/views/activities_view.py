@@ -15,9 +15,181 @@ from ui.workers import (
     PublishSigninWorker, DeleteSigninWorker, StartActiveWorker, EndActiveWorker,
     DeleteActiveWorker, AttendanceDetailWorker
 )
-from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE
 from core.config import SIGNIN_DATA_FILE, LOCATION_DATA_FILE, DEFAULT_COMMON_LOCATIONS
-from ui.theme import bind_theme_tree
+from ui.theme import apply_theme_stylesheet, bind_theme_tree
+
+
+def _activities_stat_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border};
+            padding: 25px;
+            border-radius: 12px;
+            font-size: 18px;
+            font-weight: bold;
+            min-width: 180px;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.hover_bg};
+            border: 1px solid {palette.accent};
+            color: {palette.accent};
+        }}
+        QPushButton:disabled {{
+            color: {palette.disabled_text};
+            background-color: {palette.disabled_bg};
+        }}
+    """
+
+
+def _activities_container_style(palette) -> str:
+    return f"""
+        QFrame {{
+            background-color: {palette.card_bg};
+            border: 1px solid {palette.border};
+            border-radius: 12px;
+        }}
+    """
+
+
+def _signin_config_box_style(palette) -> str:
+    return f"""
+        QGroupBox {{
+            border: 2px solid {palette.border};
+            border-radius: 10px;
+            padding-top: 15px;
+        }}
+    """
+
+
+def _signin_label_style(palette, font_size: int = 14, margin_left: int = 0, color: str | None = None) -> str:
+    margin = f" margin-left: {margin_left}px;" if margin_left else ""
+    return f"font-size: {font_size}px; color: {color or palette.text};{margin}"
+
+
+def _signin_field_style(palette, padding_left: int = 5) -> str:
+    return (
+        f"background: {palette.panel_alt_bg}; color: {palette.text}; border: 1px solid {palette.border_strong}; "
+        f"border-radius: 4px; padding-left: {padding_left}px;"
+    )
+
+
+def _signin_combo_style(palette, padding_left: int = 5) -> str:
+    return f"""
+        QComboBox {{
+            background: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            padding-left: {padding_left}px;
+        }}
+        QComboBox:disabled {{
+            background: {palette.disabled_bg};
+            color: {palette.disabled_text};
+            border: 1px solid {palette.border};
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            selection-background-color: {palette.accent};
+            selection-color: #ffffff;
+            outline: none;
+        }}
+        QListView::item {{
+            min-height: 35px;
+            padding-left: 10px;
+        }}
+        QListView::item:hover {{
+            background-color: {palette.accent};
+            color: #ffffff;
+        }}
+    """
+
+
+def _signin_checkbox_style(palette) -> str:
+    return f"""
+        QCheckBox {{
+            font-size: 13px;
+            color: {palette.text};
+            spacing: 8px;
+        }}
+        QCheckBox::indicator {{
+            width: 18px;
+            height: 18px;
+            border: 2px solid {palette.text_muted};
+            border-radius: 3px;
+            background: {palette.panel_alt_bg};
+        }}
+        QCheckBox::indicator:hover {{
+            border: 2px solid {palette.accent};
+            background: {palette.disabled_bg};
+        }}
+        QCheckBox::indicator:checked {{
+            background: {palette.accent};
+            border: 2px solid {palette.accent};
+            image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
+        }}
+    """
+
+
+def _signin_location_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: bold;
+            padding: 0 10px;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.accent_hover};
+        }}
+        QPushButton:pressed {{
+            background-color: {palette.accent_hover};
+        }}
+        QPushButton:disabled {{
+            background-color: {palette.disabled_bg};
+            color: {palette.disabled_text};
+        }}
+    """
+
+
+def _signin_primary_action_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border-radius: 6px;
+            padding: 10px 15px;
+            font-weight: bold;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.accent_hover};
+        }}
+    """
+
+
+def _signin_success_action_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.success};
+            color: #ffffff;
+            border-radius: 6px;
+            padding: 10px 15px;
+            font-weight: bold;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.success_hover};
+        }}
+        QPushButton:disabled {{
+            background-color: {palette.disabled_bg};
+            color: {palette.disabled_text};
+        }}
+    """
 
 class ActivitiesView(QWidget):
     def __init__(self, crawler, status_callback, get_course_callback, get_class_name_callback, get_class_id_callback, parent=None):
@@ -49,8 +221,7 @@ class ActivitiesView(QWidget):
         ]
         
         for btn in self.buttons:
-
-            btn.setStyleSheet(STAT_BUTTON_STYLE)
+            apply_theme_stylesheet(btn, _activities_stat_button_style)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
         self.btn_questionnaire.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -65,7 +236,7 @@ class ActivitiesView(QWidget):
         
         # Result area
         self.activities_scroll = QFrame()
-        self.activities_scroll.setStyleSheet(STAT_CARD_CONTAINER_STYLE)
+        apply_theme_stylesheet(self.activities_scroll, _activities_container_style)
         self.activities_scroll_layout = QVBoxLayout(self.activities_scroll)
         self.activities_scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.activities_scroll_layout.setSpacing(10)
@@ -150,83 +321,54 @@ class ActivitiesView(QWidget):
 
     def _setup_signin_config_ui(self):
         config_box = QGroupBox("")
-        config_box.setStyleSheet("""
-            QGroupBox {
-                border: 2px solid #333333;
-                border-radius: 10px;
-                padding-top: 15px;
-            }
-        """)
+        apply_theme_stylesheet(config_box, _signin_config_box_style)
         config_layout = QGridLayout(config_box)
         config_layout.setSpacing(15)
 
         # UI elements
         lbl_date = QLabel("📅 第一周周一")
-        lbl_date.setStyleSheet("font-size: 14px; color: #ffffff;")
+        apply_theme_stylesheet(lbl_date, lambda palette: _signin_label_style(palette))
         config_layout.addWidget(lbl_date, 0, 0)
         self.start_date_edit = QDateEdit(QDate.currentDate())
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setMinimumHeight(35)
-        self.start_date_edit.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px; padding-left: 5px;")
+        apply_theme_stylesheet(self.start_date_edit, lambda palette: _signin_field_style(palette, 5))
         self._signin_primary_field_width = max(self.start_date_edit.sizeHint().width(), 240)
         self.start_date_edit.setFixedWidth(self._signin_primary_field_width)
         config_layout.addWidget(self.start_date_edit, 0, 1)
 
         lbl_group = QLabel("👥 活动分组")
-        lbl_group.setStyleSheet("font-size: 14px; color: #ffffff; margin-left: 10px;")
+        apply_theme_stylesheet(lbl_group, lambda palette: _signin_label_style(palette, margin_left=10))
         config_layout.addWidget(lbl_group, 0, 2)
         self.group_combo = QComboBox()
         self.group_combo.setView(QListView())
         self.group_combo.setMinimumHeight(35)
         self.group_combo.setMinimumWidth(180)
-        self.group_combo.setStyleSheet("""
-            QComboBox {
-                background: #252526; 
-                color: white; 
-                border: 1px solid #444; 
-                border-radius: 4px;
-                padding-left: 5px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border: 1px solid #444444;
-                selection-background-color: #007acc;
-                outline: none;
-            }
-            QListView::item {
-                min-height: 35px;
-                padding-left: 10px;
-            }
-            QListView::item:hover {
-                background-color: #007acc;
-                color: #ffffff;
-            }
-        """)
+        apply_theme_stylesheet(self.group_combo, lambda palette: _signin_combo_style(palette, 5))
         self.group_combo.addItem("正在加载分组...", None)
         config_layout.addWidget(self.group_combo, 0, 3, 1, 3)
 
         lbl_weeks = QLabel("🗓️ 周次配置")
-        lbl_weeks.setStyleSheet("font-size: 14px; color: #ffffff;")
+        apply_theme_stylesheet(lbl_weeks, lambda palette: _signin_label_style(palette))
         config_layout.addWidget(lbl_weeks, 1, 0)
         self.total_weeks = QSpinBox()
         self.total_weeks.setRange(1, 52)
         self.total_weeks.setValue(16)
         self.total_weeks.setMinimumHeight(35)
         self.total_weeks.setFixedWidth(64)
-        self.total_weeks.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px;")
+        apply_theme_stylesheet(self.total_weeks, lambda palette: _signin_field_style(palette, 0))
         self.odd_times = QSpinBox()
         self.odd_times.setRange(0, 10)
         self.odd_times.setValue(2)
         self.odd_times.setMinimumHeight(35)
         self.odd_times.setFixedWidth(64)
-        self.odd_times.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px;")
+        apply_theme_stylesheet(self.odd_times, lambda palette: _signin_field_style(palette, 0))
         self.even_times = QSpinBox()
         self.even_times.setRange(0, 10)
         self.even_times.setValue(2)
         self.even_times.setMinimumHeight(35)
         self.even_times.setFixedWidth(64)
-        self.even_times.setStyleSheet("background: #252526; color: white; border: 1px solid #444; border-radius: 4px;")
+        apply_theme_stylesheet(self.even_times, lambda palette: _signin_field_style(palette, 0))
 
         counts_container = QWidget()
         counts_container.setFixedWidth(self._signin_primary_field_width)
@@ -244,7 +386,7 @@ class ActivitiesView(QWidget):
             field_layout.setSpacing(4)
             field_label = QLabel(title)
             field_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            field_label.setStyleSheet("font-size: 12px; color: #d0d0d0;")
+            apply_theme_stylesheet(field_label, lambda palette: _signin_label_style(palette, font_size=12, color=palette.text_secondary))
             field_layout.addWidget(field_label)
             field_layout.addWidget(spinbox, alignment=Qt.AlignmentFlag.AlignCenter)
             counts_layout.addLayout(field_layout)
@@ -253,64 +395,14 @@ class ActivitiesView(QWidget):
 
         # === 位置签到配置 ===
         self.chk_enable_location = QCheckBox("启用位置签到")
-        self.chk_enable_location.setStyleSheet("""
-            QCheckBox {
-                font-size: 13px;
-                color: #ffffff;
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border: 2px solid #666;
-                border-radius: 3px;
-                background: #252526;
-            }
-            QCheckBox::indicator:hover {
-                border: 2px solid #007acc;
-                background: #2d2d2d;
-            }
-            QCheckBox::indicator:checked {
-                background: #007acc;
-                border: 2px solid #007acc;
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
-            }
-        """)
+        apply_theme_stylesheet(self.chk_enable_location, _signin_checkbox_style)
         config_layout.addWidget(self.chk_enable_location, 1, 2)
         
         # 位置下拉框
         self.combo_location = QComboBox()
         self.combo_location.setMinimumHeight(35)
         self.combo_location.setMinimumWidth(180)
-        self.combo_location.setStyleSheet("""
-            QComboBox {
-                background: #252526; 
-                color: white; 
-                border: 1px solid #444; 
-                border-radius: 4px;
-                padding-left: 5px;
-            }
-            QComboBox:disabled {
-                background: #1a1a1a;
-                color: #666666;
-                border: 1px solid #333;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border: 1px solid #444444;
-                selection-background-color: #007acc;
-                outline: none;
-            }
-            QListView::item {
-                min-height: 35px;
-                padding-left: 10px;
-            }
-            QListView::item:hover {
-                background-color: #007acc;
-                color: #ffffff;
-            }
-        """)
+        apply_theme_stylesheet(self.combo_location, lambda palette: _signin_combo_style(palette, 5))
         self.combo_location.addItem("暂无位置数据", None)
         config_layout.addWidget(self.combo_location, 1, 3, 1, 2)
         
@@ -319,97 +411,28 @@ class ActivitiesView(QWidget):
         self.btn_config_location.setFixedHeight(35)
         self.btn_config_location.setMinimumWidth(70)
         self.btn_config_location.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_config_location.setStyleSheet("""
-            QPushButton { 
-                background-color: #0078d4; 
-                color: #ffffff; 
-                border: none;
-                border-radius: 4px; 
-                font-size: 13px;
-                font-weight: bold;
-                padding: 0 10px;
-            }
-            QPushButton:hover { 
-                background-color: #1e90ff; 
-            }
-            QPushButton:pressed { 
-                background-color: #0066b8; 
-            }
-            QPushButton:disabled {
-                background-color: #555555;
-                color: #888888;
-            }
-        """)
+        apply_theme_stylesheet(self.btn_config_location, _signin_location_button_style)
         config_layout.addWidget(self.btn_config_location, 1, 5)
         
         # 验证码勾选框
         self.chk_need_vcode = QCheckBox("需要验证码")
         self.chk_need_vcode.setChecked(False)
-        self.chk_need_vcode.setStyleSheet("""
-            QCheckBox {
-                font-size: 13px;
-                color: #ffffff;
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border: 2px solid #666;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #0078d4;
-                border-color: #0078d4;
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
-            }
-        """)
+        apply_theme_stylesheet(self.chk_need_vcode, _signin_checkbox_style)
         config_layout.addWidget(self.chk_need_vcode, 3, 0)
 
         self.chk_need_face = QCheckBox("人脸识别")
         self.chk_need_face.setChecked(True)
-        self.chk_need_face.setStyleSheet("""
-            QCheckBox {
-                font-size: 13px;
-                color: #ffffff;
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border: 2px solid #666;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #0078d4;
-                border-color: #0078d4;
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
-            }
-        """)
+        apply_theme_stylesheet(self.chk_need_face, _signin_checkbox_style)
         config_layout.addWidget(self.chk_need_face, 3, 1)
 
         self.lbl_refresh_time = QLabel("更新频率")
-        self.lbl_refresh_time.setStyleSheet("font-size: 13px; color: #ffffff; margin-left: 10px;")
+        apply_theme_stylesheet(self.lbl_refresh_time, lambda palette: _signin_label_style(palette, font_size=13, margin_left=10))
         config_layout.addWidget(self.lbl_refresh_time, 3, 2)
 
         self.combo_refresh_time = QComboBox()
         self.combo_refresh_time.setMinimumHeight(35)
         self.combo_refresh_time.setFixedWidth(90)
-        self.combo_refresh_time.setStyleSheet("""
-            QComboBox {
-                background: #252526;
-                color: white;
-                border: 1px solid #444;
-                border-radius: 4px;
-                padding-left: 8px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border: 1px solid #444444;
-                selection-background-color: #007acc;
-                outline: none;
-            }
-        """)
+        apply_theme_stylesheet(self.combo_refresh_time, lambda palette: _signin_combo_style(palette, 8))
         for seconds in (10, 20, 30):
             self.combo_refresh_time.addItem(str(seconds), seconds)
         self.combo_refresh_time.setCurrentIndex(2)
@@ -428,19 +451,12 @@ class ActivitiesView(QWidget):
         
         self.btn_generate = QPushButton("⚡ 生成列表")
         self.btn_generate.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_generate.setStyleSheet("""
-            QPushButton { background-color: #007acc; color: white; border-radius: 6px; padding: 10px 15px; font-weight: bold; }
-            QPushButton:hover { background-color: #1a8ad4; }
-        """)
+        apply_theme_stylesheet(self.btn_generate, _signin_primary_action_style)
         self.btn_generate.clicked.connect(self._generate_signin_items)
         
         self.btn_batch_publish = QPushButton("🚀 一键提交")
         self.btn_batch_publish.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_batch_publish.setStyleSheet("""
-            QPushButton { background-color: #4ec9b0; color: white; border-radius: 6px; padding: 10px 15px; font-weight: bold; }
-            QPushButton:hover { background-color: #45b79d; }
-            QPushButton:disabled { background-color: #3e3e42; color: #888888; }
-        """)
+        apply_theme_stylesheet(self.btn_batch_publish, _signin_success_action_style)
         self.btn_batch_publish.clicked.connect(self._handle_batch_publish)
         
         button_layout.addWidget(self.btn_generate)

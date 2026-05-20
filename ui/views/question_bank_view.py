@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QEvent, QThread
 from PyQt6.QtGui import QIcon, QAction, QKeySequence, QShortcut
 from PyQt6.QtWebEngineCore import QWebEnginePage
-from ui.theme import bind_theme_tree
+from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager
 
 
 class QuestionDetailPage(QWebEnginePage):
@@ -432,9 +432,9 @@ class QuestionBankView(QWidget):
 
         self.btn_delete = QPushButton("🗑️ 删除")
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_delete.setStyleSheet("""
+        apply_theme_stylesheet(self.btn_delete, """
             QPushButton {
-                background-color: #6b2d2d;
+                background-color: #442222;
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
@@ -442,7 +442,7 @@ class QuestionBankView(QWidget):
                 font-size: 13px;
             }
             QPushButton:hover {
-                background-color: #7e3838;
+                background-color: #d9534f;
             }
         """)
         self.btn_delete.clicked.connect(self._on_delete_questions)
@@ -1552,6 +1552,7 @@ class QuestionDetailDialog(QDialog):
             self._app.installEventFilter(self)
             self._app_event_filter_installed = True
         self.setup_ui()
+        theme_manager().theme_changed.connect(self._on_theme_changed)
         self._resize_to_screen()
         self._update_question_content(question_data)
     
@@ -1559,6 +1560,7 @@ class QuestionDetailDialog(QDialog):
         """设置界面。"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        apply_theme_stylesheet(self, "background-color: #1e1e1e;")
         
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         
@@ -1566,7 +1568,7 @@ class QuestionDetailDialog(QDialog):
         self.web_page = QuestionDetailPage(self.web_view)
         self.web_page.close_requested.connect(self._trigger_close_button)
         self.web_view.setPage(self.web_page)
-        self.web_view.setStyleSheet("background-color: #1e1e1e; border: none;")
+        apply_theme_stylesheet(self.web_view, "background-color: #1e1e1e; border: none;")
         self.web_view.setMinimumHeight(550)
         self._bind_close_shortcuts()
         self.installEventFilter(self)
@@ -1574,14 +1576,14 @@ class QuestionDetailDialog(QDialog):
         layout.addWidget(self.web_view)
         
         btn_bar = QWidget()
-        btn_bar.setStyleSheet("background-color: #2d2d2d; border-top: 1px solid #3e3e42;")
+        apply_theme_stylesheet(btn_bar, "background-color: #2d2d2d; border-top: 1px solid #3e3e42;")
         btn_bar.setFixedHeight(74)
         btn_layout = QHBoxLayout(btn_bar)
         btn_layout.setContentsMargins(14, 10, 14, 10)
         btn_layout.setSpacing(8)
 
         self.position_label = QLabel("当前题目")
-        self.position_label.setStyleSheet("color: #cccccc; font-size: 13px;")
+        apply_theme_stylesheet(self.position_label, "color: #cccccc; font-size: 13px;")
         btn_layout.addWidget(self.position_label)
         btn_layout.addStretch()
 
@@ -1604,17 +1606,17 @@ class QuestionDetailDialog(QDialog):
         """
 
         self.prev_btn = QPushButton("上一题")
-        self.prev_btn.setStyleSheet(nav_btn_style)
+        apply_theme_stylesheet(self.prev_btn, nav_btn_style)
         self.prev_btn.clicked.connect(lambda: self._navigate_question(-1))
         btn_layout.addWidget(self.prev_btn)
 
         self.next_btn = QPushButton("下一题")
-        self.next_btn.setStyleSheet(nav_btn_style)
+        apply_theme_stylesheet(self.next_btn, nav_btn_style)
         self.next_btn.clicked.connect(lambda: self._navigate_question(1))
         btn_layout.addWidget(self.next_btn)
         
         self.close_btn = QPushButton("关闭")
-        self.close_btn.setStyleSheet("""
+        apply_theme_stylesheet(self.close_btn, """
             QPushButton {
                 background-color: #0e639c;
                 color: #ffffff;
@@ -1631,6 +1633,7 @@ class QuestionDetailDialog(QDialog):
         btn_layout.addWidget(self.close_btn)
         
         layout.addWidget(btn_bar)
+        bind_theme_tree(self)
 
     def _resize_to_screen(self):
         """根据屏幕比例设置初始尺寸，并允许用户手动调整。"""
@@ -1651,10 +1654,15 @@ class QuestionDetailDialog(QDialog):
 
     def _update_question_content(self, question_data: dict):
         """刷新当前弹窗中的题目内容。"""
+        self._current_question_data = dict(question_data or {})
         processed_data = self._process_images(question_data)
         html = self._build_html(processed_data)
         self.web_view.setHtml(html, QUrl.fromLocalFile(self._KATEX_DIR + "/"))
         self._update_navigation_state()
+
+    def _on_theme_changed(self, _mode: str):
+        if getattr(self, "_current_question_data", None):
+            self._update_question_content(self._current_question_data)
 
     def _update_navigation_state(self):
         """刷新上一题下一题按钮和题号显示。"""
@@ -1849,7 +1857,18 @@ class QuestionDetailDialog(QDialog):
     def _build_html(self, data: dict) -> str:
         """构建完整的 HTML 页面，内联 KaTeX 资源"""
         import html as html_module
-        
+
+        palette = get_theme_palette(theme_manager().mode)
+
+        def rgba(hex_color: str, alpha: float) -> str:
+            hex_color = str(hex_color or "").lstrip("#")
+            if len(hex_color) != 6:
+                return f"rgba(0, 0, 0, {alpha})"
+            r = int(hex_color[0:2], 16)
+            g = int(hex_color[2:4], 16)
+            b = int(hex_color[4:6], 16)
+            return f"rgba({r}, {g}, {b}, {alpha})"
+         
         stem = data.get("stem", "")
         options = data.get("options", [])
         answer = data.get("answer", "")
@@ -1941,9 +1960,9 @@ class QuestionDetailDialog(QDialog):
         }}
         body {{
             background:
-                radial-gradient(circle at top, rgba(86, 156, 214, 0.12), transparent 30%),
-                linear-gradient(180deg, #1c1d21 0%, #18191c 100%);
-            color: #d7dce2;
+                radial-gradient(circle at top, {rgba(palette.accent_soft, 0.14)}, transparent 30%),
+                linear-gradient(180deg, {palette.panel_bg} 0%, {palette.window_bg} 100%);
+            color: {palette.text_secondary};
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             font-size: 14px;
             line-height: 1.7;
@@ -1961,10 +1980,10 @@ class QuestionDetailDialog(QDialog):
             margin-bottom: 0;
         }}
         .section-card {{
-            background: rgba(37, 38, 43, 0.92);
-            border: 1px solid #343842;
+            background: {rgba(palette.card_bg, 0.94)};
+            border: 1px solid {palette.border_strong};
             border-radius: 12px;
-            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+            box-shadow: 0 10px 24px {rgba("#000000", 0.08 if palette.mode == "light" else 0.18)};
             overflow: hidden;
         }}
         .section-card:first-child .content-panel {{
@@ -1977,7 +1996,7 @@ class QuestionDetailDialog(QDialog):
             padding: 10px 14px 0;
         }}
         .section-title {{
-            color: #8fc7ff;
+            color: {palette.accent_soft};
             font-size: 12px;
             font-weight: 700;
             letter-spacing: 0.08em;
@@ -2001,9 +2020,9 @@ class QuestionDetailDialog(QDialog):
             align-items: center;
             padding: 2px 8px;
             border-radius: 999px;
-            background: rgba(86, 156, 214, 0.14);
-            border: 1px solid rgba(86, 156, 214, 0.32);
-            color: #9fd3ff;
+            background: {rgba(palette.accent, 0.12)};
+            border: 1px solid {rgba(palette.accent, 0.28)};
+            color: {palette.accent};
             font-size: 12px;
             font-weight: 600;
             margin-bottom: 8px;
@@ -2011,8 +2030,8 @@ class QuestionDetailDialog(QDialog):
         .option-item {{
             display: flex;
             align-items: flex-start;
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid #31353f;
+            background: {rgba(palette.panel_alt_bg, 0.65 if palette.mode == "light" else 0.45)};
+            border: 1px solid {palette.border};
             border-radius: 10px;
             padding: 10px 12px;
             margin-bottom: 6px;
@@ -2027,8 +2046,8 @@ class QuestionDetailDialog(QDialog):
             width: 26px;
             height: 26px;
             border-radius: 999px;
-            background: rgba(220, 220, 170, 0.14);
-            color: #f0efb1;
+            background: {rgba(palette.warning, 0.12)};
+            color: {palette.warning};
             font-weight: 700;
             flex-shrink: 0;
             margin-right: 10px;
@@ -2056,17 +2075,17 @@ class QuestionDetailDialog(QDialog):
             gap: 8px;
         }}
         .meta-card {{
-            background: rgba(37, 38, 43, 0.95);
-            border: 1px solid #343842;
+            background: {rgba(palette.panel_alt_bg, 0.82 if palette.mode == "light" else 0.95)};
+            border: 1px solid {palette.border_strong};
             border-radius: 12px;
             padding: 8px 11px;
         }}
         .meta-card-answer {{
-            background: linear-gradient(180deg, rgba(31, 77, 36, 0.95), rgba(27, 66, 32, 0.95));
-            border-color: #4caf50;
+            background: linear-gradient(180deg, {rgba(palette.success, 0.16)}, {rgba(palette.success_hover, 0.22)});
+            border-color: {palette.success};
         }}
         .meta-label {{
-            color: #8fc7ff;
+            color: {palette.accent_soft};
             font-size: 11px;
             letter-spacing: 0.06em;
             text-transform: uppercase;
@@ -2077,7 +2096,7 @@ class QuestionDetailDialog(QDialog):
             font-weight: bold;
         }}
         .meta-card-answer .meta-value {{
-            color: #7fe38a;
+            color: {palette.success};
         }}
         .analysis-content p {{
             margin: 2px 0;
@@ -2094,7 +2113,7 @@ class QuestionDetailDialog(QDialog):
             padding-bottom: 10px;
         }}
         .difficulty-text {{
-            color: #d7dce2;
+            color: {palette.text_secondary};
             font-size: 13px;
         }}
         .katex-display {{
@@ -2103,7 +2122,7 @@ class QuestionDetailDialog(QDialog):
         }}
         /* KaTeX 公式在深色主题下的颜色 */
         .katex {{
-            color: #cccccc;
+            color: {palette.text_secondary};
             font-size: 1.1em;
         }}
     </style>

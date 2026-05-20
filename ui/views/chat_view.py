@@ -29,150 +29,141 @@ logger = get_logger()
 
 # ── 样式 ──────────────────────────────────────────────
 
-CHAT_STYLE = """
-    /* 左侧面板 */
-    QFrame#left_panel {
-        background-color: #1a1a1a;
-        border-right: 1px solid #2d2d2d;
-    }
-    QTabWidget::pane {
+def _chat_style(palette) -> str:
+    return f"""
+    QFrame#left_panel {{
+        background-color: {palette.card_bg};
+        border-right: 1px solid {palette.border};
+    }}
+    QTabWidget::pane {{
         border: none;
-        background-color: #1a1a1a;
-    }
-    QTabBar::tab {
-        background-color: #1a1a1a;
-        color: #aaaaaa;
+        background-color: {palette.card_bg};
+    }}
+    QTabBar::tab {{
+        background-color: {palette.card_bg};
+        color: {palette.text_muted};
         padding: 10px 20px;
         border: none;
         border-bottom: 2px solid transparent;
         font-size: 14px;
         font-weight: bold;
         min-width: 80px;
-    }
-    QTabBar::tab:selected {
-        color: #007acc;
-        border-bottom: 2px solid #007acc;
-    }
-    QTabBar::tab:hover:!selected {
-        color: #ffffff;
-        background-color: #252526;
-    }
-    /* 消息列表 / 学生列表 */
-    QListWidget#chat_list, QListWidget#student_list {
-        background-color: #1a1a1a;
+    }}
+    QTabBar::tab:selected {{
+        color: {palette.accent};
+        border-bottom: 2px solid {palette.accent};
+    }}
+    QTabBar::tab:hover:!selected {{
+        color: {palette.text};
+        background-color: {palette.panel_alt_bg};
+    }}
+    QListWidget#chat_list, QListWidget#student_list {{
+        background-color: {palette.card_bg};
         border: none;
         outline: none;
         font-size: 14px;
-    }
-    QListWidget#chat_list::item, QListWidget#student_list::item {
+    }}
+    QListWidget#chat_list::item, QListWidget#student_list::item {{
         padding: 0px;
-        border-bottom: 1px solid #252526;
-        color: #cccccc;
-    }
-    QListWidget#chat_list::item:hover, QListWidget#student_list::item:hover {
-        background-color: #252526;
-    }
-    QListWidget#chat_list::item:selected, QListWidget#student_list::item:selected {
-        background-color: #007acc;
+        border-bottom: 1px solid {palette.panel_alt_bg};
+        color: {palette.text_secondary};
+    }}
+    QListWidget#chat_list::item:hover, QListWidget#student_list::item:hover {{
+        background-color: {palette.panel_alt_bg};
+    }}
+    QListWidget#chat_list::item:selected, QListWidget#student_list::item:selected {{
+        background-color: {palette.accent};
         color: #ffffff;
-    }
-
-    /* 右侧聊天区域 */
-    QFrame#right_panel {
-        background-color: #1e1e1e;
-    }
-    QLabel#chat_title {
-        color: #ffffff;
+    }}
+    QFrame#right_panel {{
+        background-color: {palette.panel_bg};
+    }}
+    QLabel#chat_title {{
+        color: {palette.text};
         font-size: 16px;
         font-weight: bold;
         padding: 12px 16px;
-        background-color: #252526;
-        border-bottom: 1px solid #2d2d2d;
-    }
-    /* 消息气泡区域 */
-    QTextEdit#chat_messages {
-        background-color: #1e1e1e;
+        background-color: {palette.panel_alt_bg};
+        border-bottom: 1px solid {palette.border};
+    }}
+    QTextEdit#chat_messages {{
+        background-color: {palette.panel_bg};
         border: none;
-        color: #cccccc;
+        color: {palette.text_secondary};
         font-size: 14px;
         padding: 10px;
-    }
-    /* 输入区域 */
-    QFrame#input_area {
-        background-color: #252526;
-        border-top: 1px solid #2d2d2d;
-    }
-    QLineEdit#student_search {
-        background-color: #1e1e1e;
-        color: #ffffff;
-        border: 1px solid #3d3d3d;
+    }}
+    QFrame#input_area {{
+        background-color: {palette.panel_alt_bg};
+        border-top: 1px solid {palette.border};
+    }}
+    QLineEdit#student_search {{
+        background-color: {palette.panel_bg};
+        color: {palette.text};
+        border: 1px solid {palette.border_strong};
         border-radius: 6px;
         padding: 8px 12px;
         font-size: 13px;
         margin: 8px 8px 4px 8px;
-    }
-    QLineEdit#student_search:focus {
-        border: 1px solid #007acc;
-    }
-    QPushButton#group_refresh_btn, QPushButton#message_refresh_btn {
-        background-color: #2d2d2d;
-        color: #dcdcdc;
-        border: 1px solid #3d3d3d;
+    }}
+    QLineEdit#student_search:focus {{
+        border: 1px solid {palette.accent};
+    }}
+    QPushButton#group_refresh_btn, QPushButton#message_refresh_btn {{
+        background-color: {palette.disabled_bg};
+        color: {palette.text_secondary};
+        border: 1px solid {palette.border_strong};
         border-radius: 6px;
         padding: 8px 14px;
         font-size: 13px;
         font-weight: bold;
         margin: 8px 8px 4px 0;
-    }
-    QPushButton#group_refresh_btn:hover, QPushButton#message_refresh_btn:hover {
-        background-color: #3a3a3a;
-        border: 1px solid #4a4a4a;
-    }
-    QPushButton#group_refresh_btn:disabled, QPushButton#message_refresh_btn:disabled {
-        color: #777777;
-        background-color: #252526;
-        border: 1px solid #333333;
-    }
-    QLineEdit#msg_input {
-        background-color: #1e1e1e;
-        color: #ffffff;
-        border: 1px solid #3d3d3d;
+    }}
+    QPushButton#group_refresh_btn:hover, QPushButton#message_refresh_btn:hover {{
+        background-color: {palette.hover_bg};
+        border: 1px solid {palette.border_strong};
+    }}
+    QPushButton#group_refresh_btn:disabled, QPushButton#message_refresh_btn:disabled {{
+        color: {palette.disabled_text};
+        background-color: {palette.panel_alt_bg};
+        border: 1px solid {palette.border};
+    }}
+    QLineEdit#msg_input {{
+        background-color: {palette.panel_bg};
+        color: {palette.text};
+        border: 1px solid {palette.border_strong};
         border-radius: 6px;
         padding: 10px 14px;
         font-size: 14px;
-    }
-    QLineEdit#msg_input:focus {
-        border: 1px solid #007acc;
-    }
-    QPushButton#send_btn {
-        background-color: #007acc;
+    }}
+    QLineEdit#msg_input:focus {{
+        border: 1px solid {palette.accent};
+    }}
+    QPushButton#send_btn {{
+        background-color: {palette.accent};
         color: #ffffff;
         border: none;
         border-radius: 6px;
         padding: 10px 20px;
         font-size: 14px;
         font-weight: bold;
-    }
-    QPushButton#send_btn:hover {
-        background-color: #1a8ad4;
-    }
-    QPushButton#send_btn:disabled {
-        background-color: #2d2d2d;
-        color: #666666;
-    }
-
-    /* 空状态占位 */
-    QLabel#empty_hint {
-        color: #555555;
+    }}
+    QPushButton#send_btn:hover {{
+        background-color: {palette.accent_hover};
+    }}
+    QPushButton#send_btn:disabled {{
+        background-color: {palette.disabled_bg};
+        color: {palette.disabled_text};
+    }}
+    QLabel#empty_hint {{
+        color: {palette.disabled_text};
         font-size: 16px;
-    }
-
-    /* 加载提示 */
-    QLabel#loading_hint {
-        color: #888888;
+    }}
+    QLabel#loading_hint {{
+        color: {palette.text_muted};
         font-size: 13px;
         padding: 10px;
-    }
+    }}
 """
 
 
@@ -353,7 +344,7 @@ class ChatView(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        apply_theme_stylesheet(self, CHAT_STYLE)
+        apply_theme_stylesheet(self, _chat_style)
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
