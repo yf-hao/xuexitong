@@ -6,7 +6,41 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QImage
-from ui.theme import apply_theme_stylesheet
+from ui.theme import apply_theme_stylesheet, refresh_theme_styles
+
+
+def _qr_dialog_style(palette) -> str:
+    return f"""
+        QDialog {{ background-color: {palette.panel_bg}; }}
+        QLabel {{ color: {palette.text}; }}
+    """
+
+
+def _qr_display_style(palette, state: str = "loading") -> str:
+    if state == "ready":
+        return "background-color: #ffffff; border-radius: 10px;"
+    if state == "ended":
+        return (
+            f"background-color: {palette.disabled_bg}; border-radius: 10px; "
+            f"color: {palette.danger}; font-size: 20px; font-weight: bold;"
+        )
+    return (
+        f"background-color: {palette.disabled_bg}; border-radius: 10px; "
+        f"color: {palette.text_muted}; font-size: 14px;"
+    )
+
+
+def _qr_close_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.border_strong};
+            color: {palette.text};
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 13px;
+        }}
+        QPushButton:hover {{ background-color: {palette.text_muted}; }}
+    """
 
 
 class QRCodeDialog(QDialog):
@@ -26,10 +60,7 @@ class QRCodeDialog(QDialog):
 
         self.setWindowTitle(f"签到二维码 - {title}" if title else "签到二维码")
         self.setFixedSize(572, 672)
-        apply_theme_stylesheet(self, """
-            QDialog { background-color: #1e1e1e; }
-            QLabel { color: #ffffff; }
-        """)
+        apply_theme_stylesheet(self, _qr_dialog_style)
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -37,7 +68,7 @@ class QRCodeDialog(QDialog):
 
         # 标题
         title_lbl = QLabel(f"📍 {title}" if title else "📍 签到二维码")
-        apply_theme_stylesheet(title_lbl, "font-size: 18px; font-weight: bold; color: #ffffff;")
+        apply_theme_stylesheet(title_lbl, "font-size: 18px; font-weight: bold;")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_lbl)
 
@@ -45,17 +76,14 @@ class QRCodeDialog(QDialog):
         self.qr_label = QLabel()
         self.qr_label.setFixedSize(512, 512)
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.qr_label.setStyleSheet("""
-            background-color: #ffffff;
-            border-radius: 10px;
-        """)
+        self.qr_label.setProperty("_qr_state", "loading")
         self.qr_label.setText("加载中...")
-        apply_theme_stylesheet(self.qr_label, """
-            background-color: #2d2d2d;
-            border-radius: 10px;
-            color: #888888;
-            font-size: 14px;
-        """)
+        apply_theme_stylesheet(
+            self.qr_label,
+            lambda palette, label=self.qr_label: _qr_display_style(
+                palette, str(label.property("_qr_state") or "loading")
+            ),
+        )
         layout.addWidget(self.qr_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # 状态栏
@@ -74,16 +102,7 @@ class QRCodeDialog(QDialog):
         close_btn = QPushButton("关闭")
         close_btn.setFixedWidth(100)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        apply_theme_stylesheet(close_btn, """
-            QPushButton {
-                background-color: #444444;
-                color: #ffffff;
-                border-radius: 6px;
-                padding: 8px;
-                font-size: 13px;
-            }
-            QPushButton:hover { background-color: #555555; }
-        """)
+        apply_theme_stylesheet(close_btn, _qr_close_button_style)
         close_btn.clicked.connect(self.reject)
         layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
@@ -106,13 +125,8 @@ class QRCodeDialog(QDialog):
                 self._poll_timer.stop()
                 self.qr_label.setPixmap(QPixmap())
                 self.qr_label.setText("签到已结束")
-                apply_theme_stylesheet(self.qr_label, """
-                    background-color: #2d2d2d;
-                    border-radius: 10px;
-                    color: #ff6b6b;
-                    font-size: 20px;
-                    font-weight: bold;
-                """)
+                self.qr_label.setProperty("_qr_state", "ended")
+                refresh_theme_styles(self.qr_label)
                 self.status_lbl.setText("⏰ 签到已结束，不再刷新")
                 return
 
@@ -215,10 +229,8 @@ class QRCodeDialog(QDialog):
                 Qt.TransformationMode.SmoothTransformation
             )
             self.qr_label.setPixmap(scaled)
-            apply_theme_stylesheet(self.qr_label, """
-                background-color: #ffffff;
-                border-radius: 10px;
-            """)
+            self.qr_label.setProperty("_qr_state", "ready")
+            refresh_theme_styles(self.qr_label)
 
             now = datetime.now().strftime("%H:%M:%S")
             self.status_lbl.setText("✅ 二维码已刷新")

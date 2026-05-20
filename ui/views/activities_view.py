@@ -53,6 +53,10 @@ def _activities_container_style(palette) -> str:
     """
 
 
+def _activities_scroll_area_style(palette) -> str:
+    return "border: none; background: transparent;"
+
+
 def _signin_config_box_style(palette) -> str:
     return f"""
         QGroupBox {{
@@ -280,7 +284,7 @@ class ActivitiesView(QWidget):
         self.activities_scroll_area = QScrollArea()
         self.activities_scroll_area.setWidgetResizable(True)
         self.activities_scroll_area.setWidget(self.activities_scroll)
-        self.activities_scroll_area.setStyleSheet("border: none; background: transparent;")
+        apply_theme_stylesheet(self.activities_scroll_area, _activities_scroll_area_style)
         
         self.layout.addWidget(self.activities_scroll_area, 1, 0, 1, 3)
         

@@ -3681,6 +3681,19 @@ class ChatAPITests(unittest.TestCase):
         self.assertNotIn(neutral, binder._widgets)
         root.deleteLater()
 
+    def test_ui_sources_no_longer_call_set_stylesheet_directly(self):
+        ui_root = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/ui")
+        offenders = []
+
+        for path in ui_root.rglob("*.py"):
+            if path.name == "theme.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            if "setStyleSheet(" in source:
+                offenders.append(str(path.relative_to(ui_root)))
+
+        self.assertEqual(offenders, [])
+
     def test_theme_tree_binding_rethemes_existing_widgets(self):
         from PyQt6.QtWidgets import QApplication, QWidget, QLabel
         from ui.theme import bind_theme_tree, refresh_theme_styles

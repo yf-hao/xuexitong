@@ -1,6 +1,17 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
 from PyQt6.QtCore import Qt
-from ui.theme import bind_theme_tree
+from ui.theme import apply_theme_stylesheet, bind_theme_tree
+
+
+def _learning_card_style(palette) -> str:
+    return f"""
+        QFrame {{
+            background-color: {palette.panel_bg};
+            border: 1px solid {palette.border_strong};
+            border-radius: 10px;
+            padding: 20px;
+        }}
+    """
 
 
 class LearningView(QWidget):
@@ -19,24 +30,17 @@ class LearningView(QWidget):
         layout.setSpacing(20)
 
         card = QFrame()
-        card.setStyleSheet("""
-            QFrame {
-                background-color: #1e1e1e;
-                border: 1px solid #2d2f33;
-                border-radius: 10px;
-                padding: 20px;
-            }
-        """)
+        apply_theme_stylesheet(card, _learning_card_style)
 
         card_layout = QVBoxLayout(card)
         card_layout.setSpacing(12)
 
         title = QLabel("学情")
-        title.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: bold;")
+        apply_theme_stylesheet(title, lambda palette: f"color: {palette.text}; font-size: 18px; font-weight: bold;")
 
         desc = QLabel("学情页面已接入课程菜单，后续可以在这里承接学习进度、完成率、访问情况等功能。")
         desc.setWordWrap(True)
-        desc.setStyleSheet("color: #bfc7d5; font-size: 13px; line-height: 1.6;")
+        apply_theme_stylesheet(desc, lambda palette: f"color: {palette.text_muted}; font-size: 13px; line-height: 1.6;")
 
         card_layout.addWidget(title)
         card_layout.addWidget(desc)

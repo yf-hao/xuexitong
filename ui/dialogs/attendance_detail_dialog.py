@@ -212,7 +212,7 @@ class AttendanceStatusEditDialog(QDialog):
             f"<div style='color:{palette.text_muted}; font-size:{username_size}px; margin-top:8px;'>{username_text}</div>"
             f"</div>"
         )
-        self.name_column_label.setStyleSheet("padding: 24px;")
+        apply_theme_stylesheet(self.name_column_label, "padding: 24px;")
         self._update_info_label()
 
     def _update_info_label(self):

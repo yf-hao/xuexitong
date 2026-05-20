@@ -232,7 +232,7 @@ class ChatSessionItem(QWidget):
         """异步加载完成后设置头像"""
         if pixmap and not pixmap.isNull():
             self.avatar_label.setPixmap(pixmap)
-            self.avatar_label.setStyleSheet("")
+            apply_theme_stylesheet(self.avatar_label, "")
             self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def set_unread_count(self, unread_count: int):
