@@ -207,17 +207,21 @@ class ChatSessionItem(QWidget):
         self.subtitle_label = QLabel(subtitle or "")
         apply_theme_stylesheet(self.subtitle_label, "color: #888888; font-size: 12px;")
         self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.subtitle_label.setVisible(bool(subtitle))
         text_layout.addWidget(self.subtitle_label)
 
         layout.addLayout(text_layout, stretch=1)
+        # setVisible 必须等到 text_layout 通过 addLayout 接入有 parent 的 layout 之后再调用，
+        # 否则 subtitle_label 此时仍是 parentless QWidget，setVisible(True) 会被当顶层窗口闪一下。
+        self.subtitle_label.setVisible(bool(subtitle))
 
         # 右侧：时间
         self.time_label = QLabel(time_str or "")
         apply_theme_stylesheet(self.time_label, "color: #888888; font-size: 12px;")
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.time_label.setVisible(bool(time_str))
         layout.addWidget(self.time_label)
+        # setVisible 必须在 addWidget 之后调用，否则 Windows 上会把这个无 parent 的 QLabel
+        # 当成顶层窗口闪一下（标题栏小弹窗现象）。
+        self.time_label.setVisible(bool(time_str))
         self.set_unread_count(unread_count)
 
     def _set_placeholder_avatar(self, name: str):
@@ -531,13 +535,20 @@ class ChatView(QWidget):
             if auto_triggered:
                 ChatView._schedule_realtime_message_refresh(self)
             return
+
+        # auto_triggered=True 仅由 msync 收到消息后的 400ms 节流计时器触发；
+        # 此时 msync 连接已活跃，没必要再走 ws/info HTTP 握手——直接确保连接即可，
+        # 既避免短时间内反复创建后台 HTTP 线程，也避免任何由握手引发的副作用。
+        if auto_triggered:
+            self._ensure_msync_connected()
+            return
+
         self._message_refreshing = True
-        if not auto_triggered and hasattr(self, "message_refresh_btn"):
+        if hasattr(self, "message_refresh_btn"):
             self.message_refresh_btn.setEnabled(False)
             self.message_refresh_btn.setText("刷新中")
-        if not auto_triggered:
-            self.loading_hint.setText("正在刷新消息连接...")
-            self.loading_hint.show()
+        self.loading_hint.setText("正在刷新消息连接...")
+        self.loading_hint.show()
 
         def run_refresh():
             ok = True
@@ -569,14 +580,15 @@ class ChatView(QWidget):
             run_refresh()
 
     def _on_msync_info_refresh_done(self, auto_triggered: bool, ok: bool):
+        # auto_triggered=True 在 _refresh_message_tab 中已经短路返回，不会走到这里；
+        # 这里只处理用户手动点击"刷新"按钮的回调。
         self._message_refreshing = False
-        if not auto_triggered and hasattr(self, "message_refresh_btn"):
+        if hasattr(self, "message_refresh_btn"):
             self.message_refresh_btn.setEnabled(True)
             self.message_refresh_btn.setText("刷新")
-        if not auto_triggered and hasattr(self, "loading_hint") and hasattr(self.loading_hint, "hide"):
+        if hasattr(self, "loading_hint") and hasattr(self.loading_hint, "hide"):
             self.loading_hint.hide()
-        if not auto_triggered:
-            self._load_message_list()
+        self._load_message_list()
         self._ensure_msync_connected()
 
     def _begin_startup_badge_gate(self):
