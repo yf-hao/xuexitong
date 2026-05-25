@@ -1536,67 +1536,74 @@ class CloudDriveView(QWidget):
             QMessageBox.warning(self, "错误", "云盘信息未加载")
             return
         
-        # 选择文件
-        file_path, _ = QFileDialog.getOpenFileName(
+        # 选择文件（支持多选）
+        file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "选择要上传的文件",
             "",
             "所有文件 (*.*)"
         )
         
-        if not file_path:
+        if not file_paths:
             return
         
         import os
-        filename = os.path.basename(file_path)
-        
-        self.status_update.emit(f"正在上传 {filename}...")
-        
+
+        total_count = len(file_paths)
+        success_files = []
+        failed_files = []
+
         try:
-            # 第一步：生成上传URL
-            url_result = self.crawler.generate_upload_url(
-                puid=self.cloud_info.get("currentPuid"),
-                folder_id=self.current_folder_id,
-                _token=self.cloud_info.get("_token"),  # URL参数token（短的）
-                p_auth_token=self.cloud_info.get("token")  # 认证token（长的）
-            )
-            
-            if not url_result.get("success"):
-                self.status_update.emit(f"生成上传URL失败: {url_result.get('error')}")
-                QMessageBox.critical(
-                    self,
-                    "上传失败",
-                    f"错误: {url_result.get('error')}"
+            for index, file_path in enumerate(file_paths, start=1):
+                filename = os.path.basename(file_path)
+                self.status_update.emit(f"正在上传 ({index}/{total_count}) {filename}...")
+
+                # 第一步：生成上传URL
+                url_result = self.crawler.generate_upload_url(
+                    puid=self.cloud_info.get("currentPuid"),
+                    folder_id=self.current_folder_id,
+                    _token=self.cloud_info.get("_token"),  # URL参数token（短的）
+                    p_auth_token=self.cloud_info.get("token")  # 认证token（长的）
                 )
-                return
-            
-            # 第二步：上传文件
-            upload_result = self.crawler.upload_file_to_cloud(
-                upload_url=url_result.get("upload_url"),
-                file_path=file_path,
-                token=self.cloud_info.get("token")
-            )
-            
-            if upload_result.get("success"):
-                self.status_update.emit(f"上传成功")
-                QMessageBox.information(
-                    self,
-                    "上传成功",
-                    f"文件 {filename} 已成功上传"
+
+                if not url_result.get("success"):
+                    failed_files.append((filename, url_result.get("error", "生成上传URL失败")))
+                    continue
+
+                # 第二步：上传文件
+                upload_result = self.crawler.upload_file_to_cloud(
+                    upload_url=url_result.get("upload_url"),
+                    file_path=file_path,
+                    token=self.cloud_info.get("token")
                 )
-                # 刷新当前文件夹列表
+
+                if upload_result.get("success"):
+                    success_files.append(filename)
+                else:
+                    failed_files.append((filename, upload_result.get("error", "上传失败")))
+
+            if success_files:
+                self.status_update.emit(f"上传完成，成功 {len(success_files)} 个，失败 {len(failed_files)} 个")
                 if self.current_folder_id == self.cloud_info.get("rootdir"):
                     self.refresh_info()
                 else:
                     self.navigate_to_folder(self.current_folder_id, "当前文件夹")
             else:
-                self.status_update.emit(f"上传失败: {upload_result.get('error')}")
-                QMessageBox.critical(
-                    self,
-                    "上传失败",
-                    f"错误: {upload_result.get('error')}"
-                )
-                
+                self.status_update.emit("上传失败")
+
+            summary_lines = [f"共选择 {total_count} 个文件", f"成功 {len(success_files)} 个", f"失败 {len(failed_files)} 个"]
+            if failed_files:
+                failed_text = "\n".join(f"{name}: {error}" for name, error in failed_files[:10])
+                summary_lines.append("")
+                summary_lines.append(failed_text)
+                if len(failed_files) > 10:
+                    summary_lines.append(f"... 另外还有 {len(failed_files) - 10} 个失败文件")
+
+            if failed_files:
+                QMessageBox.warning(self, "上传完成", "\n".join(summary_lines))
+            else:
+                QMessageBox.information(self, "上传完成", "\n".join(summary_lines))
+
         except Exception as e:
             self.status_update.emit(f"上传出错: {str(e)}")
             QMessageBox.critical(
