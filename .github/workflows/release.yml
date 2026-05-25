@@ -289,4 +289,5 @@ jobs:
           body: ${{ needs.check-version.outputs.changelog }}
           files: |
             dist-artifacts/*
+            dist-artifacts/dist/*
           generate_release_notes: false

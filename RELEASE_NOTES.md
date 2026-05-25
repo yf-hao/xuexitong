@@ -1,6 +1,9 @@
-# 版本说明 (Release Notes) - V0.12.0
+# 版本说明 (Release Notes) - V0.12.1
 
 ## 📅 更新日期: 2026-05-25
+
+### 🚀 自动化部署修复与文件发布优化 (CI/CD Deploy Polish)
+- **修复 Release 附件漏发问题**: 修复了由于 GitHub Actions 下载合并 Artifacts 时产生 `dist/` 相对路径差，导致 `softprops/action-gh-release` 的一级非递归匹配通配符漏掉 Windows 及 macOS 产物的问题。通过引入 `dist-artifacts/*` 与 `dist-artifacts/dist/*` 联合扫描规则，保证了全平台打包产物（DMG、Windows Setup.exe、ZIP、DEB 等）均能 100% 完整发布。
 
 ### ⚡ 核心日志系统重构与稳定性保障 (Logger System Revamp)
 - **全局标准流重定向**: 实现了对 `sys.stdout` 和 `sys.stderr` 的统一劫持与重定向，使全站所有 Python `print` 输出和异常堆栈自动导入标准日志流，杜绝静默失败。
