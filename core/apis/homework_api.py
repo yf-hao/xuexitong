@@ -768,13 +768,19 @@ class HomeworkAPI:
         """
         url = "https://mooc2-gray.chaoxing.com/mooc2-ans/work/library"
         
+        page_size = 50
         params = {
             "courseid": course_id,
             "directoryid": directory_id,
             "cpi": self.session_manager.course_params.get("cpi", ""),
+            "status": 0,
+            "isfirst": "false",
+            "search": "",
             "from": "",
             "topicid": 0,
-            "backurl": ""
+            "backurl": "",
+            "pages": 1,
+            "size": page_size
         }
         
         headers = {
@@ -791,77 +797,92 @@ class HomeworkAPI:
         }
         
         try:
-            response = self.session.get(url, params=params, headers=headers, timeout=15)
-            response.raise_for_status()
-            
-            html_content = response.text
-            
-            # 解析HTML
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
+
             folders = []
             works = []
-            
-            # 查找所有数据项
-            data_list = soup.find_all('ul', class_='dataBody_td')
-            
-            for item in data_list:
-                item_type = item.get('type', '0')  # type="0" 是文件夹, type="1" 是作业
-                item_id = item.get('data', '')
-                
-                if item_type == '0':
-                    # 文件夹
-                    name_elem = item.find('a', class_='rename_title')
-                    count_elem = item.find('span', class_='work_count')
-                    
-                    name = name_elem.get('title', '') if name_elem else ''
-                    count_text = count_elem.text if count_elem else ''
-                    count = int(re.search(r'共\s*(\d+)\s*份', count_text).group(1)) if count_text and re.search(r'共\s*(\d+)\s*份', count_text) else 0
-                    
-                    # 获取作者和时间
-                    author_elem = item.find('li', class_='dataBody_read')
-                    time_elem = item.find('li', class_='dataBody_time')
-                    
-                    author = author_elem.text.strip() if author_elem else ''
-                    time_text = time_elem.contents[0].strip() if time_elem and time_elem.contents else ''
-                    
-                    folders.append({
-                        'id': item_id,
-                        'name': name,
-                        'count': count,
-                        'author': author,
-                        'time': time_text
-                    })
-                    
-                elif item_type == '1':
-                    # 作业
-                    name_elem = item.find('li', class_='dataBody_name').find('a')
-                    
-                    title = name_elem.get('title', '') if name_elem else ''
-                    
-                    # 获取题量和分值
-                    question_num_elem = item.find('li', class_='dataHead_questionNum')
-                    score_elem = item.find('li', class_='dataHead_score')
-                    
-                    question_num = int(question_num_elem.text.strip()) if question_num_elem else 0
-                    score = int(score_elem.text.strip()) if score_elem else 0
-                    
-                    # 获取作者和时间
-                    author_elem = item.find('li', class_='dataBody_read')
-                    time_elem = item.find('li', class_='dataBody_time')
-                    
-                    author = author_elem.text.strip() if author_elem else ''
-                    time_text = time_elem.contents[0].strip() if time_elem and time_elem.contents else ''
-                    
-                    works.append({
-                        'id': item_id,
-                        'title': title,
-                        'question_num': question_num,
-                        'score': score,
-                        'author': author,
-                        'time': time_text
-                    })
+            seen_folder_ids = set()
+            seen_work_ids = set()
+            current_page = 1
+
+            while True:
+                params["pages"] = current_page
+                response = self.session.get(url, params=params, headers=headers, timeout=15)
+                response.raise_for_status()
+
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+                # 查找所有数据项
+                data_list = soup.find_all('ul', class_='dataBody_td')
+                page_work_count = 0
+                new_work_count = 0
+
+                for item in data_list:
+                    item_type = item.get('type', '0')  # type="0" 是文件夹, type="1" 是作业
+                    item_id = item.get('data', '')
+
+                    if item_type == '0':
+                        if item_id in seen_folder_ids:
+                            continue
+
+                        name_elem = item.find('a', class_='rename_title')
+                        count_elem = item.find('span', class_='work_count')
+
+                        name = name_elem.get('title', '') if name_elem else ''
+                        count_text = count_elem.text if count_elem else ''
+                        count = int(re.search(r'共\s*(\d+)\s*份', count_text).group(1)) if count_text and re.search(r'共\s*(\d+)\s*份', count_text) else 0
+
+                        author_elem = item.find('li', class_='dataBody_read')
+                        time_elem = item.find('li', class_='dataBody_time')
+
+                        author = author_elem.text.strip() if author_elem else ''
+                        time_text = time_elem.contents[0].strip() if time_elem and time_elem.contents else ''
+
+                        folders.append({
+                            'id': item_id,
+                            'name': name,
+                            'count': count,
+                            'author': author,
+                            'time': time_text
+                        })
+                        seen_folder_ids.add(item_id)
+
+                    elif item_type == '1':
+                        page_work_count += 1
+                        if item_id in seen_work_ids:
+                            continue
+
+                        name_li = item.find('li', class_='dataBody_name')
+                        name_elem = name_li.find('a') if name_li else None
+                        title = name_elem.get('title', '') if name_elem else ''
+
+                        question_num_elem = item.find('li', class_='dataHead_questionNum')
+                        score_elem = item.find('li', class_='dataHead_score')
+
+                        question_num = int(question_num_elem.text.strip()) if question_num_elem else 0
+                        score = int(score_elem.text.strip()) if score_elem else 0
+
+                        author_elem = item.find('li', class_='dataBody_read')
+                        time_elem = item.find('li', class_='dataBody_time')
+
+                        author = author_elem.text.strip() if author_elem else ''
+                        time_text = time_elem.contents[0].strip() if time_elem and time_elem.contents else ''
+
+                        works.append({
+                            'id': item_id,
+                            'title': title,
+                            'question_num': question_num,
+                            'score': score,
+                            'author': author,
+                            'time': time_text
+                        })
+                        seen_work_ids.add(item_id)
+                        new_work_count += 1
+
+                if page_work_count < page_size or new_work_count == 0:
+                    break
+
+                current_page += 1
             
             return {
                 'folders': folders,
