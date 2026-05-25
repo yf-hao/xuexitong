@@ -1,4 +1,8 @@
 from core.utils.latex_utils import latex_to_unicode, apply_latex_unicode_map, is_simple_unicode
+from core.logger import get_logger
+
+
+logger = get_logger()
 
 class QuestionBankAPI:
     """题库目录与题目相关接口。"""
@@ -745,19 +749,9 @@ class QuestionBankAPI:
         Returns:
             {"success": bool, "msg": str, "question_id": str}
         """
-        import os
-        from core.config import DATA_DIR
-
-        qbank_log_path = os.path.join(DATA_DIR, "qbank_submit_debug.log")
-
         def log_submit(message: str):
             line = f"[QBANK_SUBMIT] {message}"
-            print(line)
-            try:
-                with open(qbank_log_path, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-            except Exception:
-                pass
+            logger.debug(line)
 
         params = self.session_manager.course_params
         

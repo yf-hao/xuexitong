@@ -1,4 +1,8 @@
 from bs4 import BeautifulSoup
+from core.logger import get_logger
+
+
+logger = get_logger()
 
 
 class CourseManageAPI:
@@ -282,22 +286,13 @@ class CourseManageAPI:
             import html
             import time
             import re
-            import os
             import requests
-            from core.config import DATA_DIR
 
             log_tag = "QUESTION_UPLOAD" if upload_variant == "question" else "COVER_UPLOAD"
-            log_filename = "question_upload_debug.log" if upload_variant == "question" else "cover_upload_debug.log"
-            log_path = os.path.join(DATA_DIR, log_filename)
 
             def log(message: str):
                 line = f"[{log_tag}] {message}"
-                print(line)
-                try:
-                    with open(log_path, "a", encoding="utf-8") as f:
-                        f.write(line + "\n")
-                except Exception:
-                    pass
+                logger.debug(line)
 
             def parse_upload_url(html_text: str, source: str) -> str:
                 if not html_text:

@@ -483,10 +483,12 @@ class StudyStatusView(QWidget):
         
         # 创建表格显示考勤数据
         self.attendance_table = QTableWidget()
-        self.attendance_table.setColumnCount(6)
-        self.attendance_table.setHorizontalHeaderLabels(["活动名称", "活动类型", "创建时间", "活动时间", "状态", "操作"])
+        self.attendance_table.setColumnCount(5)
+        self.attendance_table.setHorizontalHeaderLabels(["活动名称", "活动类型", "活动时间", "状态", "操作"])
         self.attendance_table.setRowCount(len(ended_attendance))
-        self.attendance_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header = self.attendance_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._apply_stats_table_style(self.attendance_table)
         self.attendance_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.attendance_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -497,20 +499,17 @@ class StudyStatusView(QWidget):
         for row, activity in enumerate(ended_attendance):
             # 活动名称
             self.attendance_table.setItem(row, 0, QTableWidgetItem(activity.title))
-            
+
             # 活动类型
             self.attendance_table.setItem(row, 1, QTableWidgetItem(activity.type_name))
-            
-            # 创建时间
-            self.attendance_table.setItem(row, 2, QTableWidgetItem(activity.create_time))
-            
+
             # 活动时间
-            self.attendance_table.setItem(row, 3, QTableWidgetItem(activity.time_range))
-            
+            self.attendance_table.setItem(row, 2, QTableWidgetItem(activity.time_range))
+
             # 状态
             status_item = QTableWidgetItem(activity.status_name)
             status_item.setForeground(QColor(get_theme_palette().text_secondary))
-            self.attendance_table.setItem(row, 4, status_item)
+            self.attendance_table.setItem(row, 3, status_item)
             
             # 查看按钮
             view_btn = QPushButton("查看")
@@ -539,10 +538,10 @@ class StudyStatusView(QWidget):
             btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             btn_layout.setContentsMargins(5, 2, 5, 2)
             
-            self.attendance_table.setCellWidget(row, 5, btn_widget)
-        
+            self.attendance_table.setCellWidget(row, 4, btn_widget)
+
         # 设置操作列宽度
-        self.attendance_table.setColumnWidth(5, 80)
+        self.attendance_table.setColumnWidth(4, 80)
         
         self.content_layout.addWidget(self.attendance_table)
         

@@ -1,25 +1,15 @@
 import sys
-import os
 import threading
+from core.logger import redirect_standard_streams, get_logger
 
 # 1. 立即确定数据目录并启动日志，以捕捉导入阶段的崩溃
 def _setup_early_logging():
-    if sys.platform == "darwin":
-        path = os.path.expanduser("~/Library/Application Support/XuexitongManager")
-    elif sys.platform == "win32":
-        path = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "XuexitongManager")
-    else:
-        path = os.path.expanduser("~/.xuexitongmanager")
-    
-    os.makedirs(path, exist_ok=True)
-    log_path = os.path.join(path, "app.log")
+    logger = get_logger()
     try:
-        f = open(log_path, "w", encoding="utf-8", buffering=1)
-        sys.stdout = f
-        sys.stderr = f
-        print("=== APP EARLY LOG START ===")
-        print(f"Executable: {sys.executable}")
-        print(f"Version: 0.5.8")
+        redirect_standard_streams()
+        logger.info("=== APP EARLY LOG START ===")
+        logger.info("Executable: %s", sys.executable)
+        logger.info("Version: %s", "0.5.8")
     except:
         pass
 
@@ -93,7 +83,7 @@ class AppController:
                 import traceback
                 from PyQt6.QtWidgets import QMessageBox
                 error_trace = traceback.format_exc()
-                print(f"FATAL ERROR:\n{error_trace}")
+                get_logger().error("FATAL ERROR:\n%s", error_trace)
                 QMessageBox.critical(None, "程序启动失败", f"发生了未预期的错误:\n{str(e)}\n\n详情请查看日志文件或查看以下堆栈:\n{error_trace}")
                 sys.exit(1)
         else:

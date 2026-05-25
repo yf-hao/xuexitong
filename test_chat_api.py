@@ -3694,6 +3694,38 @@ class ChatAPITests(unittest.TestCase):
 
         self.assertEqual(offenders, [])
 
+    def test_logger_source_limits_release_file_logging_to_errors(self):
+        source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/core/logger.py").read_text(encoding="utf-8")
+
+        self.assertIn('IS_RELEASE_BUILD = bool(getattr(sys, "frozen", False))', source)
+        self.assertIn("FILE_LOG_LEVEL = logging.ERROR if IS_RELEASE_BUILD else logging.DEBUG", source)
+        self.assertIn("_file_handler.setLevel(FILE_LOG_LEVEL)", source)
+        self.assertIn("def redirect_standard_streams():", source)
+        self.assertIn('sys.stdout = _LoggerStream(logger, logging.INFO)', source)
+        self.assertIn('sys.stderr = _LoggerStream(logger, logging.ERROR)', source)
+
+    def test_main_source_redirects_early_logging_to_main_logger(self):
+        source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/main.py").read_text(encoding="utf-8")
+
+        self.assertIn("from core.logger import redirect_standard_streams, get_logger", source)
+        self.assertIn("redirect_standard_streams()", source)
+        self.assertNotIn('os.path.join(path, "app.log")', source)
+
+    def test_debug_sources_no_longer_write_standalone_log_files(self):
+        course_manage = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/core/apis/course_manage_api.py").read_text(encoding="utf-8")
+        question_bank = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/core/apis/question_bank_api.py").read_text(encoding="utf-8")
+        activity = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/core/apis/activity_api.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("question_upload_debug.log", course_manage)
+        self.assertNotIn("cover_upload_debug.log", course_manage)
+        self.assertIn("logger.debug(line)", course_manage)
+
+        self.assertNotIn("qbank_submit_debug.log", question_bank)
+        self.assertIn("logger.debug(line)", question_bank)
+
+        self.assertNotIn("xuexitong_debug.log", activity)
+        self.assertIn('logger.debug("[START_ACTIVE] response=%s", data)', activity)
+
     def test_theme_tree_binding_rethemes_existing_widgets(self):
         from PyQt6.QtWidgets import QApplication, QWidget, QLabel
         from ui.theme import bind_theme_tree, refresh_theme_styles

@@ -2,6 +2,10 @@
 import time
 from models.activity import ActivityList
 from models.attendance_record import AttendanceDetail
+from core.logger import get_logger
+
+
+logger = get_logger()
 
 
 class ActivityAPI:
@@ -156,11 +160,7 @@ class ActivityAPI:
             resp.raise_for_status()
             
             data = resp.json()
-            import os
-            log_path = os.path.join(os.path.expanduser("~"), "xuexitong_debug.log")
-            with open(log_path, "a", encoding="utf-8") as f:
-                from datetime import datetime
-                f.write(f"\n[{datetime.now()}] startActive response: {data}\n")
+            logger.debug("[START_ACTIVE] response=%s", data)
             if data.get("result") == 1:
                 return True, "启动成功", data.get("data") or {}
             else:
