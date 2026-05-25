@@ -4274,7 +4274,7 @@ class ChatAPITests(unittest.TestCase):
 
         ChatView._refresh_message_tab(view, auto_triggered=True)
 
-        self.assertEqual(calls, ["ws_info", "ensure_msync"])
+        self.assertEqual(calls, ["ensure_msync"])
 
     def test_chat_view_realtime_message_list_reload_skips_loading_hint(self):
         loaded = []

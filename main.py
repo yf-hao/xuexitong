@@ -9,7 +9,11 @@ def _setup_early_logging():
         redirect_standard_streams()
         logger.info("=== APP EARLY LOG START ===")
         logger.info("Executable: %s", sys.executable)
-        logger.info("Version: %s", "0.5.8")
+        from core.config import APP_TITLE
+        import re
+        version_match = re.search(r"V([0-9]+(?:\.[0-9]+)*)", APP_TITLE)
+        version_str = version_match.group(1) if version_match else "Unknown"
+        logger.info("Version: %s", version_str)
     except:
         pass
 
