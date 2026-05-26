@@ -1,4 +1,5 @@
 import os
+import traceback
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QTreeWidget, QTreeWidgetItem,
                              QPushButton, QLabel, QSplitter, QFrame, QListView,
@@ -17,6 +18,10 @@ from ui.views.study_status_view import StudyStatusView
 from ui.views.homework_create_view import HomeworkCreateView
 from ui.views.cloud_drive_view import CloudDriveView
 from ui.views.chat_view import ChatView
+from ui.dialogs.ai_settings_dialog import AISettingsDialog
+from core.logger import get_logger
+
+logger = get_logger()
 
 class MainWindow(QMainWindow):
     def __init__(self, crawler):
@@ -82,7 +87,30 @@ class MainWindow(QMainWindow):
             }
         """)
         header_layout.addWidget(self.theme_toggle_btn)
-        
+
+        # AI Settings Button
+        self.btn_ai_settings = QPushButton("🤖 AI设置")
+        self.btn_ai_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ai_settings.setToolTip("配置生成式AI答疑助手（API Key、模型、提示词）")
+        apply_theme_stylesheet(self.btn_ai_settings, """
+            QPushButton {
+                background-color: #1a472a;
+                color: #a8e6c1;
+                border: 1px solid #2d7d46;
+                padding: 5px 12px;
+                font-size: 13px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #2d7d46;
+                color: #ffffff;
+                border: 1px solid #4caf50;
+            }
+        """)
+        self.btn_ai_settings.clicked.connect(self._on_ai_settings_clicked)
+        header_layout.addWidget(self.btn_ai_settings)
+
         # Logout Button
         self.btn_logout = QPushButton("🚪 退出登录")
         self.btn_logout.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -470,6 +498,66 @@ class MainWindow(QMainWindow):
             self.download_btn.hide()
             self.status_label.setText(f"已选择功能: {title}")
 
+    def _on_ai_settings_clicked(self):
+        """打开 AI 设置对话框"""
+        dialog = AISettingsDialog(self)
+        dialog.exec()
+
+    def _stop_qthread(self, worker, timeout_ms: int = 3000):
+        """在窗口关闭前等待后台 QThread 结束，避免对象析构时线程仍在运行。"""
+        if not worker:
+            return
+        try:
+            if worker.isRunning():
+                worker.requestInterruption()
+                worker.quit()
+                worker.wait(timeout_ms)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """窗口关闭事件，保存相关状态并退出系统"""
+        try:
+            # 先等待主窗口自身启动的后台 worker 结束
+            try:
+                owned_workers = [
+                    getattr(self, "course_loader", None),
+                    getattr(self, "details_worker", None),
+                    getattr(self, "class_worker", None),
+                    getattr(self, "worker", None),
+                    *list(getattr(self, "workers", []) or []),
+                ]
+            except Exception:
+                owned_workers = []
+
+            for worker in owned_workers:
+                self._stop_qthread(worker)
+
+            # 停止已知子视图的后台工作，尤其是聊天实时连接
+            for view in [
+                getattr(self, "chat_view", None),
+                getattr(self, "cloud_drive_view", None),
+                getattr(self, "question_bank_view", None),
+                getattr(self, "study_status_view", None),
+                getattr(self, "homework_create_view", None),
+            ]:
+                if view and hasattr(view, "stop_workers"):
+                    try:
+                        view.stop_workers()
+                    except Exception:
+                        pass
+
+            # 关闭 session manager (保存 cookie 等)
+            if self.crawler and self.crawler.session_manager:
+                try:
+                    self.crawler.session_manager.close()
+                except Exception:
+                    pass
+        except Exception:
+            logger.error("MainWindow.closeEvent exception:\n%s", traceback.format_exc())
+        finally:
+            event.accept()
+
     def start_loading_materials(self, course):
         self.status_label.setText(f"同步资料结构: {course.name} ...")
         self.material_tree.clear()
@@ -494,14 +582,7 @@ class MainWindow(QMainWindow):
         pass
 
     def on_logout_clicked(self):
-        reply = QMessageBox.question(
-            self, '退出登录', "确定要退出登录并清除保存的账号信息吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
-            QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            settings = QSettings("HaoSoft", "XuexitongManager")
-            settings.clear()
-            self.status_label.setText("已清除登录信息，正在退出...")
-            QCoreApplication.quit()
+        settings = QSettings("HaoSoft", "XuexitongManager")
+        settings.clear()
+        self.status_label.setText("已清除登录信息，正在退出...")
+        QCoreApplication.quit()

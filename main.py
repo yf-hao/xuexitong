@@ -82,7 +82,8 @@ class AppController:
                 self.main_win = MainWindow(self.crawler)
                 self.main_win.show()
                 app.setQuitOnLastWindowClosed(True) # 恢复正常退出逻辑
-                sys.exit(app.exec())
+                exit_code = app.exec()
+                sys.exit(exit_code)
             except Exception as e:
                 import traceback
                 from PyQt6.QtWidgets import QMessageBox

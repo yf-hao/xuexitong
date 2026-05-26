@@ -616,9 +616,17 @@ class MSyncClient:
         self._authenticated = False
         if self._heartbeat_timer:
             self._heartbeat_timer.cancel()
+            self._heartbeat_timer = None
         if self._ws:
-            self._ws.close()
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+        thread = self._thread
         self._thread = None
+        if thread and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._ws = None
 
     def is_connected(self) -> bool:
         return (

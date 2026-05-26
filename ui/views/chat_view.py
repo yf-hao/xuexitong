@@ -20,7 +20,7 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkRepl
 
 from core.config import DATA_DIR
 from core.group_members_cache import build_group_members_cache_path, load_group_members_cache, sanitize_group_cache_filename
-from ui.workers import ChatMessageListWorker, ChatHistoryWorker, ChatGroupMembersWorker
+from ui.workers import ChatMessageListWorker, ChatHistoryWorker, ChatGroupMembersWorker, AIChatWorker
 from core.logger import get_logger
 from ui.theme import apply_theme_stylesheet, bind_theme_tree
 
@@ -309,6 +309,8 @@ class ChatView(QWidget):
         self._startup_messages_loaded = False
         self._startup_msync_ready = False
         self._message_worker = None
+        self._ai_worker = None
+        self._pending_ai_input_text = ""
         self._history_worker = None
         self._history_workers = []
         self._group_members_worker = None
@@ -333,6 +335,7 @@ class ChatView(QWidget):
         self._group_name_by_room_id = {}
         self._group_cache_name_by_room_id = {}
         self._pending_group_room_id = ""
+        self._shutting_down = False
         self._avatar_requests = {}  # QNetworkReply -> ChatSessionItem，用于异步回调
         self._net_mgr = QNetworkAccessManager(self)
         self._message_refreshing = False
@@ -464,6 +467,13 @@ class ChatView(QWidget):
         self.msg_input.returnPressed.connect(self._on_send)
         input_layout.addWidget(self.msg_input, stretch=1)
 
+        self.ai_draft_btn = QPushButton("🤖 AI 拟答")
+        self.ai_draft_btn.setObjectName("ai_draft_btn")
+        self.ai_draft_btn.setEnabled(False)
+        self.ai_draft_btn.setToolTip("根据学生最后一条消息，调用大模型生成答疑草稿")
+        self.ai_draft_btn.clicked.connect(self._on_ai_draft_requested)
+        input_layout.addWidget(self.ai_draft_btn)
+
         self.send_btn = QPushButton("发送")
         self.send_btn.setObjectName("send_btn")
         self.send_btn.clicked.connect(self._on_send)
@@ -500,6 +510,60 @@ class ChatView(QWidget):
         self._ensure_msync_connected()
         if self._raw_sessions:
             self._request_unread_summary(self._raw_sessions)
+
+    def stop_workers(self):
+        """窗口关闭前清理聊天相关后台活动，避免退出时仍有回调落到已销毁对象。"""
+        self._shutting_down = True
+        try:
+            self._message_auto_refresh_timer.stop()
+            self._startup_badge_gate_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            self.msync_message_received.disconnect()
+        except Exception:
+            pass
+        try:
+            self.startup_gate_check_requested.disconnect()
+        except Exception:
+            pass
+        try:
+            self.msync_info_refresh_done.disconnect()
+        except Exception:
+            pass
+
+        try:
+            for reply in list(self._avatar_requests.keys()):
+                try:
+                    reply.abort()
+                except Exception:
+                    pass
+                try:
+                    reply.deleteLater()
+                except Exception:
+                    pass
+            self._avatar_requests.clear()
+        except Exception:
+            pass
+
+        for worker in [self._message_worker, self._ai_worker, self._history_worker, self._group_members_worker, *self._history_workers]:
+            try:
+                if worker and worker.isRunning():
+                    worker.quit()
+                    worker.wait(1500)
+            except Exception:
+                pass
+
+        self._history_workers = []
+
+        try:
+            if hasattr(self.crawler, "_unregister_msync_listener"):
+                self.crawler._unregister_msync_listener(self)
+            if hasattr(self.crawler, "disconnect_msync"):
+                self.crawler.disconnect_msync()
+        except Exception:
+            pass
 
     def _load_message_list(self, show_loading: bool = True):
         """异步加载会话列表"""
@@ -2085,6 +2149,7 @@ class ChatView(QWidget):
         self.chat_messages.setPlaceholderText("选择左侧的对话或群组开始聊天")
         self.chat_title_label.setText("选择一个对话")
         self.send_btn.setEnabled(False)
+        self.ai_draft_btn.setEnabled(False)
         self._current_session_display_name = None
 
     def _on_chat_selected(self, current: QListWidgetItem, previous: QListWidgetItem):
@@ -2140,6 +2205,7 @@ class ChatView(QWidget):
         self._clear_current_unread_count()
         self.chat_title_label.setText(ChatView._conversation_display_name(self) or str(target_name or ""))
         self.send_btn.setEnabled(bool(target_id))
+        self.ai_draft_btn.setEnabled(bool(target_id))
         conversation_key = self._conversation_key()
         if conversation_key in self._message_cache:
             self._render_cached_messages(conversation_key)
@@ -2165,6 +2231,12 @@ class ChatView(QWidget):
 
     def _on_avatar_reply_finished(self, reply):
         """头像异步加载完成回调"""
+        if self._shutting_down:
+            try:
+                reply.deleteLater()
+            except Exception:
+                pass
+            return
         target = self._avatar_requests.pop(reply, None)
         widget = None
         if target:
@@ -2499,10 +2571,15 @@ class ChatView(QWidget):
     def _on_send(self):
         """发送消息"""
         text = self.msg_input.text().strip()
-        if not text or not self._current_target_id:
+        if not text:
             return
+        self._send_chat_text(text, clear_input=True)
 
-        # 调用 API 发送
+    def _send_chat_text(self, text: str, clear_input: bool = False) -> bool:
+        """发送指定文本到当前会话。"""
+        if not text or not self._current_target_id:
+            return False
+
         try:
             self._ensure_msync_connected()
             result = self.crawler.send_message(
@@ -2513,7 +2590,8 @@ class ChatView(QWidget):
             )
             if result.get("status") == "success":
                 self._last_send_error = ""
-                self.msg_input.clear()
+                if clear_input:
+                    self.msg_input.clear()
                 current_tuid = str(self.crawler.session_manager.course_params.get("im_tuid", "") or "")
                 self._append_cached_message(
                     sender_id=current_tuid,
@@ -2525,9 +2603,114 @@ class ChatView(QWidget):
                 )
                 self._render_cached_messages()
                 ChatView._request_history_sync(self, self._current_target_id, history_id=self._current_history_id)
+                return True
             else:
                 self._last_send_error = f"发送失败: {result.get('msg', '未知错误')}"
                 self.append_message("系统", self._last_send_error, is_self=False)
         except Exception as e:
             self._last_send_error = f"发送异常: {e}"
             self.append_message("系统", self._last_send_error, is_self=False)
+        return False
+
+    def _get_last_student_message(self) -> str:
+        """获取当前对话中学生发的最后一条消息文本"""
+        conversation_key = self._conversation_key()
+        messages = self._message_cache.get(conversation_key, []) or []
+        # 按时间倒序找第一条非自己发送的消息
+        sorted_msgs = sorted(messages, key=self._message_sort_key, reverse=True)
+        for msg in sorted_msgs:
+            if not msg.get("is_self", True):
+                return str(msg.get("content") or "").strip()
+        return ""
+
+    def _on_ai_draft_requested(self):
+        """教师点击「AI 拟答」按钮，异步调用大模型生成答疑草稿"""
+        # 首先尝试获取老师在输入框中主动输入的提示词
+        question = self.msg_input.text().strip()
+        # 如果没有主动输入，则默认获取学生最后一条消息
+        if not question:
+            question = self._get_last_student_message()
+            
+        if not question:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "AI 拟答提示", "未找到提问，请在输入框键入您想解答的主题，或选择含有提问的对话。")
+            return
+
+        # 禁用按钮防止重复触发
+        self.ai_draft_btn.setEnabled(False)
+        self.ai_draft_btn.setText("生成中...")
+        self.msg_input.setPlaceholderText("🤖 AI 正在为您生成答疑草稿，请稍候...")
+        self._pending_ai_input_text = self.msg_input.text()
+
+        self._ai_worker = AIChatWorker(question)
+        self._ai_worker.draft_ready.connect(self._on_ai_draft_ready)
+        self._ai_worker.start()
+
+    def _on_ai_draft_ready(self, success: bool, draft_text: str):
+        """AI 草稿生成完成后的回调"""
+        self.ai_draft_btn.setEnabled(True)
+        self.ai_draft_btn.setText("🤖 AI 拟答")
+        self.msg_input.setPlaceholderText("输入消息...")
+
+        if not success:
+            from PyQt6.QtWidgets import QMessageBox
+            if self._pending_ai_input_text:
+                self.msg_input.setText(self._pending_ai_input_text)
+            QMessageBox.warning(self, "AI 拟答失败", f"生成失败:\n{draft_text}")
+            return
+
+        self._pending_ai_input_text = ""
+        self._show_ai_draft_dialog(draft_text)
+
+    def _show_ai_draft_dialog(self, draft_text: str):
+        """弹窗展示 AI 草稿，支持多行编辑与直接发送。"""
+        from PyQt6.QtWidgets import QDialog, QTextEdit, QVBoxLayout, QHBoxLayout, QPushButton, QMessageBox
+        from PyQt6.QtGui import QGuiApplication
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("AI 拟答草稿")
+        dialog.resize(760, 560)
+
+        layout = QVBoxLayout(dialog)
+        editor = QTextEdit(dialog)
+        editor.setPlainText(draft_text)
+        layout.addWidget(editor)
+
+        btn_layout = QHBoxLayout()
+        copy_btn = QPushButton("复制")
+        apply_btn = QPushButton("放入输入框")
+        send_btn = QPushButton("直接发送")
+        cancel_btn = QPushButton("关闭")
+
+        btn_layout.addWidget(copy_btn)
+        btn_layout.addWidget(apply_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(send_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        def copy_text():
+            QGuiApplication.clipboard().setText(editor.toPlainText())
+
+        def apply_to_input():
+            text = " ".join(line.strip() for line in editor.toPlainText().splitlines() if line.strip())
+            self.msg_input.setText(text)
+            self.msg_input.setFocus()
+            dialog.accept()
+
+        def send_text():
+            text = editor.toPlainText().strip()
+            if not text:
+                QMessageBox.warning(dialog, "提示", "草稿内容为空，无法发送。")
+                return
+            if self._send_chat_text(text, clear_input=False):
+                dialog.accept()
+            else:
+                QMessageBox.warning(dialog, "发送失败", self._last_send_error or "发送失败")
+
+        copy_btn.clicked.connect(copy_text)
+        apply_btn.clicked.connect(apply_to_input)
+        send_btn.clicked.connect(send_text)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        dialog.exec()

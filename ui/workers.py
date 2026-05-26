@@ -1119,3 +1119,26 @@ class HomeworkWorker(QThread):
         except Exception as e:
             print(f"HomeworkWorker error: {e}")
             self.homework_ready.emit(f"获取学生作业统计失败: {e}")
+
+
+class AIChatWorker(QThread):
+    """大模型 AI 智能答疑后台生成线程"""
+    draft_ready = pyqtSignal(bool, str)
+
+    def __init__(self, student_question: str):
+        super().__init__()
+        self.student_question = student_question
+
+    def run(self):
+        try:
+            from core.apis.ai_service import DiscreteMathAIService
+            service = DiscreteMathAIService()
+            reply = service.generate_reply_suggestion(self.student_question)
+            if not str(reply).strip():
+                self.draft_ready.emit(False, "错误：AI 返回了空白内容。")
+            elif reply.startswith("错误：") or reply.startswith("AI 接口调用失败"):
+                self.draft_ready.emit(False, reply)
+            else:
+                self.draft_ready.emit(True, reply)
+        except Exception as e:
+            self.draft_ready.emit(False, f"AI 线程执行异常: {str(e)}")

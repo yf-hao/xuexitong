@@ -122,6 +122,15 @@ class ChatAPI:
             getattr(cls, store_name)[key] = callback
 
     @classmethod
+    def _unregister_msync_listener(cls, listener_key):
+        if listener_key is None:
+            return
+        with cls._msync_listener_lock:
+            cls._msync_message_listeners.pop(listener_key, None)
+            cls._msync_error_listeners.pop(listener_key, None)
+            cls._msync_close_listeners.pop(listener_key, None)
+
+    @classmethod
     def _attach_msync_dispatchers(cls):
         if not cls._msync:
             return
