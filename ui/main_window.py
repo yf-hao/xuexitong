@@ -89,21 +89,22 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.theme_toggle_btn)
 
         # AI Settings Button
-        self.btn_ai_settings = QPushButton("🤖 AI设置")
+        self.btn_ai_settings = QPushButton("🤖")
         self.btn_ai_settings.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_ai_settings.setToolTip("配置生成式AI答疑助手（API Key、模型、提示词）")
+        self.btn_ai_settings.setFixedSize(36, 36)
         apply_theme_stylesheet(self.btn_ai_settings, """
             QPushButton {
-                background-color: #1a472a;
+                background-color: #252526;
                 color: #a8e6c1;
                 border: 1px solid #2d7d46;
-                padding: 5px 12px;
-                font-size: 13px;
-                font-weight: bold;
-                border-radius: 4px;
+                border-radius: 18px;
+                padding: 0;
+                font-size: 16px;
+                font-weight: normal;
             }
             QPushButton:hover {
-                background-color: #2d7d46;
+                background-color: #1a472a;
                 color: #ffffff;
                 border: 1px solid #4caf50;
             }
@@ -143,7 +144,17 @@ class MainWindow(QMainWindow):
         nav_layout = QVBoxLayout(nav_container)
         nav_layout.setContentsMargins(0, 0, 5, 0)
         nav_label = QLabel("课程菜单")
-        apply_theme_stylesheet(nav_label, "color: #007acc; margin-bottom: 5px;")
+        apply_theme_stylesheet(nav_label, lambda palette: f"""
+            QLabel {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border-radius: 6px;
+                padding: 8px 12px;
+                margin-bottom: 5px;
+                font-size: 14px;
+                font-weight: bold;
+            }}
+        """)
         nav_layout.addWidget(nav_label)
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("nav_list")

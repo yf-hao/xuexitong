@@ -138,7 +138,28 @@ class LoginWindow(QDialog):
         layout.addWidget(self.status_label)
         
         self.login_btn = QPushButton("立即登录")
+        self.login_btn.setObjectName("login_btn")
         self.login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        apply_theme_stylesheet(self.login_btn, lambda palette: f"""
+            QPushButton#login_btn {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border: none;
+                padding: 12px;
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: bold;
+                margin-top: 10px;
+            }}
+            QPushButton#login_btn:hover {{
+                background-color: {palette.accent_hover};
+                color: #ffffff;
+            }}
+            QPushButton#login_btn:disabled {{
+                background-color: {palette.disabled_bg};
+                color: {palette.disabled_text};
+            }}
+        """)
         self.login_btn.clicked.connect(self.handle_login)
         layout.addWidget(self.login_btn)
         

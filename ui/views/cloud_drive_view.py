@@ -832,6 +832,13 @@ class CloudDriveView(QWidget):
                     checked_items.append(file_data)
         return checked_items
 
+    def clear_checked_items(self):
+        """清除当前列表中的勾选状态。"""
+        for row in range(self.file_table.rowCount()):
+            checkbox_item = self.file_table.item(row, self.CHECKBOX_COLUMN)
+            if checkbox_item:
+                checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+
     def download_selected_items(self):
         """批量下载勾选的文件和文件夹"""
         if not self.cloud_info:
@@ -864,6 +871,8 @@ class CloudDriveView(QWidget):
         )
 
         def on_batch_download_finished(result):
+            self.clear_checked_items()
+
             if not result.get("success"):
                 self.status_update.emit(f"下载失败: {result.get('error')}")
                 QMessageBox.critical(self, "批量下载失败", f"错误: {result.get('error')}")

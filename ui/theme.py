@@ -355,7 +355,32 @@ def _cached_themed_stylesheet(mode: str, css: str) -> str:
     for source, target in _formatted_replacements(mode):
         if source in themed:
             themed = pattern_map[source].sub(target, themed)
-    return themed
+    return _preserve_contrast_on_accent_backgrounds(themed, mode)
+
+
+def _preserve_contrast_on_accent_backgrounds(css: str, mode: str) -> str:
+    """Keep primary/accent buttons readable after legacy dark CSS translation."""
+    if mode != "light" or not css:
+        return css
+
+    palette = get_theme_palette(mode)
+    accent_backgrounds = (
+        f"background-color: {palette.accent};",
+        f"background-color: {palette.accent_hover};",
+        f"background-color: {palette.accent_focus};",
+        f"background: {palette.accent};",
+        f"background: {palette.accent_hover};",
+        f"background: {palette.accent_focus};",
+    )
+
+    def fix_rule(match: re.Match[str]) -> str:
+        body = match.group(2)
+        if not any(background in body for background in accent_backgrounds):
+            return match.group(0)
+        body = body.replace(f"color: {palette.text};", "color: #ffffff;")
+        return f"{match.group(1)}{{{body}}}"
+
+    return re.sub(r"([^{}]+)\{([^{}]*)\}", fix_rule, css)
 
 
 def themed_stylesheet(css: str, mode: str | None = None) -> str:
