@@ -3878,7 +3878,7 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("apply_theme_stylesheet(self.btn_homework_reminder", study_source)
         self.assertIn("apply_theme_stylesheet(self.btn_homework_export", study_source)
         self.assertIn("apply_theme_stylesheet(view_btn", study_source)
-        self.assertIn("apply_theme_stylesheet(btn, STAT_BUTTON_STYLE + \"border: 2px solid #007acc;\")", study_source)
+        self.assertIn("apply_theme_stylesheet(btn, STAT_BUTTON_HIGHLIGHT_STYLE)", study_source)
 
         self.assertIn("apply_theme_stylesheet(self, \"\"\"", absence_source)
         self.assertIn("apply_theme_stylesheet(message_btn", absence_source)

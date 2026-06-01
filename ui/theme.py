@@ -372,6 +372,8 @@ def _preserve_contrast_on_accent_backgrounds(css: str, mode: str) -> str:
         f"background: {palette.accent_hover};",
         f"background: {palette.accent_focus};",
     )
+    if f"color: {palette.text};" not in css or not any(background in css for background in accent_backgrounds):
+        return css
 
     def fix_rule(match: re.Match[str]) -> str:
         body = match.group(2)

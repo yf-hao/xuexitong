@@ -16,7 +16,6 @@ from ui.workers import (
     RenameClazzWorker, ParseStudentExcelWorker, AddStudentsBatchWorker,
     GetWeightWorker, WeightWorker, DeleteClazzWorker
 )
-from ui.styles import MAIN_STYLE
 from ui.theme import apply_theme_stylesheet, bind_theme_tree, refresh_theme_styles
 
 

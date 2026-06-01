@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
 from core.group_members_cache import resolve_student_from_group_cache
-from ui.styles import STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE
+from ui.styles import STAT_BUTTON_HIGHLIGHT_STYLE, STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE
 from ui.dialogs.student_message_dialog import StudentMessageDialog
 from ui.dialogs.homework_reminder_dialog import DEFAULT_HOMEWORK_REMINDER_TEMPLATE, HomeworkReminderDialog
 from ui.workers import (
@@ -1008,7 +1008,7 @@ class StudyStatusView(QWidget):
         """高亮选中的按钮"""
         for btn in self.buttons:
             if btn == active_btn:
-                apply_theme_stylesheet(btn, STAT_BUTTON_STYLE + "border: 2px solid #007acc;")
+                apply_theme_stylesheet(btn, STAT_BUTTON_HIGHLIGHT_STYLE)
             else:
                 apply_theme_stylesheet(btn, STAT_BUTTON_STYLE)
 

@@ -70,21 +70,21 @@ class MainWindow(QMainWindow):
         self.theme_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.theme_toggle_btn.setFixedSize(36, 36)
         self.theme_toggle_btn.clicked.connect(self._toggle_theme)
-        apply_theme_stylesheet(self.theme_toggle_btn, """
-            QPushButton {
-                background-color: #252526;
-                color: #aaaaaa;
-                border: 1px solid #3d3d3d;
+        apply_theme_stylesheet(self.theme_toggle_btn, lambda palette: f"""
+            QPushButton {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text_muted};
+                border: 1px solid {palette.border};
                 border-radius: 18px;
                 padding: 0;
                 font-size: 16px;
                 font-weight: normal;
-            }
-            QPushButton:hover {
-                background-color: #2a2d2e;
-                color: #ffffff;
-                border: 1px solid #007acc;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {palette.hover_bg};
+                color: {palette.text};
+                border: 1px solid {palette.accent};
+            }}
         """)
         header_layout.addWidget(self.theme_toggle_btn)
 
@@ -93,21 +93,21 @@ class MainWindow(QMainWindow):
         self.btn_ai_settings.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_ai_settings.setToolTip("配置生成式AI答疑助手（API Key、模型、提示词）")
         self.btn_ai_settings.setFixedSize(36, 36)
-        apply_theme_stylesheet(self.btn_ai_settings, """
-            QPushButton {
-                background-color: #252526;
+        apply_theme_stylesheet(self.btn_ai_settings, lambda palette: f"""
+            QPushButton {{
+                background-color: {palette.panel_alt_bg};
                 color: #a8e6c1;
                 border: 1px solid #2d7d46;
                 border-radius: 18px;
                 padding: 0;
                 font-size: 16px;
                 font-weight: normal;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 background-color: #1a472a;
                 color: #ffffff;
                 border: 1px solid #4caf50;
-            }
+            }}
         """)
         self.btn_ai_settings.clicked.connect(self._on_ai_settings_clicked)
         header_layout.addWidget(self.btn_ai_settings)
@@ -116,20 +116,20 @@ class MainWindow(QMainWindow):
         self.btn_logout = QPushButton("🚪 退出登录")
         self.btn_logout.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_logout.setFixedWidth(120)
-        apply_theme_stylesheet(self.btn_logout, """
-            QPushButton {
+        apply_theme_stylesheet(self.btn_logout, lambda palette: f"""
+            QPushButton {{
                 background-color: transparent;
-                color: #ff5252;
-                border: 1px solid #ff5252;
+                color: {palette.warning};
+                border: 1px solid {palette.warning};
                 padding: 5px 10px;
                 font-size: 13px;
                 font-weight: normal;
                 border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #ff5252;
-                color: white;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {palette.warning};
+                color: #ffffff;
+            }}
         """)
         self.btn_logout.clicked.connect(self.on_logout_clicked)
         header_layout.addWidget(self.btn_logout)
@@ -236,11 +236,11 @@ class MainWindow(QMainWindow):
         # Bottom Bar
         self.bottom_widget = QFrame()
         self.bottom_widget.setFixedHeight(30)
-        apply_theme_stylesheet(self.bottom_widget, "background: transparent; border-top: 1px solid #252526;")
+        apply_theme_stylesheet(self.bottom_widget, lambda palette: f"background: transparent; border-top: 1px solid {palette.border};")
         bottom_bar = QHBoxLayout(self.bottom_widget)
         
         self.status_label = QLabel("正在初始化...")
-        apply_theme_stylesheet(self.status_label, "font-weight: normal; color: #007acc; font-size: 12px; border: none;")
+        apply_theme_stylesheet(self.status_label, lambda palette: f"font-weight: normal; color: {palette.accent}; font-size: 12px; border: none;")
         self.download_btn = QPushButton("下载选中资料")
         self.download_btn.setMinimumWidth(180)
         self.download_btn.clicked.connect(self.download_selected)
