@@ -223,6 +223,39 @@ def _question_bank_dialog_buttons_style(palette) -> str:
     """
 
 
+def _question_bank_message_box_style(palette) -> str:
+    return f"""
+        QMessageBox {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+        }}
+        QMessageBox QLabel {{
+            color: {palette.text};
+            font-size: 13px;
+            font-weight: normal;
+        }}
+        QMessageBox QPushButton {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 18px;
+            min-width: 84px;
+            font-size: 13px;
+            font-weight: bold;
+        }}
+        QMessageBox QPushButton:hover {{
+            background-color: {palette.accent_hover};
+            color: #ffffff;
+        }}
+        QMessageBox QPushButton:focus {{
+            background-color: {palette.accent_focus};
+            color: #ffffff;
+            border: 1px solid {palette.accent_hover};
+        }}
+    """
+
+
 class CreateFolderDialog(QDialog):
     """新建文件夹对话框"""
     
@@ -1092,11 +1125,14 @@ class QuestionBankView(QWidget):
             
             preview_text += "确定上传吗？"
             
-            reply = QMessageBox.question(
-                self, "上传确认",
-                preview_text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
+            confirm_box = QMessageBox(self)
+            confirm_box.setIcon(QMessageBox.Icon.Question)
+            confirm_box.setWindowTitle("上传确认")
+            confirm_box.setText(preview_text)
+            confirm_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            confirm_box.setDefaultButton(QMessageBox.StandardButton.No)
+            apply_theme_stylesheet(confirm_box, _question_bank_message_box_style)
+            reply = confirm_box.exec()
             
             if reply != QMessageBox.StandardButton.Yes:
                 return
@@ -2159,7 +2195,7 @@ class QuestionDetailDialog(QDialog):
                 var fixedCount = 0;
                 
                 // 匹配 $$ 开头，中间有任意内容（含HTML标签），以 $$ 结尾的块
-                html = html.replace(/\$\$([\s\S]*?)\$\$/g, function(match, inner) {{
+                html = html.replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, function(match, inner) {{
                     // 剥离所有HTML标签，只保留文本内容
                     var tempDiv = document.createElement('div');
                     tempDiv.innerHTML = inner;
