@@ -399,6 +399,45 @@ class QuestionBankView(QWidget):
 
         main_layout.addWidget(splitter)
         bind_theme_tree(self)
+
+    def _show_message_box(
+        self,
+        icon: QMessageBox.Icon,
+        title: str,
+        text: str,
+        buttons: QMessageBox.StandardButton = QMessageBox.StandardButton.Ok,
+        default_button: QMessageBox.StandardButton = QMessageBox.StandardButton.Ok,
+    ) -> QMessageBox.StandardButton:
+        """显示使用题库主题样式的消息框，避免系统默认按钮在亮色模式下不可见。"""
+        message_box = QMessageBox(self)
+        message_box.setIcon(icon)
+        message_box.setWindowTitle(title)
+        message_box.setText(text)
+        message_box.setStandardButtons(buttons)
+        if default_button:
+            message_box.setDefaultButton(default_button)
+        apply_theme_stylesheet(message_box, _question_bank_message_box_style)
+        return message_box.exec()
+
+    def _show_info(self, title: str, text: str) -> QMessageBox.StandardButton:
+        return self._show_message_box(QMessageBox.Icon.Information, title, text)
+
+    def _show_warning(self, title: str, text: str) -> QMessageBox.StandardButton:
+        return self._show_message_box(QMessageBox.Icon.Warning, title, text)
+
+    def _ask_question(
+        self,
+        title: str,
+        text: str,
+        default_button: QMessageBox.StandardButton = QMessageBox.StandardButton.No,
+    ) -> QMessageBox.StandardButton:
+        return self._show_message_box(
+            QMessageBox.Icon.Question,
+            title,
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            default_button,
+        )
     
     def create_left_panel(self) -> QWidget:
         """创建左侧文件夹面板"""
@@ -538,14 +577,12 @@ class QuestionBankView(QWidget):
 
         if checked_count == 0:
             self.status_update.emit("请先勾选要删除的题目")
-            QMessageBox.information(self, "删除题目", "请先勾选要删除的题目。")
+            self._show_info("删除题目", "请先勾选要删除的题目。")
             return
 
-        reply = QMessageBox.question(
-            self,
+        reply = self._ask_question(
             "删除题目",
             f"确定删除已勾选的 {checked_count} 道题吗？\n删除后题目会进入回收站。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -553,7 +590,7 @@ class QuestionBankView(QWidget):
 
         question_ids = [item.data(0, Qt.ItemDataRole.UserRole) for item in checked_items if item.data(0, Qt.ItemDataRole.UserRole)]
         if not question_ids:
-            QMessageBox.warning(self, "删除题目", "未读取到有效的题目 ID。")
+            self._show_warning("删除题目", "未读取到有效的题目 ID。")
             return
 
         self.status_update.emit(f"正在删除 {len(question_ids)} 道题目...")
@@ -563,11 +600,11 @@ class QuestionBankView(QWidget):
             self.status_update.emit(f"已删除 {len(question_ids)} 道题目")
             self.load_folders()
             self._reload_current_questions()
-            QMessageBox.information(self, "删除题目", msg or f"已删除 {len(question_ids)} 道题目。")
+            self._show_info("删除题目", msg or f"已删除 {len(question_ids)} 道题目。")
             return
 
         self.status_update.emit(f"删除题目失败: {msg}")
-        QMessageBox.warning(self, "删除题目失败", msg or "删除题目失败。")
+        self._show_warning("删除题目失败", msg or "删除题目失败。")
 
     def _reload_current_questions(self):
         """重新加载当前文件夹下的题目列表。"""
@@ -896,7 +933,7 @@ class QuestionBankView(QWidget):
 
                     self.status_update.emit(f"已创建文件夹: {name}")
                 else:
-                    QMessageBox.warning(self, "创建失败", result.get("msg", "无法创建文件夹"))
+                    self._show_warning("创建失败", result.get("msg", "无法创建文件夹"))
                     self.status_update.emit(f"创建文件夹失败: {name}")
 
     def create_subfolder(self, parent_item: QTreeWidgetItem):
@@ -909,7 +946,7 @@ class QuestionBankView(QWidget):
         if parent_id == "root":
             api_parent_id = "0"
         elif not parent_id or parent_id.startswith("new-"):
-            QMessageBox.warning(self, "提示", "请先选择一个有效的父文件夹")
+            self._show_warning("提示", "请先选择一个有效的父文件夹")
             return
         else:
             api_parent_id = parent_id
@@ -940,7 +977,7 @@ class QuestionBankView(QWidget):
                     full_path = parent_path + " > " + name
                     self.status_update.emit(f"已创建子文件夹: {full_path}")
                 else:
-                    QMessageBox.warning(self, "创建失败", result.get("msg", "无法创建文件夹"))
+                    self._show_warning("创建失败", result.get("msg", "无法创建文件夹"))
                     self.status_update.emit(f"创建子文件夹失败: {name}")
     
     def rename_folder(self, item: QTreeWidgetItem):
@@ -949,12 +986,12 @@ class QuestionBankView(QWidget):
         
         # 检查是否是新建的本地文件夹
         if not folder_id or folder_id.startswith("new-"):
-            QMessageBox.warning(self, "提示", "此文件夹尚未同步到服务器")
+            self._show_warning("提示", "此文件夹尚未同步到服务器")
             return
         
         # 检查是否是 root 节点
         if folder_id == "root":
-            QMessageBox.warning(self, "提示", "不能重命名根节点")
+            self._show_warning("提示", "不能重命名根节点")
             return
         
         current_text = item.text(0)
@@ -990,7 +1027,7 @@ class QuestionBankView(QWidget):
                 # 刷新当前层级的目录
                 self._refresh_current_level(parent_item)
             else:
-                QMessageBox.warning(self, "重命名失败", "无法重命名文件夹，请稍后重试")
+                self._show_warning("重命名失败", "无法重命名文件夹，请稍后重试")
                 self.status_update.emit(f"重命名失败: {new_name}")
     
     def _refresh_current_level(self, parent_item: QTreeWidgetItem = None):
@@ -1023,10 +1060,9 @@ class QuestionBankView(QWidget):
         # 检查是否是新建的本地文件夹（未同步到服务器）
         if folder_id and folder_id.startswith("new-"):
             # 本地文件夹，直接删除 UI
-            reply = QMessageBox.question(
-                self, "确认删除",
+            reply = self._ask_question(
+                "确认删除",
                 f"确定要删除文件夹 '{name}' 吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
                 parent = item.parent()
@@ -1039,10 +1075,9 @@ class QuestionBankView(QWidget):
             return
         
         # 服务器文件夹，需要调用 API
-        reply = QMessageBox.question(
-            self, "确认删除",
+        reply = self._ask_question(
+            "确认删除",
             f"确定要删除文件夹 '{name}' 吗？\n子文件夹和其中的题目也将被删除！",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         
         if reply == QMessageBox.StandardButton.Yes:
@@ -1070,7 +1105,7 @@ class QuestionBankView(QWidget):
                 
                 self.status_update.emit(f"已删除文件夹: {name}")
             else:
-                QMessageBox.warning(self, "删除失败", "无法删除文件夹，请稍后重试")
+                self._show_warning("删除失败", "无法删除文件夹，请稍后重试")
                 self.status_update.emit(f"删除文件夹失败: {name}")
     
     def upload_to_folder(self, item: QTreeWidgetItem):
@@ -1082,7 +1117,7 @@ class QuestionBankView(QWidget):
         
         # 检查文件夹有效性
         if not folder_id or folder_id == "root":
-            QMessageBox.warning(self, "提示", "请选择一个有效的文件夹")
+            self._show_warning("提示", "请选择一个有效的文件夹")
             return
         
         # 选择文件
@@ -1106,7 +1141,7 @@ class QuestionBankView(QWidget):
             questions = self._parse_questions(content)
             
             if not questions:
-                QMessageBox.warning(self, "提示", "未能解析到任何题目，请检查文件格式")
+                self._show_warning("提示", "未能解析到任何题目，请检查文件格式")
                 return
             
             # 显示预览并确认
@@ -1125,25 +1160,18 @@ class QuestionBankView(QWidget):
             
             preview_text += "确定上传吗？"
             
-            confirm_box = QMessageBox(self)
-            confirm_box.setIcon(QMessageBox.Icon.Question)
-            confirm_box.setWindowTitle("上传确认")
-            confirm_box.setText(preview_text)
-            confirm_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            confirm_box.setDefaultButton(QMessageBox.StandardButton.No)
-            apply_theme_stylesheet(confirm_box, _question_bank_message_box_style)
-            reply = confirm_box.exec()
+            reply = self._ask_question("上传确认", preview_text)
             
             if reply != QMessageBox.StandardButton.Yes:
                 return
             
             # 开始上传
             if not self.crawler:
-                QMessageBox.warning(self, "提示", "未初始化爬虫")
+                self._show_warning("提示", "未初始化爬虫")
                 return
             
             if self._upload_worker and self._upload_worker.isRunning():
-                QMessageBox.information(self, "提示", "已有上传任务正在进行，请稍后。")
+                self._show_info("提示", "已有上传任务正在进行，请稍后。")
                 return
 
             base_dir = os.path.dirname(self.selected_file) if hasattr(self, 'selected_file') and self.selected_file else None
@@ -1172,7 +1200,7 @@ class QuestionBankView(QWidget):
             self._upload_worker.start()
             
         except Exception as e:
-            QMessageBox.warning(self, "上传失败", f"上传过程中出错: {e}")
+            self._show_warning("上传失败", f"上传过程中出错: {e}")
             import traceback
             traceback.print_exc()
 
@@ -1188,7 +1216,7 @@ class QuestionBankView(QWidget):
                 f"当前进度：总共 {total} 道，成功 {success_count} 道，重复 {duplicate_count} 道，失败 {fail_count} 道"
             )
             self.status_update.emit(msg)
-            QMessageBox.warning(self, "上传失败", msg)
+            self._show_warning("上传失败", msg)
             self._upload_worker = None
             return
 
@@ -1197,7 +1225,7 @@ class QuestionBankView(QWidget):
             f"重复: {duplicate_count} 道\n失败: {fail_count} 道"
         )
         self.status_update.emit(msg)
-        QMessageBox.information(self, "上传完成", msg)
+        self._show_info("上传完成", msg)
 
         if success_count > 0:
             # 刷新左侧文件夹树（更新数量）
@@ -1522,11 +1550,11 @@ class QuestionBankView(QWidget):
 
             msg = result.get("msg", "未知错误")
             self.status_update.emit(f"加载题目详情失败: {msg}")
-            QMessageBox.warning(self, "加载失败", f"无法加载题目详情:\n{msg}")
+            self._show_warning("加载失败", f"无法加载题目详情:\n{msg}")
         except Exception as e:
             print(f"加载题目详情错误: {e}")
             self.status_update.emit(f"加载题目详情失败: {e}")
-            QMessageBox.warning(self, "加载失败", f"无法加载题目详情:\n{e}")
+            self._show_warning("加载失败", f"无法加载题目详情:\n{e}")
 
         return None
 

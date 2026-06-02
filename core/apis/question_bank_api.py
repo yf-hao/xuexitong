@@ -1176,7 +1176,7 @@ class QuestionBankAPI:
                     # 检查是否只包含普通字符（不需要渲染为图片）
                     # 普通字符：字母、数字、括号、基本运算符（不含 ^ 和 _）
                     # 注意：排除 < 和 >，因为它们会被 HTML 转义，应该渲染成图片或转换为数学尖括号
-                    plain_chars_pattern = r'^[a-zA-Z0-9\s\(\)\[\]\{\}+\-=,.\'\';:\!]+$'
+                    plain_chars_pattern = r'^[a-zA-Z0-9\s\(\)\[\]\{\}+\-*=,.\'\';:\!]+$'
                     if re2.match(plain_chars_pattern, expr_render):
                         print(f"DEBUG render_math_expr: 只包含普通字符，返回文本: {expr_render}")
                         return None, 0, 0, expr_render

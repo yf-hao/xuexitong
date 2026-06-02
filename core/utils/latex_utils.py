@@ -33,6 +33,18 @@ SUPERSCRIPT_MAP = {
     '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾'
 }
 
+# 黑板粗体常用集合符号映射。
+# 仅转换已知单字符，避免把复杂 \mathbb{...} 内容误转成普通文本。
+MATHBB_MAP = {
+    'N': 'ℕ',
+    'Z': 'ℤ',
+    'Q': 'ℚ',
+    'R': 'ℝ',
+    'C': 'ℂ',
+    'P': 'ℙ',
+    'H': 'ℍ',
+}
+
 # LaTeX 命令到 Unicode 的映射表
 # 注意：按长度从长到短排序，确保长命令先被替换
 LATEX_TO_UNICODE_MAP = [
@@ -105,8 +117,9 @@ LATEX_TO_UNICODE_MAP = [
 # 简单 Unicode 符号的正则模式
 # 包含：基本字符 + 数学符号 + Unicode 下标 + Unicode 上标
 SIMPLE_UNICODE_PATTERN = (
-    r'^[a-zA-Z0-9\s\(\)\[\]\{\}|+\-=,.\'\';:\!'
+    r'^[a-zA-Z0-9\s\(\)\[\]\{\}|+\-*=,.\'\';:\!'
     r'¬∀∃∧∨→↔⇒⟺∈⊂⊃⊆⊇∪∩∅≤≥≠≈≡±×÷∞…⊈⊉⊄⊅⟨⟩∘·•∗⋆⊕⊗⊙≼≽≺≻∼'
+    r'ℕℤℚℝℂℙℍ'
     r'₀₁₂₃₄₅₆₇₈₉ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀᴛᴜᴠᴡʏᴢ₊₋₌₍₎'
     r'⁰¹²³⁴⁵⁶⁷⁸⁹ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ⁺⁻⁼⁽⁾'
     r']+$'
@@ -295,8 +308,19 @@ def apply_latex_unicode_map(text):
         'R₁ ∘ R₂'
         >>> apply_latex_unicode_map(r"a \\land b")
         'a ∧ b'
+        >>> apply_latex_unicode_map(r"\\mathbb{N}")
+        'ℕ'
     """
     result = text
+
+    def replace_mathbb(match):
+        value = match.group(1)
+        if all(char in MATHBB_MAP for char in value):
+            return ''.join(MATHBB_MAP[char] for char in value)
+        return match.group(0)
+
+    result = re.sub(r'\\mathbb\{([A-Za-z]+)\}', replace_mathbb, result)
+
     for latex_cmd, unicode_char in LATEX_TO_UNICODE_MAP:
         result = result.replace(latex_cmd, unicode_char)
     return result
