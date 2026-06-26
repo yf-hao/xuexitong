@@ -79,7 +79,7 @@ app = BUNDLE(
     info_plist={
         'NSPrincipalClass': 'NSApplication',
         'NSHighResolutionCapable': 'True',
-        'CFBundleShortVersionString': '0.8.1',
+        'CFBundleShortVersionString': '0.12.4',
         'CFBundleDisplayName': 'XHelper',
         'CFBundleName': 'XHelper',
     },
