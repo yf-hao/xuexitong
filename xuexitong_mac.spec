@@ -34,6 +34,7 @@ a = Analysis(
         'Crypto',
         'Crypto.Cipher',
         'Crypto.Cipher.AES',
+        'core.excel_parser',
         'qrcode',
         'qrcode.image.pil',
         'qrcode.image.svg', 'websocket',

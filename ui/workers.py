@@ -2,6 +2,7 @@ from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.config import DEFAULT_FID
+from core.excel_parser import parse_students_xls
 
 class CourseWorker(QThread):
     """Worker thread to fetch initial course list."""
@@ -586,8 +587,6 @@ class ParseStudentExcelWorker(QThread):
 
     def run(self):
         try:
-            from core.excel_parser import parse_students_xls
-
             students = parse_students_xls(self.file_path)
             student_count = len(students)
 
