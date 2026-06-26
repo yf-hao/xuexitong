@@ -749,7 +749,7 @@ class ManagementView(QWidget):
             
             # 复选框
             checkbox = QCheckBox()
-            checkbox.setChecked(teacher.get("selected", False))
+            checkbox.setChecked(False)
             apply_theme_stylesheet(checkbox, _management_checkbox_style)
             self.teacher_checkboxes[teacher["id"]] = checkbox
             
@@ -781,6 +781,23 @@ class ManagementView(QWidget):
         
         # 按钮区域
         button_layout = QHBoxLayout()
+        select_all_btn = QPushButton("全选")
+        select_all_btn.setFixedWidth(80)
+        apply_theme_stylesheet(select_all_btn, lambda palette: _management_outline_button_style(palette))
+
+        select_none_btn = QPushButton("全不选")
+        select_none_btn.setFixedWidth(80)
+        apply_theme_stylesheet(select_none_btn, lambda palette: _management_outline_button_style(palette))
+
+        def _set_all_teacher_checkboxes(checked: bool):
+            for checkbox in self.teacher_checkboxes.values():
+                checkbox.setChecked(checked)
+
+        select_all_btn.clicked.connect(lambda: _set_all_teacher_checkboxes(True))
+        select_none_btn.clicked.connect(lambda: _set_all_teacher_checkboxes(False))
+
+        button_layout.addWidget(select_all_btn)
+        button_layout.addWidget(select_none_btn)
         button_layout.addStretch()
         
         # 确定和取消按钮

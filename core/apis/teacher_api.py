@@ -67,7 +67,8 @@ class TeacherAPI:
                 dept_li = row.find("li", class_="dataBody_depart")
                 organization = dept_li.get_text(strip=True) if dept_li else ""
 
-                selected = True
+                # 分配班级时默认不预选任何教师，避免误操作
+                selected = False
                 print(f"教师信息(Parsed): id={teacher_id}, name={name}, workId={work_id}, role={role}, dept={organization}")
 
                 teachers.append({
