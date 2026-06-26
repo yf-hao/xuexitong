@@ -350,3 +350,120 @@ def is_simple_unicode(text):
     
     # 检查是否匹配简单符号模式
     return bool(re.match(SIMPLE_UNICODE_PATTERN, text))
+
+
+def has_matrix(latex_expr):
+    """判断 LaTeX 表达式中是否包含矩阵环境"""
+    if not latex_expr:
+        return False
+    return bool(re.search(r'\\begin\{(pmatrix|matrix|bmatrix|vmatrix|Vmatrix)\}', latex_expr))
+
+
+def parse_matrix(latex_expr):
+    """
+    解析 LaTeX 表达式中的第一个矩阵
+    返回 dict: {
+        'type': 'pmatrix'|'matrix'|...,
+        'rows': [[cell, cell, ...], ...],
+        'full_match': '\\begin{pmatrix}...\\end{pmatrix}'
+    }
+    """
+    if not latex_expr:
+        return None
+    pattern = r'\\begin\{(pmatrix|matrix|bmatrix|vmatrix|Vmatrix)\}(.*?)\\end\{\1\}'
+    match = re.search(pattern, latex_expr, re.DOTALL)
+    if not match:
+        return None
+    
+    env_type = match.group(1)
+    content = match.group(2)
+    
+    # 解析行
+    rows_raw = content.split(r'\\')
+    rows = []
+    for r in rows_raw:
+        r_strip = r.strip()
+        if not r_strip and len(rows) == len(rows_raw) - 1:
+            # 允许最后一个空行
+            continue
+        cells = [c.strip() for c in r.split('&')]
+        rows.append(cells)
+        
+    return {
+        'type': env_type,
+        'rows': rows,
+        'full_match': match.group(0)
+    }
+
+
+def is_simple_matrix(matrix_data):
+    """
+    判断矩阵是否是简单矩阵。
+    简单矩阵：维度不超过 4x4，且所有单元格内容均为简单字符（数字、字母、简单符号，不含嵌套 LaTeX 命令）
+    """
+    if not matrix_data:
+        return False
+    rows = matrix_data['rows']
+    if not rows:
+        return False
+    n_rows = len(rows)
+    n_cols = max(len(r) for r in rows)
+    
+    # 维度不超过 4x4
+    if n_rows > 4 or n_cols > 4:
+        return False
+        
+    # 单元格内容均为简单字符
+    for row in rows:
+        for cell in row:
+            # 排除复杂 LaTeX 命令（以 \ 开头），但允许一些简单的希腊字母或常用符号
+            if '\\' in cell:
+                return False
+    return True
+
+
+def matrix_to_html(matrix_data):
+    """将简单矩阵转换为漂亮的 HTML 表格样式"""
+    if not matrix_data:
+        return ""
+    env_type = matrix_data['type']
+    rows = matrix_data['rows']
+    
+    # 根据矩阵类型决定左右括号样式
+    bracket_styles = {
+        'pmatrix': ('(', ')'),
+        'bmatrix': ('[', ']'),
+        'vmatrix': ('|', '|'),
+        'Vmatrix': ('||', '||'),
+        'matrix': ('', '')
+    }
+    left_br, right_br = bracket_styles.get(env_type, ('', ''))
+    
+    # 构建 HTML 表格，采用类似 editor-table 的内联样式，适合学习通编辑器
+    html_lines = []
+    # 使用外层 table 包裹，以便显示两侧括号，并设置垂直居中
+    html_lines.append('<table class="editor-table" style="display: inline-table; vertical-align: middle; border-collapse: collapse; margin: 0 4px;">')
+    html_lines.append('  <tr>')
+    
+    # 左括号列
+    if left_br:
+        html_lines.append(f'    <td style="font-size: 24px; padding: 0 4px; vertical-align: middle; border: none;">{left_br}</td>')
+        
+    # 矩阵内容表格列
+    html_lines.append('    <td style="border: none; padding: 0;">')
+    html_lines.append('      <table style="border-collapse: collapse; border: none; margin: 0;">')
+    for r in rows:
+        html_lines.append('        <tr>')
+        for cell in r:
+            html_lines.append(f'          <td style="padding: 4px 8px; text-align: center; border: none; font-size: 14px;">{cell}</td>')
+        html_lines.append('        </tr>')
+    html_lines.append('      </table>')
+    html_lines.append('    </td>')
+    
+    # 右括号列
+    if right_br:
+        html_lines.append(f'    <td style="font-size: 24px; padding: 0 4px; vertical-align: middle; border: none;">{right_br}</td>')
+        
+    html_lines.append('  </tr>')
+    html_lines.append('</table>')
+    return '\n'.join(html_lines)

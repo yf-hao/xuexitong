@@ -111,7 +111,7 @@ class AISettingsDialog(QDialog):
         layout.setSpacing(14)
 
         title_label = QLabel("配置大模型 AI 接口（支持 DeepSeek / OpenAI / 聚合接口）")
-        title_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #007acc;")
+        apply_theme_stylesheet(title_label, "font-weight: bold; font-size: 14px; color: #007acc;")
         layout.addWidget(title_label)
 
         form_layout = QFormLayout()
@@ -132,7 +132,7 @@ class AISettingsDialog(QDialog):
         
         self.show_key_btn = QPushButton("👁️")
         self.show_key_btn.setFixedSize(30, 28)
-        self.show_key_btn.setStyleSheet("padding: 2px; font-size: 14px;")
+        apply_theme_stylesheet(self.show_key_btn, "padding: 2px; font-size: 14px;")
         self.show_key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.show_key_btn.clicked.connect(self._toggle_key_visibility)
         key_layout.addWidget(self.show_key_btn)
@@ -159,7 +159,7 @@ class AISettingsDialog(QDialog):
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        line.setStyleSheet("background-color: #3d3d3d;")
+        apply_theme_stylesheet(line, "background-color: #3d3d3d;")
         layout.addWidget(line)
 
         # 底部按钮栏

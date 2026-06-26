@@ -23,3 +23,4 @@ dist/
 *.xlsx
 data/*.json
 ui/views/__pycache__/management_view.cpython-310.pyc
+*.md
