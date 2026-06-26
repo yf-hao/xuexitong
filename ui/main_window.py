@@ -350,7 +350,24 @@ class MainWindow(QMainWindow):
         self.class_worker.classes_ready.connect(self.on_classes_loaded)
         self.class_worker.start()
 
-    def on_classes_loaded(self, classes, course):
+    def refresh_class_list(self):
+        """重新拉取当前课程的班级列表，并尽量保留当前班级选择。"""
+        course = self.course_box.currentData()
+        if not course:
+            return
+
+        current_class_id = self.clazz_box.currentData()
+        self.status_label.setText(f"正在刷新班级列表: {course.name}...")
+
+        self.class_worker = ClassWorker(self.crawler, course)
+        self.class_worker.classes_ready.connect(
+            lambda classes, current_course, preferred_class_id=current_class_id: self.on_classes_loaded(
+                classes, current_course, preferred_class_id
+            )
+        )
+        self.class_worker.start()
+
+    def on_classes_loaded(self, classes, course, preferred_class_id=None):
         self.clazz_box.blockSignals(True)
         self.clazz_box.clear()
         
@@ -361,7 +378,15 @@ class MainWindow(QMainWindow):
         self.clazz_box.blockSignals(False)
         
         if ongoing_classes:
-            self.clazz_box.setCurrentIndex(0)
+            selected_index = 0
+            if preferred_class_id:
+                for i in range(self.clazz_box.count()):
+                    class_id = self.clazz_box.itemData(i)
+                    if str(class_id) == str(preferred_class_id):
+                        selected_index = i
+                        break
+
+            self.clazz_box.setCurrentIndex(selected_index)
             hidden_count = len(classes) - len(ongoing_classes)
             if hidden_count > 0:
                 self.status_label.setText(f"已加载 {len(ongoing_classes)} 个进行中的班级 (已隐藏 {hidden_count} 个结课班级)")

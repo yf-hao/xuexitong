@@ -850,6 +850,12 @@ class ManagementView(QWidget):
         if success:
             QMessageBox.information(self, "操作成功", f"班级{action_name}成功！")
             self.on_class_management_clicked() # Refresh list
+            window_obj = self.window()
+            if window_obj and hasattr(window_obj, "refresh_class_list"):
+                try:
+                    window_obj.refresh_class_list()
+                except Exception:
+                    pass
         else:
             QMessageBox.warning(self, "操作失败", f"班级{action_name}失败: {message}")
         self.status_callback(message)
