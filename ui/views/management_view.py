@@ -781,23 +781,36 @@ class ManagementView(QWidget):
         
         # 按钮区域
         button_layout = QHBoxLayout()
-        select_all_btn = QPushButton("全选")
-        select_all_btn.setFixedWidth(80)
-        apply_theme_stylesheet(select_all_btn, lambda palette: _management_outline_button_style(palette))
 
-        select_none_btn = QPushButton("全不选")
-        select_none_btn.setFixedWidth(80)
-        apply_theme_stylesheet(select_none_btn, lambda palette: _management_outline_button_style(palette))
+        select_toggle_btn = QPushButton("全选")
+        select_toggle_btn.setFixedWidth(90)
+        apply_theme_stylesheet(select_toggle_btn, lambda palette: _management_outline_button_style(palette))
 
         def _set_all_teacher_checkboxes(checked: bool):
             for checkbox in self.teacher_checkboxes.values():
                 checkbox.setChecked(checked)
 
-        select_all_btn.clicked.connect(lambda: _set_all_teacher_checkboxes(True))
-        select_none_btn.clicked.connect(lambda: _set_all_teacher_checkboxes(False))
+        def _update_select_toggle_text():
+            total_count = len(self.teacher_checkboxes)
+            checked_count = sum(1 for checkbox in self.teacher_checkboxes.values() if checkbox.isChecked())
+            if total_count > 0 and checked_count == total_count:
+                select_toggle_btn.setText("全不选")
+            else:
+                select_toggle_btn.setText("全选")
 
-        button_layout.addWidget(select_all_btn)
-        button_layout.addWidget(select_none_btn)
+        def _toggle_teacher_selection():
+            total_count = len(self.teacher_checkboxes)
+            checked_count = sum(1 for checkbox in self.teacher_checkboxes.values() if checkbox.isChecked())
+            _set_all_teacher_checkboxes(checked_count != total_count)
+            _update_select_toggle_text()
+
+        for checkbox in self.teacher_checkboxes.values():
+            checkbox.stateChanged.connect(lambda *_: _update_select_toggle_text())
+
+        select_toggle_btn.clicked.connect(_toggle_teacher_selection)
+        _update_select_toggle_text()
+
+        button_layout.addWidget(select_toggle_btn)
         button_layout.addStretch()
         
         # 确定和取消按钮
