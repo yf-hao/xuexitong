@@ -5,6 +5,11 @@ import json
 import re
 
 
+class DownloadCancelledError(Exception):
+    """下载被取消"""
+    pass
+
+
 class CloudDriveAPI:
     """云盘 API 接口"""
 
@@ -318,10 +323,10 @@ class CloudDriveAPI:
                 "error": str(e)
             }
 
-    def download_file(self, file_id, encrypted_id, puid, current_folder_id, token, save_path):
+    def download_file(self, file_id, encrypted_id, puid, current_folder_id, token, save_path, progress_callback=None, cancel_callback=None):
         """
-        下载云盘文件
-        
+        下载云盘文件（支持进度回调和取消）
+
         Args:
             file_id: 文件ID
             encrypted_id: 加密ID
@@ -329,14 +334,17 @@ class CloudDriveAPI:
             current_folder_id: 当前文件夹ID
             token: 认证token
             save_path: 保存路径
-        
+            progress_callback: 进度回调函数，接收 (downloaded_bytes, total_bytes)
+            cancel_callback: 取消检查函数，返回 True 表示应取消下载
+
         Returns:
             dict: 下载结果
         """
+        full_save_path = None
         try:
             # 第一步：获取下载链接
             download_url = "https://pan-yz.cldisk.com/download/downloadFileV2"
-            
+
             params = {
                 "fleid": file_id,
                 "puid": puid,
@@ -345,7 +353,7 @@ class CloudDriveAPI:
                 "encryptedId": encrypted_id,
                 "auditRecordIdEnc": ""
             }
-            
+
             headers = {
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
@@ -364,23 +372,23 @@ class CloudDriveAPI:
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": '"macOS"'
             }
-            
+
             # 发送请求，允许重定向
             response = self.session.get(download_url, params=params, headers=headers, allow_redirects=True, stream=True)
-            
+
             print(f"DEBUG download_file: 最终URL={response.url}")
             print(f"DEBUG download_file: 状态码={response.status_code}")
-            
+
             if response.status_code == 200:
                 # 从URL或Content-Disposition中提取文件名
                 import os
                 from urllib.parse import unquote, urlparse, parse_qs
-                
+
                 # 尝试从URL参数中获取文件名
                 parsed_url = urlparse(response.url)
                 query_params = parse_qs(parsed_url.query)
                 filename = query_params.get('fn', [None])[0]
-                
+
                 if filename:
                     filename = unquote(filename)
                 else:
@@ -388,13 +396,13 @@ class CloudDriveAPI:
                     content_disp = response.headers.get('Content-Disposition', '')
                     if 'filename=' in content_disp:
                         raw_filename = content_disp.split('filename=')[1].strip('"')
-                        
+
                         # 尝试 URL 解码
                         try:
                             filename = unquote(raw_filename)
                         except:
                             filename = raw_filename
-                        
+
                         # 如果解码后仍然是乱码，尝试 ISO-8859-1 -> UTF-8
                         try:
                             filename = raw_filename.encode('iso-8859-1').decode('utf-8')
@@ -402,27 +410,32 @@ class CloudDriveAPI:
                             pass
                     else:
                         filename = f"file_{file_id}"
-                
+
                 # 确保保存路径存在
                 os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
-                
+
                 # 保存文件
                 full_save_path = os.path.join(save_path, filename) if os.path.isdir(save_path) else save_path
-                
+
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded = 0
-                
+
                 with open(full_save_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
+                            if progress_callback:
+                                progress_callback(downloaded, total_size)
                             if total_size > 0:
                                 progress = (downloaded / total_size) * 100
                                 print(f"\rDEBUG download_file: 下载进度 {progress:.1f}%", end='')
-                
+                            # 检查是否取消
+                            if cancel_callback and cancel_callback():
+                                raise DownloadCancelledError("用户取消下载")
+
                 print(f"\nDEBUG download_file: 文件已保存到 {full_save_path}")
-                
+
                 return {
                     "success": True,
                     "file_path": full_save_path,
@@ -434,8 +447,29 @@ class CloudDriveAPI:
                     "success": False,
                     "error": f"下载失败，状态码: {response.status_code}"
                 }
-                
+
+        except DownloadCancelledError:
+            # 删除已写入的部分文件
+            if full_save_path and os.path.exists(full_save_path):
+                try:
+                    os.remove(full_save_path)
+                    print(f"DEBUG download_file: 已删除未完成的文件 {full_save_path}")
+                except Exception as cleanup_err:
+                    print(f"DEBUG download_file: 清理未完成文件失败 - {cleanup_err}")
+            return {
+                "success": False,
+                "cancelled": True,
+                "error": "下载已取消"
+            }
+
         except Exception as e:
+            # 发生其他异常时，同样尝试清理未完成的文件
+            if full_save_path and os.path.exists(full_save_path):
+                try:
+                    os.remove(full_save_path)
+                    print(f"DEBUG download_file: 已删除未完成的文件 {full_save_path}")
+                except Exception:
+                    pass
             print(f"DEBUG download_file: 下载失败 - {str(e)}")
             return {
                 "success": False,
@@ -990,58 +1024,68 @@ class CloudDriveAPI:
                 "error": str(e)
             }
 
-    def upload_file_to_cloud(self, upload_url, file_path, token):
+    def upload_file_to_cloud(self, upload_url, file_path, token, progress_callback=None, cancel_callback=None):
         """
-        上传文件到云盘
-        
+        上传文件到云盘（支持进度回调和取消）
+
         Args:
             upload_url: 上传URL（相对路径）
             file_path: 本地文件路径
             token: 认证token
-        
+            progress_callback: 进度回调函数，接收 (uploaded_bytes, total_bytes)
+            cancel_callback: 取消检查函数，返回 True 表示应取消上传
+
         Returns:
             dict: 上传结果
         """
         try:
             import os
-            from pathlib import Path
-            
+            from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
+
             # 构建完整URL
             full_url = f"https://pan-yz.cldisk.com{upload_url}"
-            
-            # 获取文件名
+
+            # 获取文件名和大小
             filename = os.path.basename(file_path)
-            
-            # 准备文件数据
-            with open(file_path, 'rb') as f:
-                files = {
-                    'file': (filename, f)
-                }
-                
-                headers = {
-                    "Accept": "*/*",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "Origin": "https://pan-yz.cldisk.com",
-                    "Pragma": "no-cache",
-                    "Referer": "https://pan-yz.cldisk.com/pcuserpan/index",
-                    "Sec-Fetch-Dest": "empty",
-                    "Sec-Fetch-Mode": "cors",
-                    "Sec-Fetch-Site": "same-origin",
-                    "Sec-Fetch-Storage-Access": "active",
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-                    "p-auth-token": token,
-                    "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"macOS"'
-                }
-                
-                response = self.session.post(full_url, files=files, headers=headers)
-            
+            total_size = os.path.getsize(file_path)
+
+            # 使用 MultipartEncoderMonitor 实现真实网络传输进度
+            encoder = MultipartEncoder({
+                'file': (filename, open(file_path, 'rb'), 'application/octet-stream')
+            })
+
+            if progress_callback:
+                def _monitor_callback(monitor):
+                    if cancel_callback and cancel_callback():
+                        raise DownloadCancelledError("用户取消上传")
+                    progress_callback(monitor.bytes_read, monitor.len)
+                encoder = MultipartEncoderMonitor(encoder, _monitor_callback)
+
+            headers = {
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Origin": "https://pan-yz.cldisk.com",
+                "Pragma": "no-cache",
+                "Referer": "https://pan-yz.cldisk.com/pcuserpan/index",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Storage-Access": "active",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                "p-auth-token": token,
+                "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"macOS"',
+                "Content-Type": encoder.content_type,
+            }
+
+            response = self.session.post(full_url, data=encoder, headers=headers)
+
             print(f"DEBUG upload_file_to_cloud: 状态码={response.status_code}")
             print(f"DEBUG upload_file_to_cloud: 响应={response.text}")
-            
+
             if response.status_code == 200:
                 result = response.json()
                 if result.get("result"):
@@ -1060,7 +1104,14 @@ class CloudDriveAPI:
                     "success": False,
                     "error": f"请求失败，状态码: {response.status_code}"
                 }
-                
+
+        except DownloadCancelledError:
+            return {
+                "success": False,
+                "cancelled": True,
+                "error": "上传已取消"
+            }
+
         except Exception as e:
             print(f"DEBUG upload_file_to_cloud: 上传失败 - {str(e)}")
             return {

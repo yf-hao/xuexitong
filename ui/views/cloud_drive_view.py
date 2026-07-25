@@ -14,24 +14,55 @@ from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette,
 
 
 class DownloadThread(QThread):
-    """下载线程"""
-    
-    finished_signal = pyqtSignal(dict)  # 下载完成信号
-    
+    """下载线程（支持进度反馈）"""
+
+    file_started = pyqtSignal(str, int)       # 文件名, 文件大小
+    file_progress = pyqtSignal(int, int)      # 已下载字节, 总字节
+    finished_signal = pyqtSignal(dict)        # 下载完成信号
+    status_message = pyqtSignal(str)          # 状态栏消息
+
     def __init__(self, crawler, download_type, **kwargs):
         super().__init__()
         self.crawler = crawler
         self.download_type = download_type  # 'file' or 'folder'
         self.kwargs = kwargs
-    
+        self._is_cancelled = False
+
+    def cancel(self):
+        """请求取消下载"""
+        self._is_cancelled = True
+
     def run(self):
         """执行下载"""
         try:
             if self.download_type == 'file':
-                result = self.crawler.download_file(**self.kwargs)
+                # 文件下载：添加进度回调
+                def on_progress(downloaded, total):
+                    if self._is_cancelled:
+                        return
+                    self.file_progress.emit(downloaded, total)
+
+                def should_cancel():
+                    return self._is_cancelled
+
+                # 将进度回调注入 kwargs，移除非 API 参数
+                file_kwargs = self.kwargs.copy()
+                file_kwargs['progress_callback'] = on_progress
+                file_kwargs['cancel_callback'] = should_cancel
+                file_kwargs.pop('file_data', None)  # 移除 UI 层参数
+
+                # 尝试获取文件名用于显示
+                file_data = self.kwargs.get('file_data')
+                if file_data:
+                    self.file_started.emit(
+                        file_data.get('name', '未知文件'),
+                        file_data.get('filesize', 0)
+                    )
+
+                result = self.crawler.download_file(**file_kwargs)
             else:
                 result = self.crawler.download_folder(**self.kwargs)
-            
+
             self.finished_signal.emit(result)
         except Exception as e:
             self.finished_signal.emit({
@@ -118,6 +149,112 @@ class BatchDownloadThread(QThread):
                 "failed_items": summary["failed_items"],
                 "error": str(e),
             })
+
+
+class UploadThread(QThread):
+    """上传线程（支持进度反馈）"""
+
+    # 信号定义
+    file_started = pyqtSignal(str, int)       # 文件名, 文件大小(字节)
+    file_progress = pyqtSignal(int, int)      # 已上传字节, 总字节
+    file_finished = pyqtSignal(dict)          # 单个文件完成结果
+    all_finished = pyqtSignal(dict)           # 全部完成汇总
+    status_message = pyqtSignal(str)          # 状态栏消息
+
+    def __init__(self, crawler, file_paths, cloud_info, current_folder_id):
+        super().__init__()
+        self.crawler = crawler
+        self.file_paths = file_paths
+        self.cloud_info = cloud_info
+        self.current_folder_id = current_folder_id
+        self._is_cancelled = False
+
+    def cancel(self):
+        """请求取消上传（当前文件完成后停止）"""
+        self._is_cancelled = True
+
+    def run(self):
+        total_count = len(self.file_paths)
+        success_files = []
+        failed_files = []
+
+        for index, file_path in enumerate(self.file_paths, start=1):
+            if self._is_cancelled:
+                break
+
+            import os
+            filename = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+
+            self.status_message.emit(f"正在上传 ({index}/{total_count}) {filename}...")
+            self.file_started.emit(filename, file_size)
+
+            try:
+                # 第一步：生成上传URL
+                url_result = self.crawler.generate_upload_url(
+                    puid=self.cloud_info.get("currentPuid"),
+                    folder_id=self.current_folder_id,
+                    _token=self.cloud_info.get("_token"),
+                    p_auth_token=self.cloud_info.get("token")
+                )
+
+                if not url_result.get("success"):
+                    failed_files.append((filename, url_result.get("error", "生成上传URL失败")))
+                    self.file_finished.emit({
+                        "success": False,
+                        "filename": filename,
+                        "error": url_result.get("error", "生成上传URL失败")
+                    })
+                    continue
+
+                # 第二步：上传文件（带进度回调和取消）
+                def on_progress(uploaded, total):
+                    if self._is_cancelled:
+                        return
+                    self.file_progress.emit(uploaded, total)
+
+                def should_cancel():
+                    return self._is_cancelled
+
+                upload_result = self.crawler.upload_file_to_cloud(
+                    upload_url=url_result.get("upload_url"),
+                    file_path=file_path,
+                    token=self.cloud_info.get("token"),
+                    progress_callback=on_progress,
+                    cancel_callback=should_cancel
+                )
+
+                if upload_result.get("success"):
+                    success_files.append(filename)
+                    self.file_finished.emit({
+                        "success": True,
+                        "filename": filename,
+                        "message": upload_result.get("message", "上传成功")
+                    })
+                else:
+                    failed_files.append((filename, upload_result.get("error", "上传失败")))
+                    self.file_finished.emit({
+                        "success": False,
+                        "filename": filename,
+                        "error": upload_result.get("error", "上传失败")
+                    })
+
+            except Exception as e:
+                error_msg = str(e)
+                failed_files.append((filename, error_msg))
+                self.file_finished.emit({
+                    "success": False,
+                    "filename": filename,
+                    "error": error_msg
+                })
+
+        self.all_finished.emit({
+            "success": len(success_files) > 0,
+            "total_count": total_count,
+            "success_files": success_files,
+            "failed_files": failed_files,
+            "cancelled": self._is_cancelled
+        })
 
 
 class CloudDriveView(QWidget):
@@ -906,14 +1043,14 @@ class CloudDriveView(QWidget):
         self.download_thread.start()
     
     def download_file(self, file_data):
-        """下载文件或文件夹"""
+        """下载文件或文件夹（带进度显示）"""
         if not self.cloud_info:
             QMessageBox.warning(self, "错误", "云盘信息未加载")
             return
-        
+
         is_file = file_data.get("isfile", False)
         item_name = file_data.get("name", "未知")
-        
+
         if is_file:
             # 下载文件：选择保存位置
             save_path, _ = QFileDialog.getSaveFileName(
@@ -922,14 +1059,27 @@ class CloudDriveView(QWidget):
                 os.path.join(self._get_default_download_dir(), item_name),
                 "所有文件 (*.*)",
             )
-            
+
             if not save_path:
                 return
 
             self._remember_download_dir(os.path.dirname(save_path) or self._get_default_download_dir())
-            
-            self.status_update.emit(f"正在下载 {item_name}...")
-            
+
+            # 创建进度对话框
+            from PyQt6.QtWidgets import QProgressDialog
+
+            self.progress_dialog = QProgressDialog(self)
+            self.progress_dialog.setWindowTitle("下载文件")
+            self.progress_dialog.setLabelText(f"准备下载: {item_name}")
+            self.progress_dialog.setCancelButtonText("取消")
+            self.progress_dialog.setMinimumDuration(0)
+            self.progress_dialog.setMinimum(0)
+            self.progress_dialog.setMaximum(100)
+            self.progress_dialog.setValue(0)
+            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self.progress_dialog.setAutoReset(False)
+            self.progress_dialog.setAutoClose(False)
+
             # 创建下载线程
             self.download_thread = DownloadThread(
                 self.crawler,
@@ -939,17 +1089,41 @@ class CloudDriveView(QWidget):
                 puid=self.cloud_info.get("currentPuid"),
                 current_folder_id=self.current_folder_id,
                 token=self.cloud_info.get("token"),
-                save_path=save_path
+                save_path=save_path,
+                file_data=file_data  # 传递 file_data 用于显示文件名和大小
             )
-            
+
+            # 连接进度信号
+            self.download_thread.file_started.connect(
+                lambda name, size: self.progress_dialog.setLabelText(
+                    f"正在下载: {name}\n大小: {self.format_file_size(size)}"
+                )
+            )
+
+            self.download_thread.file_progress.connect(
+                lambda downloaded, total: self.progress_dialog.setValue(
+                    int(downloaded / total * 100) if total > 0 else 0
+                )
+            )
+
+            self.download_thread.status_message.connect(self.status_update.emit)
+
+            # 取消按钮：先断开进度信号（防止已排队的信号重新弹出对话框），再请求线程取消
+            def on_cancel():
+                try:
+                    self.download_thread.file_progress.disconnect()
+                except Exception:
+                    pass
+                self.download_thread.cancel()
+
+            self.progress_dialog.canceled.connect(on_cancel)
+
             def on_download_finished(result):
-                if result.get("success"):
+                self.progress_dialog.close()
+                if result.get("cancelled"):
+                    self.status_update.emit("下载已取消")
+                elif result.get("success"):
                     self.status_update.emit(f"下载成功: {result.get('filename')}")
-                    QMessageBox.information(
-                        self,
-                        "下载成功",
-                        f"已保存到:\n{result.get('file_path')}"
-                    )
                 else:
                     self.status_update.emit(f"下载失败: {result.get('error')}")
                     QMessageBox.critical(
@@ -957,26 +1131,26 @@ class CloudDriveView(QWidget):
                         "下载失败",
                         f"错误: {result.get('error')}"
                     )
-            
+
             self.download_thread.finished_signal.connect(on_download_finished)
             self.download_thread.start()
-                
+
         else:
-            # 下载文件夹：选择目录
+            # 下载文件夹：选择目录（文件夹下载暂不支持单文件进度）
             save_path = QFileDialog.getExistingDirectory(
                 self,
                 "选择保存位置",
                 self._get_default_download_dir(),
                 QFileDialog.Option.ShowDirsOnly,
             )
-            
+
             if not save_path:
                 return
 
             self._remember_download_dir(save_path)
-            
+
             self.status_update.emit(f"正在打包下载 {item_name}...")
-            
+
             # 创建下载线程
             self.download_thread = DownloadThread(
                 self.crawler,
@@ -988,13 +1162,13 @@ class CloudDriveView(QWidget):
                 token=self.cloud_info.get("token"),
                 save_path=save_path
             )
-            
+
             def on_download_finished(result):
                 if result.get("success"):
                     total = result.get("total_files", 0)
                     downloaded = result.get("downloaded_files", 0)
                     failed = result.get("failed_files", [])
-                    
+
                     if failed:
                         failed_names = [f["name"] for f in failed[:5]]
                         msg = f"下载完成：成功 {downloaded}/{total} 个文件\n\n失败的文件：\n" + "\n".join(failed_names)
@@ -1019,7 +1193,7 @@ class CloudDriveView(QWidget):
                         "下载失败",
                         f"错误: {result.get('error')}"
                     )
-            
+
             self.download_thread.finished_signal.connect(on_download_finished)
             self.download_thread.start()
     
@@ -1540,11 +1714,11 @@ class CloudDriveView(QWidget):
         self.refresh_info()
     
     def upload_file(self):
-        """上传文件"""
+        """上传文件（后台线程 + 进度显示）"""
         if not self.cloud_info:
             QMessageBox.warning(self, "错误", "云盘信息未加载")
             return
-        
+
         # 选择文件（支持多选）
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -1552,74 +1726,110 @@ class CloudDriveView(QWidget):
             "",
             "所有文件 (*.*)"
         )
-        
+
         if not file_paths:
             return
-        
-        import os
 
-        total_count = len(file_paths)
-        success_files = []
-        failed_files = []
+        # 创建进度对话框
+        from PyQt6.QtWidgets import QProgressDialog, QPushButton
 
-        try:
-            for index, file_path in enumerate(file_paths, start=1):
-                filename = os.path.basename(file_path)
-                self.status_update.emit(f"正在上传 ({index}/{total_count}) {filename}...")
+        self.progress_dialog = QProgressDialog(self)
+        self.progress_dialog.setWindowTitle("上传文件")
+        self.progress_dialog.setLabelText("准备上传...")
+        self.progress_dialog.setCancelButtonText("取消")
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.setMinimum(0)
+        self.progress_dialog.setMaximum(100)
+        self.progress_dialog.setValue(0)
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setAutoReset(False)
+        self.progress_dialog.setAutoClose(False)
 
-                # 第一步：生成上传URL
-                url_result = self.crawler.generate_upload_url(
-                    puid=self.cloud_info.get("currentPuid"),
-                    folder_id=self.current_folder_id,
-                    _token=self.cloud_info.get("_token"),  # URL参数token（短的）
-                    p_auth_token=self.cloud_info.get("token")  # 认证token（长的）
-                )
+        # 创建上传线程
+        self.upload_thread = UploadThread(
+            self.crawler,
+            file_paths,
+            self.cloud_info,
+            self.current_folder_id
+        )
 
-                if not url_result.get("success"):
-                    failed_files.append((filename, url_result.get("error", "生成上传URL失败")))
-                    continue
+        # 连接信号
+        self.upload_thread.status_message.connect(self.status_update.emit)
 
-                # 第二步：上传文件
-                upload_result = self.crawler.upload_file_to_cloud(
-                    upload_url=url_result.get("upload_url"),
-                    file_path=file_path,
-                    token=self.cloud_info.get("token")
-                )
-
-                if upload_result.get("success"):
-                    success_files.append(filename)
-                else:
-                    failed_files.append((filename, upload_result.get("error", "上传失败")))
-
-            if success_files:
-                self.status_update.emit(f"上传完成，成功 {len(success_files)} 个，失败 {len(failed_files)} 个")
-                if self.current_folder_id == self.cloud_info.get("rootdir"):
-                    self.refresh_info()
-                else:
-                    self.navigate_to_folder(self.current_folder_id, "当前文件夹")
-            else:
-                self.status_update.emit("上传失败")
-
-            summary_lines = [f"共选择 {total_count} 个文件", f"成功 {len(success_files)} 个", f"失败 {len(failed_files)} 个"]
-            if failed_files:
-                failed_text = "\n".join(f"{name}: {error}" for name, error in failed_files[:10])
-                summary_lines.append("")
-                summary_lines.append(failed_text)
-                if len(failed_files) > 10:
-                    summary_lines.append(f"... 另外还有 {len(failed_files) - 10} 个失败文件")
-
-            if failed_files:
-                QMessageBox.warning(self, "上传完成", "\n".join(summary_lines))
-            else:
-                QMessageBox.information(self, "上传完成", "\n".join(summary_lines))
-
-        except Exception as e:
-            self.status_update.emit(f"上传出错: {str(e)}")
-            QMessageBox.critical(
-                self,
-                "上传出错",
-                f"错误: {str(e)}"
+        self.upload_thread.file_started.connect(
+            lambda name, size: self.progress_dialog.setLabelText(
+                f"正在上传: {name}\n大小: {self.format_file_size(size)}"
             )
+        )
+
+        self.upload_thread.file_progress.connect(
+            lambda uploaded, total: self.progress_dialog.setValue(
+                int(uploaded / total * 100) if total > 0 else 0
+            )
+        )
+
+        self.upload_thread.file_finished.connect(self._on_single_file_finished)
+
+        self.upload_thread.all_finished.connect(self._on_all_upload_finished)
+
+        # 取消按钮：先断开进度信号（防止已排队的信号重新弹出对话框），再请求线程取消
+        def on_upload_cancel():
+            try:
+                self.upload_thread.file_progress.disconnect()
+            except Exception:
+                pass
+            self.upload_thread.cancel()
+
+        self.progress_dialog.canceled.connect(on_upload_cancel)
+
+        # 启动上传
+        self.upload_thread.start()
+
+    def _on_single_file_finished(self, result):
+        """单个文件上传完成回调"""
+        if result.get("cancelled"):
+            self.progress_dialog.setLabelText("上传已取消")
+        elif not result.get("success"):
+            # 失败时保持进度条显示，让用户看到错误
+            self.progress_dialog.setLabelText(
+                f"上传失败: {result.get('filename')}\n{result.get('error', '')}"
+            )
+
+    def _on_all_upload_finished(self, result):
+        """全部上传完成回调"""
+        self.progress_dialog.close()
+
+        total_count = result.get("total_count", 0)
+        success_files = result.get("success_files", [])
+        failed_files = result.get("failed_files", [])
+        cancelled = result.get("cancelled", False)
+
+        # 刷新文件列表
+        if success_files:
+            if self.current_folder_id == self.cloud_info.get("rootdir"):
+                self.refresh_info()
+            else:
+                self.navigate_to_folder(self.current_folder_id, "当前文件夹")
+
+        if cancelled and not success_files:
+            self.status_update.emit("上传已取消")
+            return
+
+        self.status_update.emit(
+            f"上传完成，成功 {len(success_files)} 个，失败 {len(failed_files)} 个"
+        )
+
+        # 只有存在失败文件时才弹窗，全部成功时不弹窗
+        if failed_files:
+            summary_lines = [f"共选择 {total_count} 个文件", f"成功 {len(success_files)} 个", f"失败 {len(failed_files)} 个"]
+            if cancelled:
+                summary_lines.append("(已取消)")
+            failed_text = "\n".join(f"{name}: {error}" for name, error in failed_files[:10])
+            summary_lines.append("")
+            summary_lines.append(failed_text)
+            if len(failed_files) > 10:
+                summary_lines.append(f"... 另外还有 {len(failed_files) - 10} 个失败文件")
+            QMessageBox.warning(self, "上传完成", "\n".join(summary_lines))
     
     def create_folder(self):
         """新建文件夹"""
