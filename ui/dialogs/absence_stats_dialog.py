@@ -183,7 +183,7 @@ class AbsenceStatsDialog(QDialog):
                     color: #007acc;
                     border: 1px solid #007acc;
                     border-radius: 3px;
-                    padding: 4px 12px;
+                    padding: 2px 12px;
                     font-size: 12px;
                 }
                 QPushButton:hover {
@@ -197,7 +197,7 @@ class AbsenceStatsDialog(QDialog):
             btn_layout = QHBoxLayout(btn_widget)
             btn_layout.addWidget(message_btn)
             btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            btn_layout.setContentsMargins(5, 2, 5, 2)
+            btn_layout.setContentsMargins(5, 0, 5, 0)
             self.table.setCellWidget(row, 6, btn_widget)
         
         layout.addWidget(self.table)
@@ -205,7 +205,8 @@ class AbsenceStatsDialog(QDialog):
         # 操作按钮
         btn_layout = QHBoxLayout()
         self.reminder_btn = QPushButton("🔔 一键提醒")
-        self.reminder_btn.setFixedWidth(110)
+        self.reminder_btn.setMinimumWidth(140)
+        self.reminder_btn.adjustSize()
         self.reminder_btn.clicked.connect(self._on_reminder_clicked)
         btn_layout.addWidget(self.reminder_btn)
         self.export_btn = QPushButton("导出")

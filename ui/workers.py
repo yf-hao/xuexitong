@@ -1100,6 +1100,41 @@ class ChatGroupMembersWorker(QThread):
             self.members_ready.emit(self.room_id, [])
 
 
+class GroupMembersBatchWorker(QThread):
+    """后台批量预加载课程群成员并写入缓存。"""
+
+    progress = pyqtSignal(str, str, int)  # room_id, cache_name, member_count
+    finished_signal = pyqtSignal(int, int)  # total, success_count
+
+    def __init__(self, crawler, tasks: list[dict]):
+        super().__init__()
+        self.crawler = crawler
+        self.tasks = list(tasks or [])
+
+    def run(self):
+        total = len(self.tasks)
+        success = 0
+        for task in self.tasks:
+            room_id = str(task.get("room_id") or "").strip()
+            cache_name = str(task.get("cache_name") or "").strip()
+            if not room_id:
+                continue
+            try:
+                members = self.crawler.get_group_members(room_id)
+                if members:
+                    from core.group_members_cache import save_group_members_cache
+                    save_group_members_cache(members, cache_name, fallback=room_id)
+                    success += 1
+                    self.progress.emit(room_id, cache_name, len(members))
+                else:
+                    self.progress.emit(room_id, cache_name, 0)
+            except Exception as e:
+                print(f"GroupMembersBatchWorker error for {room_id}: {e}")
+            import time
+            time.sleep(0.2)
+        self.finished_signal.emit(total, success)
+
+
 class HomeworkWorker(QThread):
     """Worker thread to fetch homework stats (作业情况)."""
     

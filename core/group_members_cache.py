@@ -80,6 +80,38 @@ def load_group_members_cache(group_name: str, class_name: str = "", fallback: st
     return [], None
 
 
+def save_group_members_cache(
+    members: list[dict],
+    cache_name: str = "",
+    fallback: str = "",
+    cache_dir: Path | None = None,
+) -> Path | None:
+    """将群成员列表写入缓存文件，返回写入的文件路径；失败返回 None。"""
+    cache_dir = Path(cache_dir or GROUP_MEMBERS_CACHE_DIR)
+    cache_path = build_group_members_cache_path(cache_name, "", fallback=fallback, cache_dir=cache_dir)
+
+    payload = []
+    for item in members or []:
+        if not isinstance(item, dict):
+            continue
+        member = dict(item)
+        for key in ("person_id", "name", "student_id", "avatar_url", "tuid", "puid"):
+            if key in member:
+                member[key] = str(member.get(key) or "")
+        payload.append(member)
+
+    if not payload:
+        return None
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return cache_path
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def resolve_student_from_group_cache(group_name: str, class_name: str, student_name: str, fallback: str = "", cache_dir: Path | None = None) -> dict:
     normalized_student_name = str(student_name or "").strip()
     members, cache_path = load_group_members_cache(group_name, class_name, fallback=fallback, cache_dir=cache_dir)

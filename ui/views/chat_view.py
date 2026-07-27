@@ -20,7 +20,7 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkRepl
 
 from core.config import DATA_DIR
 from core.group_members_cache import build_group_members_cache_path, load_group_members_cache, sanitize_group_cache_filename
-from ui.workers import ChatMessageListWorker, ChatHistoryWorker, ChatGroupMembersWorker, AIChatWorker
+from ui.workers import ChatMessageListWorker, ChatHistoryWorker, ChatGroupMembersWorker, GroupMembersBatchWorker, AIChatWorker
 from core.logger import get_logger
 from ui.theme import apply_theme_stylesheet, bind_theme_tree
 
@@ -314,6 +314,7 @@ class ChatView(QWidget):
         self._history_worker = None
         self._history_workers = []
         self._group_members_worker = None
+        self._batch_group_members_worker = None
         self._last_send_error = ""
         self._raw_sessions = []  # 保存原始 API 返回数据
         self._message_cache = {}
@@ -547,7 +548,7 @@ class ChatView(QWidget):
         except Exception:
             pass
 
-        for worker in [self._message_worker, self._ai_worker, self._history_worker, self._group_members_worker, *self._history_workers]:
+        for worker in [self._message_worker, self._ai_worker, self._history_worker, self._group_members_worker, self._batch_group_members_worker, *self._history_workers]:
             try:
                 if worker and worker.isRunning():
                     worker.quit()
@@ -771,6 +772,7 @@ class ChatView(QWidget):
                 ChatView._retry_current_chat_history(self, request_realtime=False)
         self._startup_messages_loaded = True
         ChatView._finish_startup_badge_gate(self)
+        ChatView._start_batch_group_members_preload(self, group_chats)
 
     def _request_unread_summary(self, sessions: list):
         if not hasattr(self.crawler, "request_history_summary_msync"):
@@ -1620,6 +1622,38 @@ class ChatView(QWidget):
             except OSError as e:
                 logger.warning(f"ChatView: 删除群成员缓存失败 room_id={room_id}, error={e}")
         return removed
+
+    def _start_batch_group_members_preload(self, group_sessions: list):
+        """后台批量预加载课程群成员缓存（不影响现有功能）。"""
+        if self._batch_group_members_worker and self._batch_group_members_worker.isRunning():
+            return
+        tasks = []
+        for session in group_sessions or []:
+            if not isinstance(session, dict):
+                continue
+            room_id = str(session.get("chatId") or session.get("msgId") or "").strip()
+            if not room_id:
+                continue
+            course_name = str(session.get("courseName") or "").strip()
+            subtitle = str(session.get("subtitle") or "").strip()
+            chat_name = str(session.get("chatName") or "").strip()
+            if course_name and subtitle:
+                cache_name = f"{course_name}-{subtitle}"
+            else:
+                cache_name = chat_name or room_id
+            members, cache_path = load_group_members_cache(
+                cache_name, "", fallback=room_id, cache_dir=self._group_members_cache_dir
+            )
+            if cache_path is not None:
+                continue
+            tasks.append({"room_id": room_id, "cache_name": cache_name})
+        if not tasks:
+            return
+        self._batch_group_members_worker = GroupMembersBatchWorker(self.crawler, tasks)
+        self._batch_group_members_worker.finished_signal.connect(
+            lambda total, success: logger.info(f"ChatView: 群成员预加载完成 {success}/{total}")
+        )
+        self._batch_group_members_worker.start()
 
     def _start_group_members_reload(self, room_id: str):
         room_id = str(room_id or "").strip()
