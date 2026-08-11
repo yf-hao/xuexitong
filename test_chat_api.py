@@ -3457,6 +3457,7 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("layout = QHBoxLayout(self)", dialog_source)
         self.assertIn("NAME_COLUMN_FONT_SIZE = 72", dialog_source)
         self.assertIn('self.name_zoom_btn = QPushButton("", self.name_column)', dialog_source)
+        self.assertIn("self.name_zoom_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)", dialog_source)
         self.assertIn("if event.key() == Qt.Key.Key_Shift:", dialog_source)
         self.assertIn("font-size:{int(self.__class__.NAME_COLUMN_FONT_SIZE)}px", dialog_source)
         self.assertIn("margin-top:8px;", dialog_source)
@@ -3465,8 +3466,10 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn('return QIcon(pixmap)', dialog_source)
         self.assertIn("QSettings", dialog_source)
         self.assertIn("def _change_name_font_size(self, delta: int):", dialog_source)
-        self.assertIn("self.zoom_in_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.ZoomIn), self)", dialog_source)
-        self.assertIn("self.zoom_out_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.ZoomOut), self)", dialog_source)
+        self.assertIn("def _display_status_for_record(self, record) -> int:", dialog_source)
+        self.assertIn('if self.source_tab_key == "unsigned" and status == 0:', dialog_source)
+        self.assertIn('self.zoom_in_shortcut = QShortcut(QKeySequence("Ctrl+="), self)', dialog_source)
+        self.assertIn('self.zoom_out_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)', dialog_source)
         self.assertIn("self.zoom_in_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)", dialog_source)
         self.assertIn("self.zoom_out_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)", dialog_source)
         self.assertIn("self._app.installEventFilter(self)", dialog_source)
@@ -3474,6 +3477,7 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn("self._shift_pressed = event.type() == QEvent.Type.KeyPress", dialog_source)
         self.assertIn('self.next_btn = QPushButton("下一个")', dialog_source)
         self.assertIn('self.next_shortcut = QShortcut(QKeySequence("N"), self)', dialog_source)
+        self.assertIn("ok_btn.setFocus()", dialog_source)
         self.assertNotIn('QShortcut(QKeySequence("F8")', dialog_source)
         self.assertNotIn('<b>姓名：</b>{self.record.name}', dialog_source)
         self.assertNotIn('<b>学号：</b>{self.record.username}', dialog_source)
@@ -3697,18 +3701,16 @@ class ChatAPITests(unittest.TestCase):
     def test_logger_source_limits_release_file_logging_to_errors(self):
         source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/core/logger.py").read_text(encoding="utf-8")
 
-        self.assertIn('IS_RELEASE_BUILD = bool(getattr(sys, "frozen", False))', source)
-        self.assertIn("FILE_LOG_LEVEL = logging.ERROR if IS_RELEASE_BUILD else logging.DEBUG", source)
-        self.assertIn("_file_handler.setLevel(FILE_LOG_LEVEL)", source)
-        self.assertIn("def redirect_standard_streams():", source)
-        self.assertIn('sys.stdout = _LoggerStream(logger, logging.INFO)', source)
-        self.assertIn('sys.stderr = _LoggerStream(logger, logging.ERROR)', source)
+        self.assertIn("_file_handler.setLevel(logging.ERROR)", source)
+        self.assertIn("logger.setLevel(logging.ERROR)", source)
+        self.assertNotIn("redirect_standard_streams", source)
+        self.assertNotIn("_LoggerStream", source)
 
     def test_main_source_redirects_early_logging_to_main_logger(self):
         source = Path("/Volumes/Hao/Users/hao/Documents/hao/sias/xuexitong/main.py").read_text(encoding="utf-8")
 
-        self.assertIn("from core.logger import redirect_standard_streams, get_logger", source)
-        self.assertIn("redirect_standard_streams()", source)
+        self.assertIn("from core.logger import get_logger", source)
+        self.assertNotIn("redirect_standard_streams", source)
         self.assertNotIn('os.path.join(path, "app.log")', source)
 
     def test_debug_sources_no_longer_write_standalone_log_files(self):

@@ -1,19 +1,16 @@
 import sys
 import threading
-from core.logger import redirect_standard_streams, get_logger
+from core.logger import get_logger
 
-# 1. 立即确定数据目录并启动日志，以捕捉导入阶段的崩溃
+# 1. 启动日志，仅记录 ERROR 级别
 def _setup_early_logging():
     logger = get_logger()
     try:
-        redirect_standard_streams()
-        logger.info("=== APP EARLY LOG START ===")
-        logger.info("Executable: %s", sys.executable)
         from core.config import APP_TITLE
         import re
         version_match = re.search(r"V([0-9]+(?:\.[0-9]+)*)", APP_TITLE)
         version_str = version_match.group(1) if version_match else "Unknown"
-        logger.info("Version: %s", version_str)
+        logger.error("=== APP START === Version: %s", version_str)
     except:
         pass
 

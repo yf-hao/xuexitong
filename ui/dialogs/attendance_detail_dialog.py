@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 from models.attendance_record import AttendanceDetail
 from models.activity import Activity
 from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager
-from ui.workers import AttendanceStatusUpdateWorker
+from ui.workers import AttendanceDetailWorker, AttendanceStatusUpdateWorker
 
 
 class AttendanceStatusEditDialog(QDialog):
@@ -90,6 +90,7 @@ class AttendanceStatusEditDialog(QDialog):
         name_column_layout.setContentsMargins(0, 0, 0, 0)
         self.name_zoom_btn = QPushButton("", self.name_column)
         self.name_zoom_btn.setFixedSize(34, 34)
+        self.name_zoom_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.name_zoom_btn.setToolTip("点击放大，按住 Shift 点击缩小")
         apply_theme_stylesheet(self.name_zoom_btn, """
             QPushButton {
@@ -120,7 +121,7 @@ class AttendanceStatusEditDialog(QDialog):
             radio = QRadioButton(f"{key}. {text}")
             self.button_group.addButton(radio, status)
             self.shortcut_buttons[key] = radio
-            if status == self.record.status:
+            if status == self._display_status_for_record(self.record):
                 radio.setChecked(True)
             right_layout.addWidget(radio)
 
@@ -145,16 +146,17 @@ class AttendanceStatusEditDialog(QDialog):
         self.next_shortcut = QShortcut(QKeySequence("N"), self)
         self.next_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.next_shortcut.activated.connect(self._handle_next_clicked)
-        self.zoom_in_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.ZoomIn), self)
+        self.zoom_in_shortcut = QShortcut(QKeySequence("Ctrl+="), self)
         self.zoom_in_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.zoom_in_shortcut.activated.connect(self._zoom_in_name_column)
-        self.zoom_out_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.ZoomOut), self)
+        self.zoom_out_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
         self.zoom_out_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.zoom_out_shortcut.activated.connect(self._zoom_out_name_column)
 
         ok_btn = QPushButton("确定")
         self.ok_btn = ok_btn
         ok_btn.setDefault(True)
+        ok_btn.setFocus()
         ok_btn.clicked.connect(self._handle_accept_clicked)
         btn_layout.addWidget(ok_btn)
         right_layout.addLayout(btn_layout)
@@ -171,6 +173,12 @@ class AttendanceStatusEditDialog(QDialog):
     @property
     def selected_status(self) -> int:
         return self.button_group.checkedId()
+
+    def _display_status_for_record(self, record) -> int:
+        status = int(getattr(record, "status", -1))
+        if self.source_tab_key == "unsigned" and status == 0:
+            return 5
+        return status
 
     def _apply_name_column_visibility(self):
         self.name_column.setVisible(True)
@@ -290,8 +298,9 @@ class AttendanceStatusEditDialog(QDialog):
             button.setChecked(False)
             button.setAutoExclusive(True)
         matched = False
+        display_status = self._display_status_for_record(self.record)
         for status, button in ((button_id, button) for button_id, button in ((self.button_group.id(btn), btn) for btn in self.button_group.buttons())):
-            if int(status) == int(getattr(self.record, "status", -1)):
+            if int(status) == display_status:
                 button.setChecked(True)
                 matched = True
                 break
@@ -352,6 +361,11 @@ class AttendanceStatusEditDialog(QDialog):
         changed = parent.detail.update_record_status(uid, status, current_time)
         if changed and hasattr(parent, "_refresh_tables"):
             parent._refresh_tables(preferred_uid=preferred_uid, preferred_tab_key=self.source_tab_key)
+            if hasattr(parent, "_refresh_attendance_detail_from_server"):
+                parent._refresh_attendance_detail_from_server(
+                    preferred_uid=preferred_uid,
+                    preferred_tab_key=self.source_tab_key,
+                )
         elif hasattr(parent, "_apply_selection"):
             parent._apply_selection(preferred_uid=preferred_uid, preferred_tab_key=self.source_tab_key)
         return changed
@@ -482,6 +496,7 @@ class AttendanceDetailDialog(QDialog):
         self.detail = detail
         self._active_search_query = ""
         self._status_worker = None
+        self._detail_worker = None
         self._tables = {}
         self._pending_selection_uid = ""
         self.setup_ui()
@@ -721,6 +736,26 @@ class AttendanceDetailDialog(QDialog):
             preferred_uid,
             preferred_tab_key=preferred_tab_key or self._tab_key_for_index(current_index),
         )
+
+    def _refresh_attendance_detail_from_server(self, preferred_uid: str = "", preferred_tab_key: str = ""):
+        if self._detail_worker is not None:
+            return
+        self._detail_worker = AttendanceDetailWorker(self.crawler, self.activity.active_id)
+        self._detail_worker.detail_ready.connect(
+            lambda result, uid=preferred_uid, tab_key=preferred_tab_key: (
+                self._on_attendance_detail_refreshed(result, uid, tab_key)
+            )
+        )
+        self._detail_worker.start()
+
+    def _on_attendance_detail_refreshed(self, result, preferred_uid: str, preferred_tab_key: str):
+        worker = self._detail_worker
+        self._detail_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if isinstance(result, AttendanceDetail):
+            self.detail = result
+            self._refresh_tables(preferred_uid=preferred_uid, preferred_tab_key=preferred_tab_key)
 
     def _records_for_table(self, table: QTableWidget):
         tab_key = table.property("tab_key")

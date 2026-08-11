@@ -287,7 +287,6 @@ def _management_action_button_style(palette) -> str:
             padding: 12px 14px;
             font-size: 15px;
             font-weight: bold;
-            min-height: 80px;
             text-align: center;
         }}
         QPushButton:hover {{
@@ -1587,7 +1586,9 @@ class ManagementView(QWidget):
             creation_data = prefetched_data.get("creation_data", {})
 
         print(f"DEBUG: _open_course_info_dialog buildup. is_edit={is_edit}, prefetched={prefetched_data is not None}")
-        
+
+        initial_data = initial_data or {}
+
         # 定义需要提取的字段，确保在所有路径下都已定义
         fetched_name = ""
         fetched_english = ""
@@ -2480,7 +2481,7 @@ class ManagementView(QWidget):
         for idx, (title_text, subtitle, handler) in enumerate(buttons):
             btn = QPushButton()
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
             apply_theme_stylesheet(btn, _management_action_button_style)
 
             # 使用布局和标签实现富文本（主标题大字体，副标题小字体）
