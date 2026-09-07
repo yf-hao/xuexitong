@@ -483,6 +483,9 @@ class MainWindow(QMainWindow):
         title = item.text()
         self.last_nav_title = title
         course = self.course_box.currentData()
+        is_activity_page = "活动" in title or "签到" in title
+        if self.stacked_widget.currentIndex() == 3 and not is_activity_page:
+            self.activities_view.on_hide()
         
         if "资料" in title:
             self.stacked_widget.setCurrentIndex(0)

@@ -241,6 +241,10 @@ class ActivitiesView(QWidget):
         self.get_class_id_callback = get_class_id_callback
         self.workers = []
         self.last_activity_sub = None
+        self._activity_view_generation = 0
+        self._batch_publish_generation = 0
+        self._batch_publish_active = False
+        self._batch_publish_worker = None
         
         self.setup_ui()
         
@@ -295,11 +299,18 @@ class ActivitiesView(QWidget):
         bind_theme_tree(self)
 
     def clear_activities_list(self):
+        self._cancel_batch_publish()
+        self._activity_view_generation += 1
         while self.activities_scroll_layout.count():
             item = self.activities_scroll_layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+
+    def on_hide(self):
+        """Invalidate activity callbacks when the whole view is left."""
+        self._cancel_batch_publish()
+        self._activity_view_generation += 1
 
     def on_signin_clicked(self):
         self.last_activity_sub = "signin"
@@ -755,8 +766,10 @@ class ActivitiesView(QWidget):
             # We want to publish in reverse order (e.g., 16-2, 16-1, ... 1-1)
             # The items are already in order, so we just reverse the list of un-published items
             self.batch_queue = items_to_publish[::-1]
+            self._batch_publish_generation += 1
+            self._batch_publish_active = True
             self.btn_batch_publish.setEnabled(False)
-            self._publish_next_in_batch()
+            self._publish_next_in_batch(self._batch_publish_generation)
 
     def _build_publish_params(self, item: dict) -> dict:
         """统一构建发布参数 - DRY原则"""
@@ -894,8 +907,29 @@ class ActivitiesView(QWidget):
         
         return None
 
-    def _publish_next_in_batch(self):
+    def _cancel_batch_publish(self):
+        """Stop scheduling further batch publications before the view is replaced."""
+        self._batch_publish_active = False
+        self._batch_publish_generation += 1
+        self.batch_queue = []
+
+        worker = self._batch_publish_worker
+        self._batch_publish_worker = None
+        if worker is not None and worker.isRunning():
+            worker.requestInterruption()
+
+    def _publish_next_in_batch(self, generation=None):
+        generation = self._batch_publish_generation if generation is None else generation
+        if (
+            not self._batch_publish_active
+            or generation != self._batch_publish_generation
+            or self.last_activity_sub != "signin"
+        ):
+            return
+
         if not hasattr(self, 'batch_queue') or not self.batch_queue:
+            self._batch_publish_active = False
+            self._batch_publish_worker = None
             self.btn_batch_publish.setEnabled(True)
             self.status_callback("一键发布完成")
             return
@@ -907,19 +941,34 @@ class ActivitiesView(QWidget):
         
         worker = PublishSigninWorker(self.crawler, params)
         self.workers.append(worker)
+        self._batch_publish_worker = worker
         
         def on_finished(success, message, task_name, active_id=None):
-            if success:
-                self._mark_item_published(task_name, active_id)
-                # Small delay to avoid triggering server rate limits
-                QTimer.singleShot(1000, self._publish_next_in_batch)
-            else:
-                QMessageBox.warning(self, "发布中断", f"发布 {task_name} 时出错: {message}\n后续任务量已停止。")
-                self.btn_batch_publish.setEnabled(True)
-                self.batch_queue = [] # Clear queue on error
-            
             if worker in self.workers:
                 self.workers.remove(worker)
+            if self._batch_publish_worker is worker:
+                self._batch_publish_worker = None
+
+            current_view = (
+                self._batch_publish_active
+                and generation == self._batch_publish_generation
+                and self.last_activity_sub == "signin"
+            )
+            if success:
+                self._mark_item_published(task_name, active_id, refresh_ui=current_view)
+                # Small delay to avoid triggering server rate limits
+                if current_view:
+                    QTimer.singleShot(
+                        1000,
+                        lambda g=generation: self._publish_next_in_batch(g),
+                    )
+            else:
+                if not current_view:
+                    return
+                QMessageBox.warning(self, "发布中断", f"发布 {task_name} 时出错: {message}\n后续任务量已停止。")
+                self._batch_publish_active = False
+                self.btn_batch_publish.setEnabled(True)
+                self.batch_queue = [] # Clear queue on error
 
         worker.signin_published.connect(on_finished)
         worker.start()
@@ -969,21 +1018,38 @@ class ActivitiesView(QWidget):
         
         # Disable the button temporarily? 
         # For now just start the worker
+        view_generation = self._activity_view_generation
         worker = PublishSigninWorker(self.crawler, params)
         self.workers.append(worker)
-        worker.signin_published.connect(self._on_signin_published_finished)
+        worker.signin_published.connect(
+            lambda success, message, task_name, active_id,
+                   generation=view_generation: self._on_signin_published_finished(
+                       success, message, task_name, active_id, generation
+                   )
+        )
         worker.signin_published.connect(lambda: self.workers.remove(worker) if worker in self.workers else None)
         worker.start()
 
-    def _on_signin_published_finished(self, success, message, task_name, active_id=None):
+    def _on_signin_published_finished(
+        self, success, message, task_name, active_id=None, view_generation=None
+    ):
+        current_view = (
+            view_generation is None
+            or (
+                view_generation == self._activity_view_generation
+                and self.last_activity_sub == "signin"
+            )
+        )
         if success:
              self.status_callback(f"发布成功: {task_name}")
-             self._mark_item_published(task_name, active_id)
+             self._mark_item_published(task_name, active_id, refresh_ui=current_view)
         else:
+             if not current_view:
+                 return
              QMessageBox.warning(self, "发布失败", message)
              self.status_callback(f"发布失败: {task_name}")
 
-    def _mark_item_published(self, item_name, active_id=None):
+    def _mark_item_published(self, item_name, active_id=None, refresh_ui=True):
         plans = self._load_signin_plans()
         key = self._get_current_key()
         if key and key in plans:
@@ -1004,7 +1070,8 @@ class ActivitiesView(QWidget):
                         item['activeId'] = active_id
                     break
             
-            self._display_signin_items(self.current_session_items)
+            if refresh_ui:
+                self._display_signin_items(self.current_session_items)
 
     def _handle_delete_action(self, item_name, is_published, active_id):
         msg = f"确定要删除签到任务 {item_name} 吗？"

@@ -500,17 +500,23 @@ class PublishSigninWorker(QThread):
     def run(self):
         # Extract task_name for the signal
         task_name = self.params.get('title', '未命名任务')
-        
-        # Call the crawler method with unpacked params
-        # Note: 'title' is passed as a named arg in params, which crawler.publish_signin_task accepts via **kwargs or explicit args
-        success, message, active_id = self.crawler.publish_signin_task(
-            course_id=self.params.get('courseId'),
-            class_id=self.params.get('classId'),
-            plan_id=self.params.get('planId'),
-            sign_code=self.params.get('signCode'),
-            **self.params # Pass the rest as kwargs
-        )
-        self.signin_published.emit(success, message, task_name, active_id)
+        try:
+            if self.isInterruptionRequested():
+                self.signin_published.emit(False, "发布已取消", task_name, None)
+                return
+
+            # Call the crawler method with unpacked params
+            # Note: 'title' is passed as a named arg in params, which crawler.publish_signin_task accepts via **kwargs or explicit args
+            success, message, active_id = self.crawler.publish_signin_task(
+                course_id=self.params.get('courseId'),
+                class_id=self.params.get('classId'),
+                plan_id=self.params.get('planId'),
+                sign_code=self.params.get('signCode'),
+                **self.params # Pass the rest as kwargs
+            )
+            self.signin_published.emit(success, message, task_name, active_id)
+        except Exception as e:
+            self.signin_published.emit(False, f"发布线程异常: {e}", task_name, None)
 
 class DeleteSigninWorker(QThread):
     """Worker thread to delete a sign-in task."""
