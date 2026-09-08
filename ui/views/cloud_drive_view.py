@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSettings, QStandardPaths
 from PyQt6.QtGui import QColor, QAction
+from ui.cloud_drive_upload import FolderUploadThread
 from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager
 
 
@@ -277,6 +278,11 @@ class CloudDriveView(QWidget):
         self.current_folder_id = None  # 当前文件夹ID
         self.path_stack = []  # 路径栈：[(folder_id, folder_name), ...]
         self.download_thread = None
+        self.upload_thread = None
+        self.folder_upload_thread = None
+        self.folder_upload_progress_dialog = None
+        self.folder_upload_total_count = 0
+        self.folder_upload_completed_count = 0
         self.setup_ui()
 
     def _primary_button_style(self, palette):
@@ -559,6 +565,12 @@ class CloudDriveView(QWidget):
         self.upload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.upload_btn.clicked.connect(self.upload_file)
         self.path_layout.addWidget(self.upload_btn)
+
+        self.upload_folder_btn = QPushButton("📁 上传文件夹")
+        apply_theme_stylesheet(self.upload_folder_btn, self._secondary_button_style)
+        self.upload_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upload_folder_btn.clicked.connect(self.upload_folder)
+        self.path_layout.addWidget(self.upload_folder_btn)
         
         # 新建文件夹按钮
         self.new_folder_btn = QPushButton("📁 新建文件夹")
@@ -1718,6 +1730,9 @@ class CloudDriveView(QWidget):
         if not self.cloud_info:
             QMessageBox.warning(self, "错误", "云盘信息未加载")
             return
+        if self.folder_upload_thread and self.folder_upload_thread.isRunning():
+            QMessageBox.warning(self, "提示", "已有文件夹上传任务正在进行，请稍后。")
+            return
 
         # 选择文件（支持多选）
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -1784,6 +1799,169 @@ class CloudDriveView(QWidget):
 
         # 启动上传
         self.upload_thread.start()
+
+    def upload_folder(self):
+        """选择本地文件夹并按原目录结构上传到当前云盘目录。"""
+        if not self.cloud_info:
+            QMessageBox.warning(self, "错误", "云盘信息未加载")
+            return
+        if self.upload_thread and self.upload_thread.isRunning():
+            QMessageBox.warning(self, "提示", "已有文件上传任务正在进行，请稍后。")
+            return
+        if self.folder_upload_thread and self.folder_upload_thread.isRunning():
+            QMessageBox.warning(self, "提示", "已有文件夹上传任务正在进行，请稍后。")
+            return
+
+        local_folder = QFileDialog.getExistingDirectory(
+            self,
+            "选择要上传的文件夹",
+            "",
+        )
+        if not local_folder:
+            return
+
+        from PyQt6.QtWidgets import QProgressDialog
+
+        self.folder_upload_progress_dialog = QProgressDialog(self)
+        self.folder_upload_progress_dialog.setWindowTitle("上传文件夹")
+        self.folder_upload_progress_dialog.setLabelText("准备创建云盘文件夹...")
+        self.folder_upload_progress_dialog.setCancelButtonText("取消")
+        self.folder_upload_progress_dialog.setMinimumDuration(0)
+        self.folder_upload_progress_dialog.setMinimum(0)
+        self.folder_upload_progress_dialog.setMaximum(100)
+        self.folder_upload_progress_dialog.setValue(0)
+        self.folder_upload_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.folder_upload_progress_dialog.setAutoReset(False)
+        self.folder_upload_progress_dialog.setAutoClose(False)
+
+        self.folder_upload_thread = FolderUploadThread(
+            self.crawler,
+            local_folder,
+            self.cloud_info,
+            self.current_folder_id,
+        )
+        self.folder_upload_thread.status_message.connect(self.status_update.emit)
+        self.folder_upload_thread.scan_finished.connect(
+            self._on_folder_upload_scan_finished
+        )
+        self.folder_upload_thread.folder_created.connect(
+            lambda path: self._on_folder_created(path)
+        )
+        self.folder_upload_thread.file_started.connect(
+            self._on_folder_upload_file_started
+        )
+        self.folder_upload_thread.file_progress.connect(
+            self._on_folder_upload_progress
+        )
+        self.folder_upload_thread.file_finished.connect(
+            self._on_folder_upload_file_finished
+        )
+        self.folder_upload_thread.all_finished.connect(
+            self._on_all_folder_upload_finished
+        )
+        self.folder_upload_progress_dialog.canceled.connect(
+            self.folder_upload_thread.cancel
+        )
+
+        self.upload_btn.setEnabled(False)
+        self.upload_folder_btn.setEnabled(False)
+        self.folder_upload_progress_dialog.show()
+        self.folder_upload_thread.start()
+
+    def _on_folder_upload_scan_finished(self, total_count, total_bytes):
+        self.folder_upload_total_count = total_count
+        self.folder_upload_completed_count = 0
+        if self.folder_upload_progress_dialog:
+            self.folder_upload_progress_dialog.setLabelText(
+                f"已扫描完成，共 {total_count} 个文件\n"
+                f"总大小: {self.format_file_size(total_bytes)}"
+            )
+
+    def _on_folder_created(self, relative_path):
+        if self.folder_upload_progress_dialog:
+            self.folder_upload_progress_dialog.setLabelText(
+                f"正在创建文件夹: {relative_path}\n"
+                f"待上传文件: {self.folder_upload_total_count} 个"
+            )
+
+    def _on_folder_upload_file_started(self, filename, size):
+        self.folder_upload_completed_count += 1
+        if self.folder_upload_progress_dialog:
+            self.folder_upload_progress_dialog.setValue(0)
+            self.folder_upload_progress_dialog.setLabelText(
+                f"正在上传 ({self.folder_upload_completed_count}/"
+                f"{self.folder_upload_total_count}): {filename}\n"
+                f"大小: {self.format_file_size(size)}"
+            )
+
+    def _on_folder_upload_progress(self, uploaded, total):
+        if self.folder_upload_progress_dialog and total > 0:
+            self.folder_upload_progress_dialog.setValue(
+                int(uploaded / total * 100)
+            )
+
+    def _on_folder_upload_file_finished(self, result):
+        if not self.folder_upload_progress_dialog:
+            return
+        if result.get("cancelled"):
+            self.folder_upload_progress_dialog.setLabelText("上传已取消")
+        elif not result.get("success"):
+            self.folder_upload_progress_dialog.setLabelText(
+                f"上传失败: {result.get('filename')}\n"
+                f"{result.get('error', '')}"
+            )
+
+    def _on_all_folder_upload_finished(self, result):
+        progress_dialog = self.folder_upload_progress_dialog
+        if progress_dialog:
+            progress_dialog.setValue(100)
+            progress_dialog.close()
+
+        self.upload_btn.setEnabled(True)
+        self.upload_folder_btn.setEnabled(True)
+        self.folder_upload_progress_dialog = None
+        self.folder_upload_thread = None
+
+        if result.get("folder_created"):
+            if self.current_folder_id == self.cloud_info.get("rootdir"):
+                self.refresh_info()
+            else:
+                self.navigate_to_folder(self.current_folder_id, "当前文件夹")
+
+        success_files = result.get("success_files", [])
+        failed_files = result.get("failed_files", [])
+        cancelled = result.get("cancelled", False)
+
+        if cancelled:
+            self.status_update.emit(
+                f"文件夹上传已取消，已完成 {len(success_files)} 个文件"
+            )
+        else:
+            self.status_update.emit(
+                f"文件夹上传完成，成功 {len(success_files)} 个，"
+                f"失败 {len(failed_files)} 个"
+            )
+
+        if failed_files:
+            summary_lines = [
+                f"成功 {len(success_files)} 个",
+                f"失败 {len(failed_files)} 个",
+            ]
+            if cancelled:
+                summary_lines.append("（已取消）")
+            summary_lines.append("")
+            summary_lines.extend(
+                f"{name}: {error}" for name, error in failed_files[:10]
+            )
+            if len(failed_files) > 10:
+                summary_lines.append(
+                    f"... 另外还有 {len(failed_files) - 10} 个失败项"
+                )
+            QMessageBox.warning(
+                self,
+                "文件夹上传完成",
+                "\n".join(summary_lines),
+            )
 
     def _on_single_file_finished(self, result):
         """单个文件上传完成回调"""
