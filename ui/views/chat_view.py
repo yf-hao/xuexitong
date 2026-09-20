@@ -2,6 +2,7 @@
 聊天视图 - 左右布局，左侧消息/学生列表，右侧聊天区域
 """
 from html import escape
+import base64
 from datetime import datetime
 import json
 import threading
@@ -15,7 +16,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QFrame, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QByteArray, QUrl, QTimer
-from PyQt6.QtGui import QFont, QPixmap, QKeyEvent
+from PyQt6.QtGui import QFont, QPixmap, QImage, QKeyEvent
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 from core.config import DATA_DIR
@@ -340,6 +341,11 @@ class ChatView(QWidget):
         self._pending_group_room_id = ""
         self._shutting_down = False
         self._avatar_requests = {}  # QNetworkReply -> ChatSessionItem，用于异步回调
+        self._avatar_preload_requests = set()
+        self._avatar_images_by_url = {}
+        self._message_image_requests = {}  # QNetworkReply -> (conversation_key, message identity)
+        self._message_avatar_requests = {}  # QNetworkReply -> (conversation_key, message identity)
+        self._message_avatar_resources = {}
         self._net_mgr = QNetworkAccessManager(self)
         self._message_refreshing = False
         self._message_auto_refresh_timer = QTimer(self)
@@ -754,7 +760,7 @@ class ChatView(QWidget):
         private_chats = []
         group_chats = []
         for s in sorted_sessions:
-            if s.get("isGroup") == 0 or s.get("isPrivate") is False:
+            if s.get("isGroup") == 1 or s.get("isPrivate") is False:
                 group_chats.append(s)
             else:
                 private_chats.append(s)
@@ -1068,8 +1074,8 @@ class ChatView(QWidget):
                 merged["subtitle"] = meta["subtitle"]
             if meta.get("courseName"):
                 merged["courseName"] = meta["courseName"]
-            if meta.get("chatIco") and not merged.get("chatIco"):
-                merged["chatIco"] = meta["chatIco"]
+            if meta.get("avatar_url") and not merged.get("avatar_url"):
+                merged["avatar_url"] = meta["avatar_url"]
             if meta.get("chatId") and (
                 not merged.get("chatId")
                 or str(merged.get("chatId") or "") == peer_id
@@ -1097,7 +1103,7 @@ class ChatView(QWidget):
         if class_info.get("course_name"):
             meta["courseName"] = str(class_info.get("course_name") or "")
         if allow_avatar_update and class_info.get("image_url"):
-            meta["chatIco"] = str(class_info.get("image_url") or "")
+            meta["avatar_url"] = str(class_info.get("image_url") or "")
         if class_info.get("chat_id"):
             meta["chatId"] = str(class_info.get("chat_id") or "")
         if not meta:
@@ -1192,7 +1198,7 @@ class ChatView(QWidget):
                 "chatId": history_id,
                 "_historyKey": history_id if history_id != peer_id else "",
                 "chatName": session_name,
-                "chatIco": "",
+                "avatar_url": "",
                 "updateTime": timestamp,
                 "content": content,
                 "isGroup": 0 if is_group else 1,
@@ -1272,7 +1278,14 @@ class ChatView(QWidget):
         name = session.get("chatName", "未知")
         peer_id = self._resolve_session_peer_id(session)
         update_time = session.get("updateTime", 0)
-        avatar_url = str(session.get("chatIco", "") or "")
+        avatar_url = str(session.get("avatar_url") or session.get("pic") or session.get("icon") or "").strip()
+        if not avatar_url and not self._is_group_session(session):
+            course_params = getattr(getattr(self.crawler, "session_manager", None), "course_params", {}) or {}
+            profile_cache = course_params.get("im_user_info_cache", {})
+            if isinstance(profile_cache, dict):
+                profile = profile_cache.get(str(peer_id)) or {}
+                if isinstance(profile, dict):
+                    avatar_url = str(profile.get("icon") or profile.get("pic") or "").strip()
         if history_id:
             self._history_id_by_peer[peer_id] = history_id
 
@@ -1472,7 +1485,7 @@ class ChatView(QWidget):
     def _is_group_session(self, session: dict) -> bool:
         if not isinstance(session, dict):
             return False
-        return session.get("isGroup") == 0 or session.get("isPrivate") is False
+        return session.get("isGroup") == 1 or session.get("isPrivate") is False
 
     def _resolve_group_room_id(self, session: dict) -> str:
         if not isinstance(session, dict):
@@ -1566,7 +1579,37 @@ class ChatView(QWidget):
             return None
 
         logger.info(f"ChatView: 已加载群成员缓存 room_id={room_id}, file={target_file.name}, count={len(members)}")
+        preload_avatars = getattr(self, "_preload_member_avatars", None)
+        if callable(preload_avatars):
+            preload_avatars(members)
         return members
+
+    def _preload_member_avatars(self, members: list):
+        """预加载成员头像，不依赖成员列表是否已经显示。"""
+        for member in members or []:
+            if not isinstance(member, dict):
+                continue
+            avatar_url = str(member.get("avatar_url") or member.get("pic") or "").strip()
+            if not avatar_url or avatar_url in self._avatar_images_by_url:
+                continue
+            if any(getattr(reply, "_avatar_url", "") == avatar_url for reply in self._avatar_preload_requests):
+                continue
+            request = QNetworkRequest(QUrl(avatar_url))
+            request.setRawHeader(b"Referer", b"https://fe.chaoxing.com/")
+            request.setRawHeader(b"User-Agent", b"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+            reply = self._net_mgr.get(request)
+            reply._avatar_url = avatar_url
+            self._avatar_preload_requests.add(reply)
+            reply.finished.connect(lambda r=reply: self._on_preloaded_avatar_finished(r))
+
+    def _on_preloaded_avatar_finished(self, reply):
+        self._avatar_preload_requests.discard(reply)
+        avatar_url = str(getattr(reply, "_avatar_url", "") or "")
+        if reply.error() == QNetworkReply.NetworkError.NoError:
+            image = QImage()
+            if image.loadFromData(bytes(reply.readAll())) and avatar_url:
+                self._avatar_images_by_url[avatar_url] = image
+        reply.deleteLater()
 
     def _persist_group_members(self, room_id: str, members: list, cache_name: str = ""):
         room_id = str(room_id or "").strip()
@@ -1650,15 +1693,37 @@ class ChatView(QWidget):
                 cache_name, "", fallback=room_id, cache_dir=self._group_members_cache_dir
             )
             if cache_path is not None:
+                self._preload_member_avatars(members)
                 continue
             tasks.append({"room_id": room_id, "cache_name": cache_name})
         if not tasks:
             return
         self._batch_group_members_worker = GroupMembersBatchWorker(self.crawler, tasks)
         self._batch_group_members_worker.finished_signal.connect(
-            lambda total, success: logger.info(f"ChatView: 群成员预加载完成 {success}/{total}")
+            lambda total, success, sessions=list(group_sessions): self._on_batch_group_members_preloaded(
+                total, success, sessions
+            )
         )
         self._batch_group_members_worker.start()
+
+    def _on_batch_group_members_preloaded(self, total: int, success: int, group_sessions: list):
+        """批量成员接口完成后，在 UI 线程读取缓存并下载头像。"""
+        logger.info(f"ChatView: 群成员预加载完成 {success}/{total}")
+        for session in group_sessions or []:
+            if not isinstance(session, dict):
+                continue
+            room_id = str(session.get("chatId") or session.get("msgId") or "").strip()
+            if not room_id:
+                continue
+            course_name = str(session.get("courseName") or "").strip()
+            subtitle = str(session.get("subtitle") or "").strip()
+            chat_name = str(session.get("chatName") or "").strip()
+            cache_name = f"{course_name}-{subtitle}" if course_name and subtitle else chat_name or room_id
+            members, cache_path = load_group_members_cache(
+                cache_name, "", fallback=room_id, cache_dir=self._group_members_cache_dir
+            )
+            if cache_path is not None:
+                self._preload_member_avatars(members)
 
     def _start_group_members_reload(self, room_id: str):
         room_id = str(room_id or "").strip()
@@ -1708,6 +1773,9 @@ class ChatView(QWidget):
 
         cached = self._group_members_cache.get(room_id)
         if cached is not None:
+            preload_avatars = getattr(self, "_preload_member_avatars", None)
+            if callable(preload_avatars):
+                preload_avatars(cached)
             if cached:
                 self.set_students(cached)
             else:
@@ -1718,6 +1786,9 @@ class ChatView(QWidget):
         persisted = ChatView._load_persisted_group_members(self, room_id, cache_name, room_name)
         if persisted is not None:
             self._group_members_cache[room_id] = persisted
+            preload_avatars = getattr(self, "_preload_member_avatars", None)
+            if callable(preload_avatars):
+                preload_avatars(persisted)
             if persisted:
                 self.set_students(persisted)
             else:
@@ -1731,6 +1802,9 @@ class ChatView(QWidget):
         room_id = str(room_id or "")
         cache_name = str(self._group_cache_name_by_room_id.get(room_id, "") or self._current_group_cache_name or "").strip()
         self._group_members_cache[room_id] = members or []
+        preload_avatars = getattr(self, "_preload_member_avatars", None)
+        if callable(preload_avatars):
+            preload_avatars(members)
         self._known_contact_name_index = None
         if members:
             ChatView._persist_group_members(self, room_id, members, cache_name)
@@ -1743,18 +1817,175 @@ class ChatView(QWidget):
         if members:
             self.set_students(members)
             self.tab_widget.setCurrentWidget(self.student_tab)
+            conversation_key = getattr(self, "_conversation_key", None)
+            current_key = conversation_key() if callable(conversation_key) else str(getattr(self, "_current_history_id", "") or "")
+            cached_messages = getattr(self, "_message_cache", {}).get(current_key, [])
+            changed = False
+            for message in cached_messages:
+                if message.get("is_self") or message.get("avatar_url"):
+                    continue
+                avatar_url = ChatView._resolve_known_contact_avatar(self, message.get("sender_id", ""))
+                if avatar_url:
+                    message["avatar_url"] = avatar_url
+                    changed = True
+            if changed:
+                self._render_cached_messages(current_key)
         else:
             self._show_group_members_empty()
 
-    def append_message(self, sender: str, text: str, is_self: bool = False, status_text: str = ""):
-        """向聊天区域追加一条消息"""
+    def append_message(self, sender: str, text: str, is_self: bool = False, status_text: str = "", image_html: str = "", avatar_html: str = ""):
+        """以左右对齐的聊天气泡追加一条消息。"""
         sender_html = escape(sender or "")
-        text_html = escape(text or "").replace("\n", "<br/>")
+        text_html = image_html or escape(text or "").replace("\n", "<br/>")
         if is_self:
-            html = f'<div style="text-align:right; margin:6px 0;"><span style="color:#007acc; font-weight:bold;">我</span><br/><span style="color:#cccccc;">{text_html}</span></div>'
+            status_html = escape(status_text or "")
+            if status_html:
+                status_html = f'<span style="color:#888888; font-size:11px; margin-right:6px;">{status_html}</span>'
+            html = (
+                '<div style="text-align:right; margin:8px 4px;">'
+                f'<span style="color:#79b8ff; font-size:12px;">{sender_html or "我"}</span><br/>'
+                f'{status_html}'
+                '<span style="display:inline-block; background:#2563a8; color:#ffffff; '
+                'padding:8px 12px; border-radius:12px; margin-top:3px;">'
+                f'{text_html}</span></div>'
+            )
         else:
-            html = f'<div style="text-align:left; margin:6px 0;"><span style="color:#4ec9b0; font-weight:bold;">{sender_html}</span><br/><span style="color:#cccccc;">{text_html}</span></div>'
+            avatar_fallback = escape((sender or "对方")[:1])
+            avatar_markup = avatar_html or (
+                f'<span style="display:inline-block; width:28px; height:28px; line-height:28px; '
+                f'text-align:center; border-radius:14px; background:#6655dd; color:#ffffff; '
+                f'font-weight:bold; margin-right:6px; vertical-align:middle;">'
+                f'{avatar_fallback}</span>'
+            )
+            html = (
+                '<div style="text-align:left; margin:8px 4px;">'
+                f'<span style="color:#68d3c0; font-size:12px;">{avatar_markup}{sender_html}</span><br/>'
+                '<span style="display:inline-block; background:#343b46; color:#f1f5f9; '
+                'padding:8px 12px; border-radius:12px; margin:3px 0 0 34px;">'
+                f'{text_html}</span></div>'
+            )
         self.chat_messages.append(html)
+
+    def _load_message_avatar(self, conversation_key: str, message: dict):
+        url = str(message.get("avatar_url") or "").strip()
+        if not url:
+            return
+        identity = self._message_identity(message)
+        cached_image = self._avatar_images_by_url.get(url)
+        if cached_image is not None:
+            self._set_message_avatar_resource(conversation_key, identity, cached_image)
+            return
+        for pending_key, pending_identity in self._message_avatar_requests.values():
+            if pending_key == conversation_key and pending_identity == identity:
+                return
+        request = QNetworkRequest(QUrl(url))
+        request.setRawHeader(b"Referer", b"https://fe.chaoxing.com/")
+        request.setRawHeader(b"User-Agent", b"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        if any(str(getattr(reply, "_avatar_url", "") or "") == url for reply in self._avatar_requests):
+            return
+        reply = self._net_mgr.get(request)
+        reply._avatar_url = url
+        self._message_avatar_requests[reply] = (conversation_key, identity)
+        reply.finished.connect(lambda r=reply: self._on_message_avatar_finished(r))
+
+    def _set_message_avatar_resource(self, conversation_key: str, identity, image: QImage):
+        resource_url = QUrl(f"avatar://{abs(hash((conversation_key, identity)))}")
+        self._message_avatar_resources[resource_url.toString()] = image
+        self.chat_messages.document().addResource(2, resource_url, image)
+        image_html = (
+            '<img width="32" height="32" style="vertical-align:middle; margin-right:6px; '
+            f'border-radius:16px;" src="{resource_url.toString()}" />'
+        )
+        for message in getattr(self, "_message_cache", {}).get(conversation_key, []):
+            if self._message_identity(message) == identity:
+                message["avatar_html"] = image_html
+                self._render_cached_messages(conversation_key)
+                break
+
+    def _on_message_avatar_finished(self, reply):
+        target = self._message_avatar_requests.pop(reply, None)
+        if not target:
+            reply.deleteLater()
+            return
+        conversation_key, identity = target
+        if reply.error() == QNetworkReply.NetworkError.NoError:
+            data = bytes(reply.readAll())
+            if data:
+                image = QImage()
+                if not image.loadFromData(data):
+                    reply.deleteLater()
+                    return
+                avatar_url = ""
+                for message in getattr(self, "_message_cache", {}).get(conversation_key, []):
+                    if self._message_identity(message) == identity:
+                        avatar_url = str(message.get("avatar_url") or "").strip()
+                        break
+                if avatar_url:
+                    self._avatar_images_by_url[avatar_url] = image
+                    self._apply_cached_avatar_to_session_rows(avatar_url, image)
+                self._set_message_avatar_resource(conversation_key, identity, image)
+        reply.deleteLater()
+
+    def _apply_cached_avatar_to_session_rows(self, avatar_url: str, image: QImage):
+        """将已成功下载的头像同步到当前会话列表行。"""
+        if not avatar_url or image.isNull() or not hasattr(self, "chat_list"):
+            return
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            return
+        for index in range(self.chat_list.count()):
+            item = self.chat_list.item(index)
+            widget = self.chat_list.itemWidget(item) if item else None
+            if widget is None or str(getattr(widget, "_avatar_url", "") or "") != avatar_url:
+                continue
+            widget.set_avatar_pixmap(pixmap)
+
+    @staticmethod
+    def _image_message_url(content: str) -> str:
+        content = str(content or "").strip()
+        if not content.startswith("image:"):
+            return ""
+        url = content[6:].strip()
+        return url if url.startswith(("http://", "https://")) else ""
+
+    def _load_message_image(self, conversation_key: str, message: dict):
+        url = ChatView._image_message_url(message.get("content", ""))
+        if not url:
+            return
+        identity = self._message_identity(message)
+        for pending_key, pending_identity in self._message_image_requests.values():
+            if pending_key == conversation_key and pending_identity == identity:
+                return
+        request = QNetworkRequest(QUrl(url))
+        request.setRawHeader(b"Accept", b"image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        request.setRawHeader(b"Referer", b"https://fe.chaoxing.com/")
+        request.setRawHeader(b"User-Agent", b"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute, QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
+        reply = self._net_mgr.get(request)
+        self._message_image_requests[reply] = (conversation_key, identity)
+        reply.finished.connect(lambda r=reply: self._on_message_image_finished(r))
+
+    def _on_message_image_finished(self, reply):
+        target = self._message_image_requests.pop(reply, None)
+        if not target:
+            reply.deleteLater()
+            return
+        conversation_key, identity = target
+        if reply.error() == QNetworkReply.NetworkError.NoError:
+            data = bytes(reply.readAll())
+            if data:
+                content_type = bytes(reply.header(QNetworkRequest.KnownHeaders.ContentTypeHeader) or b"image/jpeg").decode("latin1", "ignore")
+                content_type = content_type.split(";", 1)[0].strip() or "image/jpeg"
+                image_html = (
+                    f'<img src="data:{escape(content_type)};base64,'
+                    f'{base64.b64encode(data).decode("ascii")}" width="360" />'
+                )
+                for message in self._message_cache.get(conversation_key, []):
+                    if self._message_identity(message) == identity:
+                        message["image_html"] = image_html
+                        self._render_cached_messages(conversation_key)
+                        break
+        reply.deleteLater()
 
     def clear_chat(self):
         """清空聊天区域"""
@@ -1845,7 +2076,7 @@ class ChatView(QWidget):
         return None
 
     def _merge_cached_entry(self, current: dict, incoming: dict):
-        for key in ("sender_id", "sender_name", "content", "message_id"):
+        for key in ("sender_id", "sender_name", "content", "message_id", "avatar_url", "avatar_html"):
             value = incoming.get(key)
             if value and (not current.get(key) or key == "message_id"):
                 current[key] = value
@@ -1927,11 +2158,46 @@ class ChatView(QWidget):
         self._message_cache[conversation_key] = messages
         for msg in messages:
             sender = "我" if msg.get("is_self") else (display_name or msg.get("sender_name") or "对方")
-            self.append_message(
-                sender,
-                msg.get("content", ""),
-                is_self=msg.get("is_self", False),
-            )
+            if not msg.get("is_self") and not msg.get("avatar_url"):
+                msg["avatar_url"] = ChatView._resolve_known_contact_avatar(self, msg.get("sender_id", ""))
+            image_url = ChatView._image_message_url(msg.get("content", ""))
+            image_html = msg.get("image_html") or ""
+            if image_url and not image_html:
+                image_html = '<span style="color:#888888;">图片加载中...</span>'
+                ChatView._load_message_image(self, conversation_key, msg)
+            avatar_html = msg.get("avatar_html") or ""
+            if avatar_html:
+                resource_start = avatar_html.find('src="')
+                if resource_start >= 0:
+                    resource_start += len('src="')
+                    resource_end = avatar_html.find('"', resource_start)
+                    resource_url = avatar_html[resource_start:resource_end]
+                    resource_image = self._message_avatar_resources.get(resource_url)
+                    if resource_image is not None:
+                        self.chat_messages.document().addResource(
+                            2,
+                            QUrl(resource_url),
+                            resource_image,
+                        )
+            if not msg.get("is_self") and msg.get("avatar_url") and not avatar_html:
+                ChatView._load_message_avatar(self, conversation_key, msg)
+            if image_url:
+                self.append_message(
+                    sender,
+                    msg.get("content", ""),
+                    is_self=msg.get("is_self", False),
+                    image_html=image_html,
+                    avatar_html=avatar_html,
+                )
+            elif avatar_html:
+                self.append_message(
+                    sender,
+                    msg.get("content", ""),
+                    is_self=msg.get("is_self", False),
+                    avatar_html=avatar_html,
+                )
+            else:
+                self.append_message(sender, msg.get("content", ""), is_self=msg.get("is_self", False))
 
         if self._last_send_error:
             self.append_message("系统", self._last_send_error, is_self=False)
@@ -2069,6 +2335,23 @@ class ChatView(QWidget):
                     return resolved_name
         return ""
 
+    def _resolve_known_contact_avatar(self, sender_id: str) -> str:
+        sender_id = str(sender_id or "").strip()
+        if not sender_id:
+            return ""
+        for member in getattr(self, "_all_students", []) or []:
+            if str(member.get("person_id") or member.get("tuid") or "") == sender_id:
+                return str(member.get("avatar_url") or member.get("pic") or "").strip()
+        for members in (getattr(self, "_group_members_cache", {}) or {}).values():
+            for member in members or []:
+                if str(member.get("person_id") or member.get("tuid") or "") == sender_id:
+                    return str(member.get("avatar_url") or member.get("pic") or "").strip()
+        crawler = getattr(self, "crawler", None)
+        if crawler is not None and hasattr(crawler, "get_im_user_info_by_tuid"):
+            info = crawler.get_im_user_info_by_tuid(sender_id) or {}
+            return str(info.get("icon") or info.get("pic") or "").strip()
+        return ""
+
     def _resolve_history_sender_name(self, raw: dict, sender_id: str, is_self: bool) -> str:
         raw = raw if isinstance(raw, dict) else {}
         sender_id = str(sender_id or "")
@@ -2126,6 +2409,9 @@ class ChatView(QWidget):
                 continue
             is_self = sender_id == current_tuid
             sender_name = ChatView._resolve_history_sender_name(self, raw, sender_id, is_self)
+            avatar_url = str(raw.get("avatar_url") or raw.get("avatar") or raw.get("pic") or "").strip()
+            if not avatar_url and not is_self:
+                avatar_url = ChatView._resolve_known_contact_avatar(self, sender_id)
 
             normalized.append({
                 "sender_id": sender_id,
@@ -2134,6 +2420,7 @@ class ChatView(QWidget):
                 "is_self": is_self,
                 "timestamp": timestamp,
                 "message_id": str(raw.get("msgId", "") or raw.get("messageId", "") or raw.get("id", "") or ""),
+                "avatar_url": avatar_url,
                 "read_state": "unread" if is_self else "",
                 "read_at": 0,
             })
@@ -2243,8 +2530,10 @@ class ChatView(QWidget):
             history_id=str(current.data(Qt.ItemDataRole.UserRole + 3) or ""),
         )
         if self._is_group_session(session):
+            self._current_group_session = dict(session)
             self._load_group_members(session)
         else:
+            self._current_group_session = {}
             self._current_group_room_id = ""
             ChatView._update_group_refresh_button_state(self)
         self._current_session_display_name = str(name or "").strip()
@@ -2256,6 +2545,7 @@ class ChatView(QWidget):
             return
         target_id = current.data(Qt.ItemDataRole.UserRole)
         name = current.data(Qt.ItemDataRole.UserRole + 1) or "未知"
+        self._current_group_session = {}
         history_id = ChatView._resolve_best_history_key(self, peer_id=str(target_id or ""), history_id=self._history_id_by_peer.get(str(target_id), ""))
         self._current_session_display_name = str(name or "").strip()
         self._open_chat(target_id, name, history_id=history_id)
@@ -2297,12 +2587,25 @@ class ChatView(QWidget):
             self._load_current_chat_history()
 
     def _request_avatar(self, list_widget: QListWidget, item: QListWidgetItem, avatar_url: str):
+        avatar_url = str(avatar_url or "").strip()
         if not avatar_url:
             return
+        widget = list_widget.itemWidget(item) if list_widget and item else None
+        cached_image = self._avatar_images_by_url.get(avatar_url)
+        if widget is not None and cached_image is not None:
+            pixmap = QPixmap.fromImage(cached_image)
+            if not pixmap.isNull():
+                widget.set_avatar_pixmap(pixmap)
+                return
+        if any(str(getattr(reply, "_avatar_url", "") or "") == avatar_url for reply in self._message_avatar_requests):
+            return
+        if any(str(getattr(reply, "_avatar_url", "") or "") == avatar_url for reply in self._avatar_requests):
+            return
         req = QNetworkRequest(QUrl(avatar_url))
-        req.setRawHeader(b"Referer", b"https://im.chaoxing.com/")
+        req.setRawHeader(b"Referer", b"https://fe.chaoxing.com/")
         req.setRawHeader(b"User-Agent", b"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
         reply = self._net_mgr.get(req)
+        reply._avatar_url = avatar_url
         self._avatar_requests[reply] = (list_widget, item)
         reply.finished.connect(lambda r=reply: self._on_avatar_reply_finished(r))
 
@@ -2327,11 +2630,31 @@ class ChatView(QWidget):
             data = reply.readAll()
             pixmap = QPixmap()
             if pixmap.loadFromData(data):
+                avatar_url = getattr(widget, "_avatar_url", "") if widget else ""
+                if avatar_url:
+                    image = QImage()
+                    if image.loadFromData(bytes(data)):
+                        self._avatar_images_by_url[str(avatar_url)] = image
+                        self._apply_cached_avatar_to_messages(str(avatar_url), image)
                 try:
                     widget.set_avatar_pixmap(pixmap)
                 except RuntimeError:
                     pass
         reply.deleteLater()
+
+    def _apply_cached_avatar_to_messages(self, avatar_url: str, image: QImage):
+        """将列表头像下载结果复用到当前消息气泡。"""
+        if not avatar_url or image.isNull():
+            return
+        for conversation_key, messages in getattr(self, "_message_cache", {}).items():
+            for message in messages or []:
+                if message.get("is_self") or str(message.get("avatar_url") or "").strip() != avatar_url:
+                    continue
+                self._set_message_avatar_resource(
+                    conversation_key,
+                    self._message_identity(message),
+                    image,
+                )
 
     def _ensure_msync_connected(self):
         """确保 MSync 实时连接已建立"""
@@ -2414,7 +2737,22 @@ class ChatView(QWidget):
         self._history_attempted_keys.add(history_key)
         load_generation = int(getattr(self, "_history_load_generation", 0) or 0)
 
-        worker = ChatHistoryWorker(self.crawler, history_key, limit=limit)
+        group_session = getattr(self, "_current_group_session", {})
+        is_group = bool(group_session)
+        is_group_session = getattr(self, "_is_group_session", None)
+        if callable(is_group_session):
+            is_group = bool(is_group_session(group_session))
+        try:
+            worker = ChatHistoryWorker(
+                self.crawler,
+                history_key,
+                limit=limit,
+                is_group=is_group,
+            )
+        except TypeError as error:
+            if "is_group" not in str(error):
+                raise
+            worker = ChatHistoryWorker(self.crawler, history_key, limit=limit)
         worker.history_ready.connect(
             lambda chat_id, messages, generation=load_generation: self._on_history_loaded(chat_id, messages, generation)
         )

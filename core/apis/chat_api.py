@@ -1,6 +1,7 @@
 """
 聊天相关 API — 超信 IM 会话列表等接口
 """
+import base64
 import json
 import re
 import random
@@ -8,7 +9,7 @@ import threading
 import time
 
 from core.logger import get_logger
-from core.msync_client import MSyncClient
+from core.msync_client import MSyncClient, decode_message
 
 logger = get_logger()
 
@@ -53,12 +54,23 @@ class ChatAPI:
             params={"crossOrigin": "true", "detail": "1"},
             headers={
                 "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Cache-Control": "no-cache",
+                "Origin": "https://fe.chaoxing.com",
+                "Pragma": "no-cache",
                 "Referer": "https://fe.chaoxing.com/",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
             },
             timeout=15,
         )
         response.raise_for_status()
         result = response.json()
+        print(
+            "ChatAPI.get_login_user response:",
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+            flush=True,
+        )
         if not isinstance(result, dict) or str(result.get("result")) not in {"1", "True", "true"}:
             raise RuntimeError("获取 Chaoxing 登录用户失败")
 
@@ -74,7 +86,13 @@ class ChatAPI:
             params={"crossOrigin": "true"},
             headers={
                 "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Cache-Control": "no-cache",
+                "Origin": "https://fe.chaoxing.com",
+                "Pragma": "no-cache",
                 "Referer": "https://fe.chaoxing.com/",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
             },
             timeout=15,
         )
@@ -153,6 +171,187 @@ class ChatAPI:
             enriched.append(item)
 
         return enriched
+
+    @staticmethod
+    def _normalize_channel_infos(channel_infos):
+        """将 Easemob user_channels 响应转换为聊天视图使用的会话字段。"""
+        sessions = []
+        for channel in channel_infos or []:
+            if not isinstance(channel, dict):
+                continue
+            meta = channel.get("meta") or {}
+            try:
+                payload = json.loads(meta.get("payload") or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            ext = payload.get("ext") or {}
+            class_info = ext.get("classInfo") or {}
+            is_group = channel.get("session_type") == "groupchat"
+            peer_id = str(channel.get("session_to") or "")
+            if is_group:
+                peer_id = str(class_info.get("chatid") or peer_id)
+            name = (
+                class_info.get("clazzName")
+                or class_info.get("coursename")
+                or peer_id
+            ) if is_group else peer_id
+            sessions.append({
+                **channel,
+                "chatId": peer_id,
+                "chatName": str(name),
+                "msgId": str(meta.get("id") or ""),
+                "updateTime": channel.get("update_unread_msg_time") or meta.get("timestamp") or 0,
+                "unreadCount": int(channel.get("unread_num") or 0),
+                "isGroup": 1 if is_group else 0,
+                "isPrivate": not is_group,
+                "class_info": class_info,
+            })
+        return sessions
+
+    def _get_session_top_list(self, puid):
+        """获取消息页置顶会话；请求失败不影响普通会话列表。"""
+        try:
+            response = self.session.get(
+                "https://im.chaoxing.com/webim/apis/message/getSessionTopList",
+                params={"crossOrigin": "true", "puid": str(puid)},
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Origin": "https://fe.chaoxing.com",
+                    "Referer": "https://fe.chaoxing.com/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+                },
+                timeout=15,
+            )
+            if response.status_code != 200:
+                return {}
+            payload = response.json()
+            if isinstance(payload, dict):
+                payload = payload.get("data")
+            if not isinstance(payload, list):
+                return {}
+            result = {}
+            for item in payload:
+                if not isinstance(item, dict) or "sessionId" not in item or "sort" not in item:
+                    continue
+                try:
+                    result[str(item["sessionId"])] = int(item["sort"])
+                except (TypeError, ValueError):
+                    continue
+            return result
+        except Exception as e:
+            logger.warning(f"ChatAPI._get_session_top_list: 获取失败 - {e}")
+            return {}
+
+    @staticmethod
+    def _apply_session_top_list(sessions, top_list):
+        """按消息页置顶记录排序，未置顶会话保持接口返回顺序。"""
+        if not top_list:
+            return sessions
+        ranked = []
+        for index, session in enumerate(sessions):
+            item = dict(session)
+            session_id = str(item.get("chatId", "") or "")
+            item["_topSort"] = top_list.get(session_id)
+            ranked.append((item["_topSort"] is not None, item["_topSort"] or 0, -index, item))
+        ranked.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+        return [{key: value for key, value in item.items() if key != "_topSort"} for _, _, _, item in ranked]
+
+    def _get_notification_mute_types(self, tuid, token):
+        """获取当前用户的会话免打扰配置。"""
+        try:
+            response = self.session.get(
+                f"https://a3-vip6.easemob.com/cx-dev/cxstudy/users/{tuid}/notification/mute/type",
+                params={"limit": 100, "_v": int(time.time() * 1000)},
+                headers={
+                    "Accept": "*/*",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
+                    "Cache-Control": "no-cache",
+                    "Content-Type": "application/json",
+                    "Origin": "https://fe.chaoxing.com",
+                    "Pragma": "no-cache",
+                    "Referer": "https://fe.chaoxing.com/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+                    "Authorization": f"Bearer {str(token).removeprefix('Bearer ').strip()}",
+                },
+                timeout=15,
+            )
+            if response.status_code != 200:
+                return []
+            payload = response.json()
+            mute_types = payload.get("data") if isinstance(payload, dict) else None
+            return mute_types if isinstance(mute_types, list) else []
+        except Exception as e:
+            logger.warning(f"ChatAPI._get_notification_mute_types: 获取失败 - {e}")
+            return []
+
+    def _get_encrypt_str_list(self, sessions):
+        """为消息页会话获取加密字符串。"""
+        chat_list = [
+            {"chatId": str(session.get("chatId", "")), "isGroup": bool(session.get("isGroup"))}
+            for session in sessions
+            if isinstance(session, dict) and str(session.get("chatId", ""))
+        ]
+        if not chat_list:
+            return {}
+        try:
+            response = self.session.post(
+                "https://im.chaoxing.com/webim/message/getEncryptStrList",
+                params={"crossOrigin": "true"},
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Content-Type": "application/json",
+                    "Origin": "https://fe.chaoxing.com",
+                    "Pragma": "no-cache",
+                    "Referer": "https://fe.chaoxing.com/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+                },
+                data=json.dumps({"chatList": chat_list}, ensure_ascii=False, separators=(",", ":")),
+                timeout=15,
+            )
+            if response.status_code != 200:
+                return {}
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            items = data.get("list") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                return {}
+            return {
+                str(item["chatId"]): str(item["encryptStr"])
+                for item in items
+                if isinstance(item, dict) and item.get("chatId") is not None and item.get("encryptStr") is not None
+            }
+        except Exception as e:
+            logger.warning(f"ChatAPI._get_encrypt_str_list: 获取失败 - {e}")
+            return {}
+
+    def _fetch_group_info(self, room_id: str):
+        """获取群聊课程名称和成员数。"""
+        try:
+            response = self.session.get(
+                "https://im.chaoxing.com/webim/huanxin/getGroupInfo",
+                params={"crossOrigin": "true", "roomId": str(room_id)},
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Origin": "https://fe.chaoxing.com",
+                    "Referer": "https://fe.chaoxing.com/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+                },
+                timeout=15,
+            )
+            if response.status_code != 200:
+                return {}
+            payload = response.json()
+            return payload[0] if isinstance(payload, list) and payload and isinstance(payload[0], dict) else {}
+        except Exception as e:
+            logger.warning(f"ChatAPI._fetch_group_info: 获取失败 room_id={room_id} error={e}")
+            return {}
 
     # ── MSync 实时连接 ──
 
@@ -246,6 +445,12 @@ class ChatAPI:
             if not all([tuid, token]):
                 creds = self.get_im_credentials()
                 if not creds:
+                    logger.error(
+                        "ChatAPI.connect_msync: 未获取到 IM 凭证 "
+                        "tuid_present=%s token_present=%s",
+                        bool(tuid),
+                        bool(token),
+                    )
                     return None
                 tuid = creds["tuid"]
                 token = creds["token"]
@@ -356,30 +561,39 @@ class ChatAPI:
             return []
 
         try:
-            url = "https://im.chaoxing.com/webim/group/getGroupInfoByCount"
+            url = (
+                "https://a3-vip6.easemob.com/cx-dev/cxstudy/"
+                f"chatgroups/{room_id}/users"
+            )
             headers = {
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin": "https://im.chaoxing.com",
-                "Pragma": "no-cache",
-                "Referer": "https://im.chaoxing.com/webim/me",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
+                "Accept": "*/*",
+                "Content-Type": "application/json",
+                "Origin": "https://fe.chaoxing.com",
+                "Referer": "https://fe.chaoxing.com/",
+                "Authorization": f"Bearer {str(params['token']).removeprefix('Bearer ').strip()}",
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-                "X-Requested-With": "XMLHttpRequest",
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
             }
-            data = {
-                "roomId": room_id,
-                "token": params["token"],
-                "tuid": params["tuid"],
-            }
+            self.session.options(
+                url,
+                params={"version": "v3", "pagenum": 1, "pagesize": 1000, "_v": int(time.time() * 1000)},
+                headers={
+                    "Accept": "*/*",
+                    "Origin": "https://fe.chaoxing.com",
+                    "Referer": "https://fe.chaoxing.com/",
+                    "Access-Control-Request-Headers": "authorization,content-type",
+                    "Access-Control-Request-Method": "GET",
+                    "User-Agent": headers["User-Agent"],
+                },
+                timeout=15,
+            )
 
-            resp = self.session.post(url, headers=headers, data=data, timeout=15)
+            resp = self.session.get(
+                url,
+                params={"version": "v3", "pagenum": 1, "pagesize": 1000, "_v": int(time.time() * 1000)},
+                headers=headers,
+                timeout=15,
+            )
             logger.info(
                 "ChatAPI.get_group_members: status=%s room_id=%s len=%s",
                 resp.status_code,
@@ -391,7 +605,7 @@ class ChatAPI:
                 return []
 
             result = resp.json()
-            members = result.get("members", [])
+            members = result.get("data", [])
             if not isinstance(members, list):
                 return []
 
@@ -399,13 +613,17 @@ class ChatAPI:
             for member in members:
                 if not isinstance(member, dict):
                     continue
+                member_tuid = str(member.get("member", "") or member.get("tuid", "") or "")
+                if not member_tuid:
+                    continue
+                profile = self.get_im_user_info_by_tuid(member_tuid) or {}
                 normalized.append({
-                    "person_id": str(member.get("tuid", "") or ""),
-                    "name": member.get("name", "未知"),
-                    "student_id": str(member.get("studentId", "") or member.get("student_id", "") or ""),
-                    "avatar_url": member.get("pic", "") or "",
-                    "tuid": str(member.get("tuid", "") or ""),
-                    "puid": str(member.get("puid", "") or ""),
+                    "person_id": member_tuid,
+                    "name": profile.get("name", "未知"),
+                    "student_id": "",
+                    "avatar_url": profile.get("icon", "") or profile.get("pic", "") or "",
+                    "tuid": member_tuid,
+                    "puid": str(profile.get("puid", "") or ""),
                 })
 
             return normalized
@@ -500,6 +718,7 @@ class ChatAPI:
             return credentials
         except Exception as e:
             logger.info("ChatAPI.get_im_credentials: 新版接口不可用，回退旧版凭证流程: %s", e)
+            logger.error("ChatAPI.get_im_credentials: 新版凭证接口失败: %s", e)
 
         # 锁外执行 HTTP 请求（避免长时间持有锁）
         try:
@@ -518,6 +737,7 @@ class ChatAPI:
             logger.info(f"ChatAPI.get_im_credentials: status={resp.status_code}, url={resp.url}, len={len(resp.text)}")
 
             if resp.status_code != 200:
+                logger.error("ChatAPI.get_im_credentials: 旧版凭证页面 HTTP 状态异常: %s", resp.status_code)
                 return None
 
             html = resp.text
@@ -525,6 +745,7 @@ class ChatAPI:
             # 检查是否被重定向到登录页
             if "login" in resp.url.lower() or "passport" in resp.url.lower():
                 logger.warning(f"ChatAPI.get_im_credentials: 被重定向到登录页 {resp.url}")
+                logger.error("ChatAPI.get_im_credentials: 旧版凭证页面被重定向到登录页")
                 return None
 
             # 提取凭证：支持 HTML <span id="myTuid">格式 和 JS var myTuid= 格式
@@ -566,6 +787,13 @@ class ChatAPI:
             # 缺少关键字段则返回 None
             if "tuid" not in creds or "puid" not in creds or "token" not in creds:
                 logger.warning(f"ChatAPI.get_im_credentials: 缺少关键字段 tuid={creds.get('tuid')}, puid={creds.get('puid')}, token={creds.get('token')}")
+                logger.error(
+                    "ChatAPI.get_im_credentials: 旧版凭证字段缺失 "
+                    "tuid_present=%s puid_present=%s token_present=%s",
+                    bool(creds.get("tuid")),
+                    bool(creds.get("puid")),
+                    bool(creds.get("token")),
+                )
                 logger.debug(f"  HTML前500字: {html[:500]}")
                 return None
 
@@ -602,26 +830,25 @@ class ChatAPI:
         try:
             url = "https://im.chaoxing.com/webim/user/getUserInfoByTuid"
             headers = {
-                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin": "https://im.chaoxing.com",
-                "Referer": "https://im.chaoxing.com/webim/me",
+                "Cache-Control": "no-cache",
+                "Origin": "https://fe.chaoxing.com",
+                "Pragma": "no-cache",
+                "Referer": "https://fe.chaoxing.com/",
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-                "X-Requested-With": "XMLHttpRequest",
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
             }
-            data = {
-                "tuid": target_tuid,
-                "puid": puid,
-                "token": token,
-            }
-            resp = self.session.post(url, headers=headers, data=data, timeout=15)
+            params = {"crossOrigin": "true", "tuid": target_tuid}
+            resp = self.session.get(url, headers=headers, params=params, timeout=15)
             if resp.status_code != 200:
                 return {}
 
             result = resp.json()
-            info = result.get("data", result) if isinstance(result, dict) else {}
+            if isinstance(result, dict):
+                info = result.get("data") if isinstance(result.get("data"), dict) else result
+            else:
+                info = {}
             if not isinstance(info, dict):
                 return {}
         except Exception as e:
@@ -784,7 +1011,7 @@ class ChatAPI:
 
     # ── 会话列表 ──
 
-    def get_history_messages(self, history_key: str, limit: int = 200, tuid=None, puid=None, token=None):
+    def get_history_messages(self, history_key: str, limit: int = 200, tuid=None, puid=None, token=None, is_group=False):
         """
         获取指定会话的历史消息。
 
@@ -799,6 +1026,105 @@ class ChatAPI:
             return []
 
         try:
+            params = self._resolve_im_params(tuid=tuid, puid=puid, token=token)
+            if params and str(history_key).isdigit():
+                queue_domain = "conference.easemob.com" if is_group else "easemob.com"
+                queue = f"{history_key}@{queue_domain}"
+                url = (
+                    "https://a3-vip6.easemob.com/cx-dev/cxstudy/"
+                    f"users/{params['tuid']}/messageroaming"
+                )
+                browser_headers = {
+                    "Accept": "*/*",
+                    "Origin": "https://fe.chaoxing.com",
+                    "Referer": "https://fe.chaoxing.com/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+                }
+                try:
+                    self.session.options(
+                        url,
+                        headers={
+                            **browser_headers,
+                            "Access-Control-Request-Headers": "authorization,content-type",
+                            "Access-Control-Request-Method": "POST",
+                        },
+                        timeout=15,
+                    )
+                except Exception as error:
+                    logger.warning(f"ChatAPI.get_history_messages: roaming 预检失败 error={error}")
+
+                if not is_group:
+                    try:
+                        clear_response = self.session.post(
+                            "https://specie.chaoxing.com/apis/message/clearNoRead",
+                            params={"crossOrigin": "true", "msgId": str(history_key)},
+                            headers={
+                                **browser_headers,
+                                "Accept": "application/json, text/plain, */*",
+                                "Content-Type": "application/x-www-form-urlencoded",
+                            },
+                            timeout=15,
+                        )
+                        logger.info(
+                            "ChatAPI.get_history_messages: clearNoRead status=%s, msg_id=%s",
+                            clear_response.status_code,
+                            history_key,
+                        )
+                    except Exception as error:
+                        logger.warning(f"ChatAPI.get_history_messages: 清除未读失败 error={error}")
+
+                headers = {
+                    "Accept": "*/*",
+                    "Content-Type": "application/json",
+                    "Origin": "https://fe.chaoxing.com",
+                    "Referer": "https://fe.chaoxing.com/",
+                    "Authorization": f"Bearer {str(params['token']).removeprefix('Bearer ').strip()}",
+                    "User-Agent": browser_headers["User-Agent"],
+                }
+                body = {
+                    "queue": queue,
+                    "start": -1,
+                    "pull_number": min(int(limit or 20), 20),
+                    "is_positive": False,
+                    "msgType": "",
+                    "end": -1,
+                    "startTime": None,
+                    "endTime": None,
+                    "userId": None,
+                }
+                response = self.session.post(
+                    url,
+                    headers=headers,
+                    data=json.dumps(body, separators=(",", ":")),
+                    timeout=15,
+                )
+                if response.status_code != 200:
+                    return []
+                result = response.json()
+                result_data = result.get("data") if isinstance(result, dict) else None
+                raw_messages = result_data.get("msgs") if isinstance(result_data, dict) else None
+                if not isinstance(raw_messages, list):
+                    raw_messages = None
+                if raw_messages is None:
+                    raw_messages = []
+                else:
+                    decoder = MSyncClient(app_key="cx-dev#cxstudy", domain="easemob.com")
+                    decoder._username = str(params["tuid"])
+                    messages = []
+                    for item in raw_messages:
+                        if not isinstance(item, dict):
+                            continue
+                        encoded = item.get("msg")
+                        if not encoded:
+                            continue
+                        try:
+                            decoded = decode_message(base64.b64decode(encoded))
+                            messages.extend(decoder._extract_batch_messages(decoded))
+                        except Exception as error:
+                            logger.warning(f"ChatAPI.get_history_messages: protobuf 解码失败 error={error}")
+                    return messages
+
             url = "https://im.chaoxing.com/webim/message/history/getHistoryByMsgId"
 
             headers = {
@@ -868,7 +1194,7 @@ class ChatAPI:
             token: IM token（可选，自动从缓存/凭证获取）
 
         Returns:
-            list[dict]: 会话列表，每项含 chatId/chatName/chatIco/updateTime/isGroup/isPrivate 等
+            list[dict]: 会话列表，每项含 chatId/chatName/avatar_url/updateTime/isGroup/isPrivate 等
                         失败返回空列表
         """
         params = self._resolve_im_params(tuid=tuid, puid=puid, token=token)
@@ -876,32 +1202,31 @@ class ChatAPI:
             return []
 
         try:
-            url = "https://im.chaoxing.com/webim/message/list/getMessageList"
-
+            url = (
+                "https://a3-vip6.easemob.com/cx-dev/cxstudy/sdk/"
+                f"user/{params['tuid']}/user_channels/list"
+            )
             headers = {
-                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept": "*/*",
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin": "https://im.chaoxing.com",
+                "Content-Type": "application/json",
+                "Origin": "https://fe.chaoxing.com",
                 "Pragma": "no-cache",
-                "Referer": "https://im.chaoxing.com/webim/me",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
+                "Referer": "https://fe.chaoxing.com/",
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-                "X-Requested-With": "XMLHttpRequest",
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+                "Authorization": f"Bearer {str(params['token']).removeprefix('Bearer ').strip()}",
+            }
+            query = {
+                "limit": 50,
+                "cursor": "",
+                "need_mark": "true",
+                "needEmptySession": "true",
+                "_v": int(time.time() * 1000),
             }
 
-            data = {
-                "tuid": params["tuid"],
-                "puid": params["puid"],
-                "token": params["token"],
-            }
-
-            resp = self.session.post(url, headers=headers, data=data, timeout=15)
+            resp = self.session.get(url, headers=headers, params=query, timeout=15)
             logger.info(f"ChatAPI.get_message_list: status={resp.status_code}, len={len(resp.text)}")
 
             if resp.status_code != 200:
@@ -909,14 +1234,48 @@ class ChatAPI:
                 return []
 
             result = resp.json()
-            logger.info(f"ChatAPI.get_message_list: status={result.get('status')}, data_count={len(result.get('data', []))}")
-
-            if result.get("status") != "success" or "data" not in result:
-                logger.warning(f"ChatAPI.get_message_list: 响应异常 {result.get('msg', '')}, 完整={str(result)[:300]}")
+            payload = result.get("data") if isinstance(result, dict) else None
+            if isinstance(payload, dict):
+                sessions = payload.get("channel_infos") or payload.get("channels")
+            elif isinstance(payload, list):
+                sessions = payload
+            else:
+                sessions = result.get("channels") if isinstance(result, dict) else None
+            if not isinstance(sessions, list):
+                logger.warning(f"ChatAPI.get_message_list: 响应缺少 channels, 完整={str(result)[:300]}")
                 return []
 
+            if sessions and isinstance(sessions[0], dict) and "channel_id" in sessions[0]:
+                sessions = self._normalize_channel_infos(sessions)
+                for session in sessions:
+                    if session.get("isGroup") != 1:
+                        peer_id = str(session.get("chatId") or "")
+                        profile = self.get_im_user_info_by_tuid(peer_id)
+                        if profile.get("name"):
+                            session["chatName"] = profile["name"]
+                        avatar_url = str(profile.get("icon") or profile.get("pic") or "").strip()
+                        if avatar_url:
+                            session["avatar_url"] = avatar_url
+                        continue
+                    group_info = self._fetch_group_info(session.get("chatId"))
+                    if group_info.get("name"):
+                        session["chatName"] = group_info["name"]
+                    if group_info.get("members_count") is not None:
+                        session["members_count"] = group_info["members_count"]
+            sessions = self._apply_session_top_list(
+                sessions,
+                self._get_session_top_list(params["puid"]),
+            )
+            mute_types = self._get_notification_mute_types(params["tuid"], params["token"])
+            self.session_manager.course_params["im_notification_mute_types"] = mute_types
+            encrypt_strings = self._get_encrypt_str_list(sessions)
+            for session in sessions:
+                encrypt_str = encrypt_strings.get(str(session.get("chatId", "")))
+                if encrypt_str:
+                    session["encryptStr"] = encrypt_str
+            self.session_manager.course_params["im_encrypt_str_map"] = encrypt_strings
             class_chat_map = self.session_manager.course_params.get("im_class_chat")
-            return self._apply_class_chat_metadata(result["data"], class_chat_map)
+            return self._apply_class_chat_metadata(sessions, class_chat_map)
 
         except Exception as e:
             logger.exception(f"ChatAPI.get_message_list: 获取失败 - {e}")
