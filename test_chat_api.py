@@ -151,6 +151,30 @@ class _FakeCrawlerForView:
 
 
 class ChatAPITests(unittest.TestCase):
+    def test_refresh_im_credentials_uses_new_user_and_token_flow(self):
+        session = _FakeSession([
+            _FakeResponse(payload={
+                "result": 1,
+                "data": {"puid": 30047383, "fid": 4311, "name": "郝玉锋"},
+            }),
+            _FakeResponse(payload={
+                "result": 1,
+                "data": {"tuid": "25278974", "token": "im-token"},
+            }),
+        ])
+        api = _FakeChatAPI(session)
+
+        credentials = api.refresh_im_credentials()
+
+        self.assertEqual(credentials["puid"], "30047383")
+        self.assertEqual(credentials["fid"], "4311")
+        self.assertEqual(credentials["tuid"], "25278974")
+        self.assertEqual(credentials["token"], "im-token")
+        self.assertEqual(session.calls[0]["url"], "https://im.chaoxing.com/apis/getLoginUser")
+        self.assertEqual(session.calls[0]["params"], {"crossOrigin": "true", "detail": "1"})
+        self.assertEqual(session.calls[1]["url"], "https://learn.chaoxing.com/apis/user/getUserImToken")
+        self.assertEqual(api.session_manager.course_params["im_tuid"], "25278974")
+
     def test_sockjs_encode_uses_client_array_frame(self):
         self.assertEqual(sockjs_encode(b"\x01\x02"), '["AQI="]')
 

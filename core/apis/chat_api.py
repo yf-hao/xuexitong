@@ -29,6 +29,87 @@ class ChatAPI:
     _msync_close_listeners = {}
 
     @staticmethod
+    def _api_data(payload):
+        """返回 Chaoxing API 的 data 对象，兼容 data 缺失或直接返回对象。"""
+        if not isinstance(payload, dict):
+            return {}
+        data = payload.get("data")
+        return data if isinstance(data, dict) else payload
+
+    @staticmethod
+    def _first_value(payload, names):
+        if not isinstance(payload, dict):
+            return ""
+        for name in names:
+            value = payload.get(name)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
+
+    def get_login_user(self):
+        """获取当前 Chaoxing 登录用户信息。"""
+        response = self.session.get(
+            "https://im.chaoxing.com/apis/getLoginUser",
+            params={"crossOrigin": "true", "detail": "1"},
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://fe.chaoxing.com/",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or str(result.get("result")) not in {"1", "True", "true"}:
+            raise RuntimeError("获取 Chaoxing 登录用户失败")
+
+        user = self._api_data(result)
+        if not user.get("puid"):
+            raise RuntimeError("登录用户响应中缺少 puid")
+        return user
+
+    def get_user_im_token(self):
+        """获取新版 IM Token，必须使用当前登录 Session 的 Cookie。"""
+        response = self.session.get(
+            "https://learn.chaoxing.com/apis/user/getUserImToken",
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://fe.chaoxing.com/",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or str(result.get("result")) not in {"1", "True", "true"}:
+            raise RuntimeError("获取 IM Token 失败")
+        return result
+
+    def refresh_im_credentials(self):
+        """按新版流程获取并缓存登录用户、Easemob 用户名和 Token。"""
+        user = self.get_login_user()
+        token_result = self.get_user_im_token()
+        token_data = self._api_data(token_result)
+        token = self._first_value(token_data, ("token", "imToken", "userImToken", "access_token"))
+        tuid = self._first_value(token_data, ("tuid", "imTuid", "username", "userName"))
+        if not token or not tuid:
+            raise RuntimeError("IM Token 响应中缺少 token 或 tuid")
+
+        credentials = {
+            "puid": str(user.get("puid") or ""),
+            "fid": str(user.get("fid") or ""),
+            "name": str(user.get("name") or ""),
+            "tuid": tuid,
+            "token": token,
+        }
+        self.session_manager.course_params.update({
+            "im_puid": credentials["puid"],
+            "im_fid": credentials["fid"],
+            "im_tuid": credentials["tuid"],
+            "im_token": credentials["token"],
+            "im_user": user,
+        })
+        return credentials
+
+    @staticmethod
     def _extract_class_chat_map(html: str):
         """从 /webim/me HTML 中提取 classChat 映射。"""
         if not html:
@@ -401,6 +482,22 @@ class ChatAPI:
                     self.session_manager.course_params["im_class_chat"] = dict(_credentials_cache["class_chat_map"])
                 return dict(_credentials_cache)
 
+        # 新版前端先获取登录用户，再获取 Easemob IM Token。
+        try:
+            credentials = self.refresh_im_credentials()
+            with _credentials_lock:
+                _credentials_cache = dict(credentials)
+                _credentials_cache["class_chat_map"] = {}
+                _credentials_ts = time.time()
+            logger.info(
+                "ChatAPI.get_im_credentials: 使用新版接口成功 tuid=%s, puid=%s",
+                credentials["tuid"],
+                credentials["puid"],
+            )
+            return credentials
+        except Exception as e:
+            logger.info("ChatAPI.get_im_credentials: 新版接口不可用，回退旧版凭证流程: %s", e)
+
         # 锁外执行 HTTP 请求（避免长时间持有锁）
         try:
             url = "https://im.chaoxing.com/webim/me"
@@ -414,6 +511,7 @@ class ChatAPI:
             }
 
             resp = self.session.get(url, headers=headers, timeout=15)
+
             logger.info(f"ChatAPI.get_im_credentials: status={resp.status_code}, url={resp.url}, len={len(resp.text)}")
 
             if resp.status_code != 200:
