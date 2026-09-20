@@ -206,6 +206,7 @@ def build_login_message(
     token: str,
     platform: int = 3,
     resource_ts: int = None,
+    login_nonce: int = None,
 ) -> bytes:
     """
     构造 MSync 登录消息.
@@ -215,17 +216,19 @@ def build_login_message(
       field 2: JID
       field 3: auth token (string, "$t$" + 环信token)
       field 8: platform (varint)
-      field 9: Provision
+                field 9: Provision
         field 1: encryptType (varint 16)
-        field 2: version (string "3.0.0")
+                field 2: SDK version (string "4.24.2.1")
         field 5: 0
         field 6: 0
-        field 9: timestamp (string, 与 resource 中的时间戳一致)
-        field 12: platform_name (string "webim")
-        field 13: resource (string)
-        field 14: token (string)
+                field 9/12/13: resource (string)
+                field 17: client version (string "v5.2")
+                field 18: token JSON
+                field 20: timestamp with trailing colon
+                field 22: binary marker 0x02
       field 10: 0
       field 11: 0
+            field 20: optional login nonce, only emitted when explicitly supplied
     """
     root = ProtoBufWriter()
     root.uint32(1, 0)  # version
@@ -237,21 +240,26 @@ def build_login_message(
     root.string(3, auth_token)
     root.uint32(8, platform)
 
-    # Provision: timestamp 与 resource 中的时间戳保持一致
+    # These values are taken from the captured webim login frame.
     ts = resource_ts if resource_ts else int(time.time() * 1000)
     prov = ProtoBufWriter()
     prov.uint32(1, 16)  # encryptType
-    prov.string(2, "3.0.0")
+    prov.string(2, "4.24.2.1")
     prov.uint32(5, 0)
     prov.uint32(6, 0)
-    prov.string(9, str(ts))
-    prov.string(12, "webim")
+    prov.string(9, resource)
+    prov.string(12, resource)
     prov.string(13, resource)
-    prov.string(14, auth_token)
+    prov.string(17, "v5.2")
+    prov.string(18, json.dumps({"token": auth_token}, separators=(",", ":")))
+    prov.string(20, f"{ts}:")
+    prov.bytes_field(22, b"\x02")
     root.embedded(9, prov)
 
     root.uint32(10, 0)
     root.uint32(11, 0)
+    if login_nonce is not None:
+        root.uint64(20, int(login_nonce))
 
     return root.bytes()
 
@@ -534,6 +542,7 @@ class MSyncClient:
         platform: int = 3,
         transport: str = "sockjs",
         direct_url: str = "wss://im-api-wechat-vip6.easemob.com/websocket",
+        login_nonce: int = None,
         on_message=None,
         on_error=None,
         on_close=None,
@@ -547,6 +556,7 @@ class MSyncClient:
             raise ValueError("transport must be 'sockjs' or 'direct'")
         self.transport = transport
         self.direct_url = direct_url
+        self.login_nonce = login_nonce
         self.on_message = on_message
         self.on_error = on_error
         self.on_close = on_close
@@ -700,6 +710,7 @@ class MSyncClient:
             self._token,
             self.platform,
             getattr(self, "_resource_ts", None),
+            self.login_nonce,
         )
         frame = sockjs_encode(pb) if self.transport == "sockjs" else pb
         b64 = base64.b64encode(pb).decode("ascii")

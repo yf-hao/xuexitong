@@ -22,6 +22,7 @@ from core.rendering.katex_snapshot import KaTeXSnapshotRenderer
 from models.attendance_record import AttendanceDetail
 from core.msync_client import (
     MSyncClient,
+    build_login_message,
     build_conversation_read,
     build_history_open,
     build_history_subject,
@@ -235,6 +236,28 @@ class ChatAPITests(unittest.TestCase):
     def test_build_sync_reply_matches_captured_frame(self):
         frame = base64.b64encode(build_sync_reply("25278974")).decode()
         self.assertEqual(frame, "CABAAEoMGgoSCDI1Mjc4OTc0WAA=")
+
+    def test_build_login_message_matches_captured_direct_provision_fields(self):
+        payload = build_login_message(
+            app_key="cx-dev#cxstudy",
+            username="25278974",
+            domain="easemob.com",
+            resource="webim_web_test-resource-25278974",
+            token="hx-token",
+            resource_ts=1789874877125,
+        )
+        decoded = decode_message(payload)
+        provision = decoded[9]
+
+        self.assertEqual(decoded[2][4], "webim_web_test-resource-25278974")
+        self.assertEqual(provision[2], "4.24.2.1")
+        self.assertEqual(provision[9], "webim_web_test-resource-25278974")
+        self.assertEqual(provision[12], "webim_web_test-resource-25278974")
+        self.assertEqual(provision[13], "webim_web_test-resource-25278974")
+        self.assertEqual(provision[17], "v5.2")
+        self.assertEqual(provision[18], '{"token":"$t$hx-token"}')
+        self.assertEqual(provision[20], "1789874877125:")
+        self.assertEqual(provision[22], b"\x02")
 
     def test_build_receive_ack_matches_captured_frame(self):
         frame = base64.b64encode(build_receive_ack(1549112508483111976, "25278974")).decode()
