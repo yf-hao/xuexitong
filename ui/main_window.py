@@ -224,6 +224,7 @@ class MainWindow(QMainWindow):
 
         # Page 9: Chat View
         self.chat_view = ChatView(self.crawler, parent=self)
+        self.chat_view.msync_status_changed.connect(self._update_status)
         self.stacked_widget.addWidget(self.chat_view)
 
         content_layout.addWidget(self.stacked_widget)
@@ -529,7 +530,7 @@ class MainWindow(QMainWindow):
         elif "消息" in title or "聊天" in title:
             self.stacked_widget.setCurrentIndex(9)
             self.download_btn.hide()
-            self.status_label.setText(f"已进入: {title}")
+            self.status_label.setText(f"已进入：{title}")
             self.chat_view.on_show()
         else:
             self.stacked_widget.setCurrentIndex(0)

@@ -339,7 +339,6 @@ class ChatView(QWidget):
         self._pending_group_room_id = ""
         self._shutting_down = False
         self._avatar_requests = {}  # QNetworkReply -> ChatSessionItem，用于异步回调
-        self.msync_status_changed.connect(self._set_msync_status)
         self._net_mgr = QNetworkAccessManager(self)
         self._message_refreshing = False
         self._message_auto_refresh_timer = QTimer(self)
@@ -451,11 +450,7 @@ class ChatView(QWidget):
         self.chat_title_label = QLabel("选择一个对话")
         self.chat_title_label.setObjectName("chat_title")
         self.chat_title_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        title_layout.addWidget(self.chat_title_label, stretch=1)
-        self.msync_status_label = QLabel("未连接")
-        self.msync_status_label.setObjectName("msync_status")
-        self.msync_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        title_layout.addWidget(self.msync_status_label)
+        title_layout.addWidget(self.chat_title_label)
         right_layout.addLayout(title_layout)
 
         # 消息显示区域
@@ -2195,11 +2190,6 @@ class ChatView(QWidget):
         self.ai_draft_btn.setEnabled(False)
         self._current_session_display_name = None
 
-    def _set_msync_status(self, status: str):
-        """更新聊天标题栏中的 MSync 连接状态。"""
-        if hasattr(self, "msync_status_label"):
-            self.msync_status_label.setText(status)
-
     def _emit_msync_status(self, status: str):
         signal = getattr(self, "msync_status_changed", None)
         if signal is not None:
@@ -2314,6 +2304,7 @@ class ChatView(QWidget):
         if not hasattr(self.crawler, "is_msync_connected"):
             return
         if self.crawler.is_msync_connected():
+            ChatView._emit_msync_status(self, "已连接")
             self._startup_msync_ready = True
             ChatView._finish_startup_badge_gate(self)
             return
