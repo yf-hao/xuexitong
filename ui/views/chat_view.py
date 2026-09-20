@@ -322,6 +322,7 @@ class ChatView(QWidget):
         self._pending_read_acks = {}
         self._msync_connecting = False
         self._msync_connect_lock = threading.Lock()
+        self._msync_auth_timeout_timer = None
         self._suppress_unread_summary_request = False
         self._all_students = []
         self._history_id_by_peer = {}
@@ -2195,6 +2196,39 @@ class ChatView(QWidget):
         if signal is not None:
             signal.emit(status)
 
+    def _cancel_msync_auth_timeout(self):
+        timer = getattr(self, "_msync_auth_timeout_timer", None)
+        if hasattr(self, "_msync_auth_timeout_timer"):
+            self._msync_auth_timeout_timer = None
+        if timer:
+            timer.cancel()
+
+    def _start_msync_auth_timeout(self, seconds: int = 15):
+        if not isinstance(self, ChatView):
+            return
+        ChatView._cancel_msync_auth_timeout(self)
+        self._msync_auth_timeout_timer = threading.Timer(
+            seconds,
+            lambda: ChatView._emit_msync_status(self, "连接失败"),
+        )
+        self._msync_auth_timeout_timer.daemon = True
+        self._msync_auth_timeout_timer.start()
+
+    def _on_msync_authenticated(self):
+        ChatView._cancel_msync_auth_timeout(self)
+        ChatView._emit_msync_status(self, "已连接")
+
+    def _on_msync_failed(self, error=None):
+        ChatView._cancel_msync_auth_timeout(self)
+        if error:
+            logger.error(f"MSync error: {error}")
+        ChatView._emit_msync_status(self, "连接失败")
+
+    def _on_msync_closed(self, code, message):
+        ChatView._cancel_msync_auth_timeout(self)
+        logger.info(f"MSync closed: {code} {message}")
+        ChatView._emit_msync_status(self, "已断开")
+
     def _on_chat_selected(self, current: QListWidgetItem, previous: QListWidgetItem):
         """消息列表选中事件"""
         if not current:
@@ -2304,6 +2338,7 @@ class ChatView(QWidget):
         if not hasattr(self.crawler, "is_msync_connected"):
             return
         if self.crawler.is_msync_connected():
+            ChatView._cancel_msync_auth_timeout(self)
             ChatView._emit_msync_status(self, "已连接")
             self._startup_msync_ready = True
             ChatView._finish_startup_badge_gate(self)
@@ -2314,6 +2349,7 @@ class ChatView(QWidget):
                 return
             self._msync_connecting = True
         ChatView._emit_msync_status(self, "连接中")
+        ChatView._start_msync_auth_timeout(self)
 
         def connect_in_background():
             try:
@@ -2324,18 +2360,20 @@ class ChatView(QWidget):
                     logger.warning(f"ChatView: 后台拉取 IM 凭证失败 - {cred_err}")
                 connect_kwargs = {
                     "on_message": lambda msg: self.msync_message_received.emit(msg),
-                    "on_error": lambda e: (logger.error(f"MSync error: {e}"), ChatView._emit_msync_status(self, "连接失败")),
-                    "on_close": lambda c, m: (logger.info(f"MSync closed: {c} {m}"), ChatView._emit_msync_status(self, "已断开")),
-                    "on_authenticated": lambda: ChatView._emit_msync_status(self, "已连接"),
+                    "on_error": lambda e: ChatView._on_msync_failed(self, e),
+                    "on_close": lambda c, m: ChatView._on_msync_closed(self, c, m),
+                    "on_authenticated": lambda: ChatView._on_msync_authenticated(self),
                     "listener_key": self,
                 }
                 try:
-                    self.crawler.connect_msync(**connect_kwargs)
+                    connection = self.crawler.connect_msync(**connect_kwargs)
                 except TypeError as connect_error:
                     if "on_authenticated" not in str(connect_error):
                         raise
                     connect_kwargs.pop("on_authenticated")
-                    self.crawler.connect_msync(**connect_kwargs)
+                    connection = self.crawler.connect_msync(**connect_kwargs)
+                if connection is None:
+                    raise ConnectionError("MSync 客户端创建失败")
                 self._startup_msync_ready = True
                 if self._raw_sessions:
                     self._request_unread_summary(self._raw_sessions)
@@ -2351,6 +2389,7 @@ class ChatView(QWidget):
                         ChatView._retry_current_chat_history(self, force=True, request_realtime=False)
             except Exception as e:
                 logger.error(f"MSync connect failed: {e}")
+                ChatView._cancel_msync_auth_timeout(self)
                 ChatView._emit_msync_status(self, "连接失败")
             finally:
                 with self._msync_connect_lock:
