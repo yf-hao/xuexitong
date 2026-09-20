@@ -30,10 +30,10 @@ class ChatAPI:
 
     @staticmethod
     def _api_data(payload):
-        """返回 Chaoxing API 的 data 对象，兼容 data 缺失或直接返回对象。"""
+        """返回 Chaoxing API 的 data/msg 对象，兼容直接返回对象。"""
         if not isinstance(payload, dict):
             return {}
-        data = payload.get("data")
+        data = payload.get("data") or payload.get("msg")
         return data if isinstance(data, dict) else payload
 
     @staticmethod
@@ -71,6 +71,7 @@ class ChatAPI:
         """获取新版 IM Token，必须使用当前登录 Session 的 Cookie。"""
         response = self.session.get(
             "https://learn.chaoxing.com/apis/user/getUserImToken",
+            params={"crossOrigin": "true"},
             headers={
                 "Accept": "application/json, text/plain, */*",
                 "Referer": "https://fe.chaoxing.com/",
@@ -88,8 +89,8 @@ class ChatAPI:
         user = self.get_login_user()
         token_result = self.get_user_im_token()
         token_data = self._api_data(token_result)
-        token = self._first_value(token_data, ("token", "imToken", "userImToken", "access_token"))
-        tuid = self._first_value(token_data, ("tuid", "imTuid", "username", "userName"))
+        token = self._first_value(token_data, ("hxToken", "token", "imToken", "userImToken", "access_token"))
+        tuid = self._first_value(token_data, ("uid", "tuid", "imTuid", "username", "userName"))
         if not token or not tuid:
             raise RuntimeError("IM Token 响应中缺少 token 或 tuid")
 

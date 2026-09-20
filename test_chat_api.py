@@ -173,7 +173,26 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(session.calls[0]["url"], "https://im.chaoxing.com/apis/getLoginUser")
         self.assertEqual(session.calls[0]["params"], {"crossOrigin": "true", "detail": "1"})
         self.assertEqual(session.calls[1]["url"], "https://learn.chaoxing.com/apis/user/getUserImToken")
+        self.assertEqual(session.calls[1]["params"], {"crossOrigin": "true"})
         self.assertEqual(api.session_manager.course_params["im_tuid"], "25278974")
+
+    def test_refresh_im_credentials_parses_real_im_token_response(self):
+        session = _FakeSession([
+            _FakeResponse(payload={
+                "result": 1,
+                "data": {"puid": 30047383, "fid": 4311, "name": "郝玉锋"},
+            }),
+            _FakeResponse(payload={
+                "result": 1,
+                "msg": {"uid": 25278974, "puid": 30047383, "hxToken": "hx-token", "fid": 4311},
+            }),
+        ])
+        api = _FakeChatAPI(session)
+
+        credentials = api.refresh_im_credentials()
+
+        self.assertEqual(credentials["tuid"], "25278974")
+        self.assertEqual(credentials["token"], "hx-token")
 
     def test_sockjs_encode_uses_client_array_frame(self):
         self.assertEqual(sockjs_encode(b"\x01\x02"), '["AQI="]')
