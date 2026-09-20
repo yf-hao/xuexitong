@@ -1072,20 +1072,46 @@ class ChatMessageListWorker(QThread):
             self.messages_ready.emit([])
 
 
+class ChatAvatarProfileWorker(QThread):
+    """Worker thread to fetch missing private-chat avatar profiles."""
+
+    profiles_ready = pyqtSignal(list)
+
+    def __init__(self, crawler, peer_ids):
+        super().__init__()
+        self.crawler = crawler
+        self.peer_ids = [str(peer_id or "") for peer_id in peer_ids if str(peer_id or "")]
+
+    def run(self):
+        profiles = []
+        try:
+            for peer_id in self.peer_ids:
+                profile = self.crawler.get_im_user_info_by_tuid(peer_id) or {}
+                profiles.append({"peer_id": peer_id, "profile": profile})
+        except Exception as e:
+            print(f"ChatAvatarProfileWorker error: {e}")
+        self.profiles_ready.emit(profiles)
+
+
 class ChatHistoryWorker(QThread):
     """Worker thread to fetch IM chat history."""
 
     history_ready = pyqtSignal(str, list)  # chat_id, history
 
-    def __init__(self, crawler, chat_id: str, limit: int = 200):
+    def __init__(self, crawler, chat_id: str, limit: int = 200, is_group: bool = False):
         super().__init__()
         self.crawler = crawler
         self.chat_id = chat_id
         self.limit = limit
+        self.is_group = is_group
 
     def run(self):
         try:
-            result = self.crawler.get_history_messages(self.chat_id, limit=self.limit)
+            result = self.crawler.get_history_messages(
+                self.chat_id,
+                limit=self.limit,
+                is_group=self.is_group,
+            )
             self.history_ready.emit(self.chat_id, result)
         except Exception as e:
             print(f"ChatHistoryWorker error: {e}")

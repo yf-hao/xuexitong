@@ -15,8 +15,10 @@ logger = get_logger()
 
 # 模块级全局凭证缓存，防止多实例/多线程并发刷新 token
 _credentials_lock = threading.Lock()
+_credentials_condition = threading.Condition(_credentials_lock)
 _credentials_cache = {}
 _credentials_ts = 0
+_credentials_refreshing = False
 
 
 class ChatAPI:
@@ -186,18 +188,40 @@ class ChatAPI:
                 payload = {}
             ext = payload.get("ext") or {}
             class_info = ext.get("classInfo") or {}
-            is_group = channel.get("session_type") == "groupchat"
+            attachment = ext.get("attachment") or {}
+            course_attachment = attachment.get("att_chat_course") or {}
+            course_info = course_attachment.get("courseInfo") or {}
+            is_group = (
+                channel.get("session_type") == "groupchat"
+                or "@conference." in str(channel.get("channel_id") or "")
+                or bool(course_attachment)
+            )
             peer_id = str(channel.get("session_to") or "")
             if is_group:
-                peer_id = str(class_info.get("chatid") or peer_id)
-            name = (
-                class_info.get("clazzName")
-                or class_info.get("coursename")
-                or peer_id
-            ) if is_group else peer_id
+                if not class_info and isinstance(course_info, dict):
+                    class_info = course_info
+                peer_id = str(
+                    attachment.get("chatid")
+                    or class_info.get("chatid")
+                    or peer_id
+                )
+            class_id = str(
+                (course_info.get("classid") if isinstance(course_info, dict) else "")
+                or class_info.get("classid")
+                or ""
+            ) if is_group else ""
+            course_id = str(
+                (course_info.get("courseid") if isinstance(course_info, dict) else "")
+                or class_info.get("courseid")
+                or ""
+            ) if is_group else ""
+            class_name = str(class_info.get("clazzName") or "") if is_group else ""
+            course_name = str(class_info.get("coursename") or "") if is_group else ""
+            name = class_id or peer_id if is_group else peer_id
             sessions.append({
                 **channel,
                 "chatId": peer_id,
+                "roomId": peer_id if is_group else "",
                 "chatName": str(name),
                 "msgId": str(meta.get("id") or ""),
                 "updateTime": channel.get("update_unread_msg_time") or meta.get("timestamp") or 0,
@@ -205,7 +229,48 @@ class ChatAPI:
                 "isGroup": 1 if is_group else 0,
                 "isPrivate": not is_group,
                 "class_info": class_info,
+                "courseId": course_id,
+                "classId": class_id,
+                "subtitle": class_name,
+                "courseName": course_name,
             })
+        return sessions
+
+    def _resolve_group_display_names(self, sessions):
+        """根据群聊 payload 中的课程和班级 ID 补充展示名。"""
+        class_list_cache = {}
+        for session in sessions or []:
+            if not isinstance(session, dict) or session.get("isGroup") != 1:
+                continue
+
+            fallback_name = str(session.get("session_to") or session.get("chatId") or "").strip()
+            course_id = str(session.get("courseId") or "").strip()
+            class_id = str(session.get("classId") or "").strip()
+            if not course_id or not class_id:
+                session["chatName"] = fallback_name
+                continue
+
+            if course_id not in class_list_cache:
+                try:
+                    class_list_cache[course_id] = self.get_class_list(course_id) or []
+                except Exception as e:
+                    logger.warning(
+                        "ChatAPI: 获取班级列表失败 course_id=%s error=%s",
+                        course_id,
+                        e,
+                    )
+                    class_list_cache[course_id] = []
+
+            class_name = next(
+                (
+                    str(item.get("name") or "").strip()
+                    for item in class_list_cache[course_id]
+                    if isinstance(item, dict) and str(item.get("id") or "") == class_id
+                ),
+                "",
+            )
+            session["chatName"] = class_name or fallback_name
+
         return sessions
 
     def _get_session_top_list(self, puid):
@@ -332,6 +397,9 @@ class ChatAPI:
 
     def _fetch_group_info(self, room_id: str):
         """获取群聊课程名称和成员数。"""
+        room_id = str(room_id or "").strip()
+        if not room_id:
+            return {}
         try:
             response = self.session.get(
                 "https://im.chaoxing.com/webim/huanxin/getGroupInfo",
@@ -348,7 +416,14 @@ class ChatAPI:
             if response.status_code != 200:
                 return {}
             payload = response.json()
-            return payload[0] if isinstance(payload, list) and payload and isinstance(payload[0], dict) else {}
+            if isinstance(payload, list):
+                return payload[0] if payload and isinstance(payload[0], dict) else {}
+            if isinstance(payload, dict):
+                data = payload.get("data") or payload.get("msg") or payload
+                if isinstance(data, list):
+                    return data[0] if data and isinstance(data[0], dict) else {}
+                return data if isinstance(data, dict) else {}
+            return {}
         except Exception as e:
             logger.warning(f"ChatAPI._fetch_group_info: 获取失败 room_id={room_id} error={e}")
             return {}
@@ -679,6 +754,40 @@ class ChatAPI:
         return None
 
     def get_im_credentials(self):
+        """获取 IM 凭证，并合并并发中的刷新请求。"""
+        global _credentials_refreshing
+
+        with _credentials_condition:
+            now = time.time()
+            if now - _credentials_ts < 30 and _credentials_cache:
+                return self._apply_cached_credentials(_credentials_cache)
+            if _credentials_refreshing:
+                _credentials_condition.wait()
+                now = time.time()
+                if now - _credentials_ts < 30 and _credentials_cache:
+                    return self._apply_cached_credentials(_credentials_cache)
+                return None
+            _credentials_refreshing = True
+
+        try:
+            return self._refresh_im_credentials_with_fallback()
+        finally:
+            with _credentials_condition:
+                _credentials_refreshing = False
+                _credentials_condition.notify_all()
+
+    def _apply_cached_credentials(self, credentials):
+        """将全局缓存同步到当前会话，并返回副本。"""
+        self.session_manager.course_params.update({
+            "im_tuid": credentials["tuid"],
+            "im_puid": credentials["puid"],
+            "im_token": credentials["token"],
+        })
+        if credentials.get("class_chat_map"):
+            self.session_manager.course_params["im_class_chat"] = dict(credentials["class_chat_map"])
+        return dict(credentials)
+
+    def _refresh_im_credentials_with_fallback(self):
         """
         从 https://im.chaoxing.com/webim/me 页面提取 IM 凭证
         带全局锁防止并发重复请求导致 token 被刷新。
@@ -1257,11 +1366,6 @@ class ChatAPI:
                         if avatar_url:
                             session["avatar_url"] = avatar_url
                         continue
-                    group_info = self._fetch_group_info(session.get("chatId"))
-                    if group_info.get("name"):
-                        session["chatName"] = group_info["name"]
-                    if group_info.get("members_count") is not None:
-                        session["members_count"] = group_info["members_count"]
             sessions = self._apply_session_top_list(
                 sessions,
                 self._get_session_top_list(params["puid"]),
@@ -1274,6 +1378,25 @@ class ChatAPI:
                 if encrypt_str:
                     session["encryptStr"] = encrypt_str
             self.session_manager.course_params["im_encrypt_str_map"] = encrypt_strings
+            for session in sessions:
+                if not isinstance(session, dict):
+                    continue
+                if session.get("isGroup") != 1 and session.get("isPrivate") is not False:
+                    continue
+                room_id = str(session.get("roomId") or session.get("chatId") or "").strip()
+                if not room_id:
+                    continue
+                session["roomId"] = room_id
+                group_info = self._fetch_group_info(room_id)
+                logger.info(
+                    "ChatAPI.get_message_list: group room_id=%s chat_name=%s group_name=%s",
+                    room_id,
+                    str(session.get("chatName") or ""),
+                    str(group_info.get("name") or group_info.get("groupName") or ""),
+                )
+                if group_info.get("members_count") is not None:
+                    session["members_count"] = group_info["members_count"]
+            self._resolve_group_display_names(sessions)
             class_chat_map = self.session_manager.course_params.get("im_class_chat")
             return self._apply_class_chat_metadata(sessions, class_chat_map)
 

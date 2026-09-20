@@ -21,7 +21,7 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkRepl
 
 from core.config import DATA_DIR
 from core.group_members_cache import build_group_members_cache_path, load_group_members_cache, sanitize_group_cache_filename
-from ui.workers import ChatMessageListWorker, ChatHistoryWorker, ChatGroupMembersWorker, GroupMembersBatchWorker, AIChatWorker
+from ui.workers import ChatMessageListWorker, ChatAvatarProfileWorker, ChatHistoryWorker, ChatGroupMembersWorker, GroupMembersBatchWorker, AIChatWorker
 from core.logger import get_logger
 from ui.theme import apply_theme_stylesheet, bind_theme_tree
 
@@ -311,6 +311,7 @@ class ChatView(QWidget):
         self._startup_messages_loaded = False
         self._startup_msync_ready = False
         self._message_worker = None
+        self._avatar_profile_worker = None
         self._ai_worker = None
         self._pending_ai_input_text = ""
         self._history_worker = None
@@ -343,6 +344,9 @@ class ChatView(QWidget):
         self._avatar_requests = {}  # QNetworkReply -> ChatSessionItem，用于异步回调
         self._avatar_preload_requests = set()
         self._avatar_images_by_url = {}
+        self._avatar_load_generation = 0
+        self._avatar_pending_urls = set()
+        self._avatar_refresh_scheduled = False
         self._message_image_requests = {}  # QNetworkReply -> (conversation_key, message identity)
         self._message_avatar_requests = {}  # QNetworkReply -> (conversation_key, message identity)
         self._message_avatar_resources = {}
@@ -559,7 +563,7 @@ class ChatView(QWidget):
         except Exception:
             pass
 
-        for worker in [self._message_worker, self._ai_worker, self._history_worker, self._group_members_worker, self._batch_group_members_worker, *self._history_workers]:
+        for worker in [self._message_worker, self._avatar_profile_worker, self._ai_worker, self._history_worker, self._group_members_worker, self._batch_group_members_worker, *self._history_workers]:
             try:
                 if worker and worker.isRunning():
                     worker.quit()
@@ -783,7 +787,87 @@ class ChatView(QWidget):
                 ChatView._retry_current_chat_history(self, request_realtime=False)
         self._startup_messages_loaded = True
         ChatView._finish_startup_badge_gate(self)
+        ChatView._start_missing_session_avatar_profiles(self, sessions)
         ChatView._start_batch_group_members_preload(self, group_chats)
+
+    def _start_missing_session_avatar_profiles(self, sessions: list):
+        """补全首次列表构建时尚未返回的私聊头像资料。"""
+        peer_ids = []
+        for session in sessions or []:
+            if not isinstance(session, dict) or self._is_group_session(session):
+                continue
+            peer_id = str(self._resolve_session_peer_id(session) or "").strip()
+            avatar_url = str(
+                session.get("avatar_url") or session.get("pic") or session.get("icon") or ""
+            ).strip()
+            if not peer_id or avatar_url or peer_id in peer_ids:
+                continue
+            peer_ids.append(peer_id)
+        if not peer_ids or (self._avatar_profile_worker and self._avatar_profile_worker.isRunning()):
+            return
+        self._avatar_profile_worker = ChatAvatarProfileWorker(self.crawler, peer_ids)
+        self._avatar_profile_worker.profiles_ready.connect(self._on_missing_session_avatar_profiles)
+        self._avatar_profile_worker.start()
+
+    def _on_missing_session_avatar_profiles(self, profiles: list):
+        """资料补全后启动头像图片批次下载。"""
+        self._avatar_load_generation += 1
+        generation = self._avatar_load_generation
+        self._avatar_pending_urls.clear()
+        self._avatar_refresh_scheduled = False
+        for result in profiles or []:
+            if not isinstance(result, dict):
+                continue
+            peer_id = str(result.get("peer_id") or "").strip()
+            profile = result.get("profile") or {}
+            if not peer_id or not isinstance(profile, dict):
+                continue
+            avatar_url = str(
+                profile.get("icon") or profile.get("pic") or profile.get("picUrl") or ""
+            ).strip()
+            if not avatar_url:
+                continue
+            for session in self._raw_sessions or []:
+                if not isinstance(session, dict) or self._is_group_session(session):
+                    continue
+                if self._resolve_session_peer_id(session) != peer_id:
+                    continue
+                session["avatar_url"] = avatar_url
+                self._session_meta_by_peer.setdefault(peer_id, {})["avatar_url"] = avatar_url
+                if avatar_url not in self._avatar_images_by_url:
+                    self._avatar_pending_urls.add(avatar_url)
+                self._update_session_row(
+                    peer_id,
+                    self._resolve_session_history_id(session),
+                    session=session,
+                )
+                break
+        if not self._avatar_pending_urls:
+            return
+        self._schedule_avatar_batch_completion_check(generation)
+
+    def _schedule_avatar_batch_completion_check(self, generation: int):
+        QTimer.singleShot(0, lambda: self._finish_avatar_batch_if_ready(generation))
+
+    def _finish_avatar_batch_if_ready(self, generation: int):
+        if generation != self._avatar_load_generation or self._avatar_pending_urls:
+            return
+        if self._avatar_refresh_scheduled or self._shutting_down:
+            return
+        self._avatar_refresh_scheduled = True
+        QTimer.singleShot(0, self._refresh_session_list_after_avatar_batch)
+
+    def _refresh_session_list_after_avatar_batch(self):
+        self._avatar_refresh_scheduled = False
+        if not self._shutting_down and self._raw_sessions:
+            self._refresh_session_list(self._raw_sessions)
+
+    def _mark_avatar_batch_url_done(self, avatar_url: str):
+        avatar_url = str(avatar_url or "").strip()
+        if not avatar_url or avatar_url not in self._avatar_pending_urls:
+            return
+        self._avatar_pending_urls.discard(avatar_url)
+        self._schedule_avatar_batch_completion_check(self._avatar_load_generation)
 
     def _request_unread_summary(self, sessions: list):
         if not hasattr(self.crawler, "request_history_summary_msync"):
@@ -1076,6 +1160,8 @@ class ChatView(QWidget):
                 merged["courseName"] = meta["courseName"]
             if meta.get("avatar_url") and not merged.get("avatar_url"):
                 merged["avatar_url"] = meta["avatar_url"]
+            if meta.get("chatIco") and not merged.get("chatIco"):
+                merged["chatIco"] = meta["chatIco"]
             if meta.get("chatId") and (
                 not merged.get("chatId")
                 or str(merged.get("chatId") or "") == peer_id
@@ -1104,6 +1190,7 @@ class ChatView(QWidget):
             meta["courseName"] = str(class_info.get("course_name") or "")
         if allow_avatar_update and class_info.get("image_url"):
             meta["avatar_url"] = str(class_info.get("image_url") or "")
+            meta["chatIco"] = meta["avatar_url"]
         if class_info.get("chat_id"):
             meta["chatId"] = str(class_info.get("chat_id") or "")
         if not meta:
@@ -1924,6 +2011,7 @@ class ChatView(QWidget):
                     self._avatar_images_by_url[avatar_url] = image
                     self._apply_cached_avatar_to_session_rows(avatar_url, image)
                 self._set_message_avatar_resource(conversation_key, identity, image)
+            ChatView._mark_avatar_batch_url_done(self, getattr(reply, "_avatar_url", ""))
         reply.deleteLater()
 
     def _apply_cached_avatar_to_session_rows(self, avatar_url: str, image: QImage):
@@ -2640,6 +2728,7 @@ class ChatView(QWidget):
                     widget.set_avatar_pixmap(pixmap)
                 except RuntimeError:
                     pass
+        ChatView._mark_avatar_batch_url_done(self, getattr(reply, "_avatar_url", ""))
         reply.deleteLater()
 
     def _apply_cached_avatar_to_messages(self, avatar_url: str, image: QImage):
