@@ -531,6 +531,8 @@ class MSyncClient:
         app_key: str,
         domain: str = "easemob.com",
         platform: int = 3,
+        transport: str = "sockjs",
+        direct_url: str = "wss://im-api-wechat-vip6.easemob.com/websocket",
         on_message=None,
         on_error=None,
         on_close=None,
@@ -539,6 +541,10 @@ class MSyncClient:
         self.app_key = app_key
         self.domain = domain
         self.platform = platform
+        if transport not in {"sockjs", "direct"}:
+            raise ValueError("transport must be 'sockjs' or 'direct'")
+        self.transport = transport
+        self.direct_url = direct_url
         self.on_message = on_message
         self.on_error = on_error
         self.on_close = on_close
@@ -564,7 +570,7 @@ class MSyncClient:
     # ── 连接管理 ──
 
     def connect(self, token: str, username: str):
-        """建立 SockJS + MSync 连接."""
+        """建立 SockJS 或直连 WebSocket + MSync 连接。"""
         self._token = token
         self._username = username
         self._authenticated = False
@@ -573,17 +579,15 @@ class MSyncClient:
         self._resource = f"webim_{ts}"
         self._resource_ts = ts
 
-        # 1. SockJS 握手: GET /ws/info
-        info = self._sockjs_info()
-        if not info:
-            raise ConnectionError("SockJS info 握手失败")
-
-        # 2. 生成 server / session
-        self._server = self._choose_server(info)
-        self._session = self._generate_session()
-
-        # 3. WebSocket 连接
-        ws_url = f"{self.XMPP_URL}/{self._server}/{self._session}/websocket"
+        if self.transport == "sockjs":
+            info = self._sockjs_info()
+            if not info:
+                raise ConnectionError("SockJS info 握手失败")
+            self._server = self._choose_server(info)
+            self._session = self._generate_session()
+            ws_url = f"{self.XMPP_URL}/{self._server}/{self._session}/websocket"
+        else:
+            ws_url = self.direct_url
         logger.info(f"MSync: connecting to {ws_url}")
 
         headers = {
@@ -609,6 +613,28 @@ class MSyncClient:
             "ping_timeout": 10,
         }, daemon=True)
         self._thread.start()
+
+    def _send_payload(self, payload: bytes):
+        """按传输模式发送原始 MSync Protobuf。"""
+        if self.transport == "direct":
+            self._ws.send(payload, opcode=websocket.ABNF.OPCODE_BINARY)
+        else:
+            self._ws.send(sockjs_encode(payload))
+
+    def _decode_transport_frames(self, message):
+        """将直连二进制帧或 SockJS 帧统一转换为 Protobuf 列表。"""
+        if self.transport == "direct":
+            if isinstance(message, bytes):
+                return [message]
+            if isinstance(message, str):
+                try:
+                    return [base64.b64decode(message, validate=True)]
+                except Exception:
+                    return []
+            return []
+        if isinstance(message, bytes):
+            return []
+        return sockjs_decode_all(message)
 
     def disconnect(self):
         """断开连接."""
@@ -655,9 +681,8 @@ class MSyncClient:
             content,
             msg_type,
         )
-        frame = sockjs_encode(pb)
-        logger.info(f"MSync: send frame len={len(frame)}")
-        self._ws.send(frame)
+        logger.info(f"MSync: send frame len={len(pb)} transport={self.transport}")
+        self._send_payload(pb)
 
     def send_login(self):
         """发送登录消息."""
@@ -670,28 +695,28 @@ class MSyncClient:
             self.platform,
             getattr(self, "_resource_ts", None),
         )
-        frame = sockjs_encode(pb)
+        frame = sockjs_encode(pb) if self.transport == "sockjs" else pb
         b64 = base64.b64encode(pb).decode("ascii")
         logger.info(f"MSync: login frame len={len(frame)} b64={b64}")
         logger.info(f"MSync: login hex={pb.hex()}")
         # 同时解码打印结构，方便对比
         decoded = decode_message(pb)
         logger.info(f"MSync: login decoded={decoded}")
-        self._ws.send(frame)
+        self._send_payload(pb)
 
     def send_sync_reply(self):
         """响应服务端登录后的同步提示。"""
         pb = build_sync_reply(self._username)
         frame = sockjs_encode(pb)
         logger.info("MSync: send sync reply")
-        self._ws.send(frame)
+        self._send_payload(pb)
 
     def send_receive_ack(self, message_id: int):
         """发送收到下行消息后的 ACK。"""
         pb = build_receive_ack(message_id, self._username)
         frame = sockjs_encode(pb)
         logger.info(f"MSync: send receive ack message_id={message_id}")
-        self._ws.send(frame)
+        self._send_payload(pb)
 
     def send_conversation_read(self, peer_id: str, message_id: int, conversation_type: int = 1):
         """发送会话已读同步。"""
@@ -704,14 +729,13 @@ class MSyncClient:
             message_id=int(message_id or 0),
             conversation_type=conversation_type,
         )
-        frame = sockjs_encode(pb)
         logger.info(f"MSync: send conversation read peer_id={peer_id} message_id={message_id}")
-        self._ws.send(frame)
+        self._send_payload(pb)
 
     def send_history_subject_sync(self, subject: str, cursor: int, domain: str = ""):
         """发送二阶段逐 subject 历史同步请求。"""
         pb = build_history_subject_sync(cursor, subject, domain=domain)
-        self._ws.send(sockjs_encode(pb))
+        self._send_payload(pb)
 
     def _build_history_subjects(self, peer_ids):
         subjects = []
@@ -728,7 +752,7 @@ class MSyncClient:
         frames.append(build_history_sync(int(time.time() * 1000)))
 
         for pb in frames:
-            self._ws.send(sockjs_encode(pb))
+            self._send_payload(pb)
 
     def _send_history_summary_request(self, peer_ids):
         subjects = self._build_history_subjects(peer_ids)
@@ -740,7 +764,7 @@ class MSyncClient:
         frames.append(build_history_sync(int(time.time() * 1000)))
 
         for pb in frames:
-            self._ws.send(sockjs_encode(pb))
+            self._send_payload(pb)
 
     def _send_history_subject_syncs(self, subject_syncs):
         for item in subject_syncs or []:
@@ -917,6 +941,9 @@ class MSyncClient:
 
     def _start_heartbeat(self):
         """启动心跳定时器."""
+        if self.transport == "direct":
+            return
+
         def beat():
             if self._running and self.is_connected():
                 self._ws.send("[]")  # SockJS heartbeat
@@ -1415,7 +1442,7 @@ class MSyncClient:
 
     def _on_ws_message(self, ws, message):
         logger.debug(f"MSync: recv raw={message[:100]}...")
-        frames = sockjs_decode_all(message)
+        frames = self._decode_transport_frames(message)
         if not frames:
             return
 

@@ -260,6 +260,7 @@ class ChatAPI:
                     app_key="cx-dev#cxstudy",
                     domain="easemob.com",
                     platform=3,
+                    transport="direct",
                     on_message=cls._dispatch_msync_message,
                     on_error=cls._dispatch_msync_error,
                     on_close=cls._dispatch_msync_close,

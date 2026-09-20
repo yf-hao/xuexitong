@@ -197,6 +197,26 @@ class ChatAPITests(unittest.TestCase):
     def test_sockjs_encode_uses_client_array_frame(self):
         self.assertEqual(sockjs_encode(b"\x01\x02"), '["AQI="]')
 
+    def test_direct_transport_sends_binary_login_and_decodes_binary_frame(self):
+        sent = []
+        client = MSyncClient(
+            app_key="cx-dev#cxstudy",
+            transport="direct",
+            on_message=lambda message: None,
+        )
+        client._ws = SimpleNamespace(send=lambda payload, opcode=None: sent.append((payload, opcode)))
+        client._token = "hx-token"
+        client._username = "25278974"
+        client._resource = "webim_test-25278974"
+        client._resource_ts = 1789874891080
+
+        client.send_login()
+
+        self.assertEqual(len(sent), 1)
+        self.assertIsInstance(sent[0][0], bytes)
+        self.assertEqual(sent[0][1], 2)
+        self.assertEqual(client._decode_transport_frames(sent[0][0]), [sent[0][0]])
+
     def test_build_sync_reply_matches_captured_frame(self):
         frame = base64.b64encode(build_sync_reply("25278974")).decode()
         self.assertEqual(frame, "CABAAEoMGgoSCDI1Mjc4OTc0WAA=")
