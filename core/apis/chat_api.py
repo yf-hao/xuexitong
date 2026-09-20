@@ -964,10 +964,17 @@ class ChatAPI:
             logger.warning(f"ChatAPI._fetch_im_user_info: 获取失败 - {e}")
             return {}
 
-        return {
+        profile = {
             "name": info.get("name") or info.get("userName") or info.get("nickName") or "",
             "icon": info.get("icon") or info.get("pic") or info.get("picUrl") or "",
         }
+        logger.info(
+            "ChatAPI._fetch_im_user_info: tuid=%s name=%s avatar_present=%s",
+            target_tuid,
+            bool(profile["name"]),
+            bool(profile["icon"]),
+        )
+        return profile
 
     def _get_im_profile(self, tuid: str, puid: str, token: str):
         """获取当前 IM 用户资料，至少包含 name/icon。"""
@@ -1357,12 +1364,30 @@ class ChatAPI:
             if sessions and isinstance(sessions[0], dict) and "channel_id" in sessions[0]:
                 sessions = self._normalize_channel_infos(sessions)
                 for session in sessions:
-                    if session.get("isGroup") != 1:
-                        peer_id = str(session.get("chatId") or "")
+                    if session.get("session_type") == "chat" or (
+                        session.get("isGroup") != 1 and session.get("isPrivate") is not False
+                    ):
+                        peer_id = str(
+                            session.get("session_to")
+                            or session.get("chatId")
+                            or ""
+                        ).strip()
+                        if not peer_id:
+                            continue
                         profile = self.get_im_user_info_by_tuid(peer_id)
                         if profile.get("name"):
                             session["chatName"] = profile["name"]
-                        avatar_url = str(profile.get("icon") or profile.get("pic") or "").strip()
+                        avatar_url = str(
+                            profile.get("pic")
+                            or profile.get("icon")
+                            or profile.get("picUrl")
+                            or ""
+                        ).strip()
+                        logger.info(
+                            "ChatAPI.get_message_list: private tuid=%s avatar_present=%s",
+                            peer_id,
+                            bool(avatar_url),
+                        )
                         if avatar_url:
                             session["avatar_url"] = avatar_url
                         continue

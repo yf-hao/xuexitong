@@ -1354,7 +1354,7 @@ class ChatView(QWidget):
         self.chat_list.setItemWidget(item, item_widget)
 
         # 异步加载头像
-        if avatar_url and not getattr(self, "_suppress_avatar_refresh", False):
+        if avatar_url:
             self._request_avatar(self.chat_list, item, avatar_url)
 
     def _build_session_item_components(self, session: dict):
@@ -1429,6 +1429,7 @@ class ChatView(QWidget):
             item.setData(Qt.ItemDataRole.UserRole + 4, unread_count)
             current_widget = list_widget.itemWidget(item)
             if getattr(self, "_suppress_avatar_refresh", False) and current_widget and hasattr(current_widget, "update_display"):
+                current_widget._avatar_url = avatar_url
                 current_widget.update_display(
                     item_name,
                     item_widget.time_label.text(),
@@ -1437,9 +1438,11 @@ class ChatView(QWidget):
                     session=built_session,
                 )
                 item.setSizeHint(current_widget.sizeHint())
+                if avatar_url:
+                    self._request_avatar(list_widget, item, avatar_url)
             else:
                 list_widget.setItemWidget(item, item_widget)
-                if avatar_url and not getattr(self, "_suppress_avatar_refresh", False):
+                if avatar_url:
                     self._request_avatar(list_widget, item, avatar_url)
             updated = True
         return updated
@@ -2677,17 +2680,21 @@ class ChatView(QWidget):
     def _request_avatar(self, list_widget: QListWidget, item: QListWidgetItem, avatar_url: str):
         avatar_url = str(avatar_url or "").strip()
         if not avatar_url:
+            logger.info("ChatView._request_avatar: skipped empty url")
             return
         widget = list_widget.itemWidget(item) if list_widget and item else None
         cached_image = self._avatar_images_by_url.get(avatar_url)
         if widget is not None and cached_image is not None:
+            logger.info("ChatView._request_avatar: cache hit url=%s", avatar_url)
             pixmap = QPixmap.fromImage(cached_image)
             if not pixmap.isNull():
                 widget.set_avatar_pixmap(pixmap)
                 return
         if any(str(getattr(reply, "_avatar_url", "") or "") == avatar_url for reply in self._message_avatar_requests):
+            logger.info("ChatView._request_avatar: skipped message request duplicate url=%s", avatar_url)
             return
         if any(str(getattr(reply, "_avatar_url", "") or "") == avatar_url for reply in self._avatar_requests):
+            logger.info("ChatView._request_avatar: skipped session request duplicate url=%s", avatar_url)
             return
         req = QNetworkRequest(QUrl(avatar_url))
         req.setRawHeader(b"Referer", b"https://fe.chaoxing.com/")
@@ -2695,6 +2702,7 @@ class ChatView(QWidget):
         reply = self._net_mgr.get(req)
         reply._avatar_url = avatar_url
         self._avatar_requests[reply] = (list_widget, item)
+        logger.info("ChatView._request_avatar: request started url=%s", avatar_url)
         reply.finished.connect(lambda r=reply: self._on_avatar_reply_finished(r))
 
     def _on_avatar_reply_finished(self, reply):
@@ -2714,20 +2722,49 @@ class ChatView(QWidget):
             except RuntimeError:
                 widget = None
 
-        if widget and reply.error() == QNetworkReply.NetworkError.NoError:
-            data = reply.readAll()
+        data = bytes(reply.readAll())
+        logger.info(
+            "ChatView._on_avatar_reply_finished: url=%s error=%s bytes=%s widget=%s",
+            getattr(reply, "_avatar_url", ""),
+            reply.error().name,
+            len(data),
+            bool(widget),
+        )
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            logger.warning(
+                "ChatView: avatar request failed url=%s error=%s detail=%s",
+                getattr(reply, "_avatar_url", ""),
+                reply.error().name,
+                reply.errorString(),
+            )
+        if reply.error() == QNetworkReply.NetworkError.NoError:
             pixmap = QPixmap()
             if pixmap.loadFromData(data):
-                avatar_url = getattr(widget, "_avatar_url", "") if widget else ""
+                avatar_url = str(getattr(reply, "_avatar_url", "") or "").strip()
                 if avatar_url:
                     image = QImage()
                     if image.loadFromData(bytes(data)):
-                        self._avatar_images_by_url[str(avatar_url)] = image
-                        self._apply_cached_avatar_to_messages(str(avatar_url), image)
-                try:
-                    widget.set_avatar_pixmap(pixmap)
-                except RuntimeError:
-                    pass
+                        self._avatar_images_by_url[avatar_url] = image
+                        self._apply_cached_avatar_to_messages(avatar_url, image)
+                        self._apply_cached_avatar_to_session_rows(avatar_url, image)
+                        logger.info(
+                            "ChatView: avatar image cached url=%s widget=%s",
+                            avatar_url,
+                            bool(widget),
+                        )
+                if widget:
+                    try:
+                        widget.set_avatar_pixmap(pixmap)
+                    except RuntimeError:
+                        pass
+            else:
+                logger.warning(
+                    "ChatView: avatar response is not an image url=%s bytes=%s content_type=%s status=%s",
+                    getattr(reply, "_avatar_url", ""),
+                    len(data),
+                    reply.header(QNetworkRequest.KnownHeaders.ContentTypeHeader),
+                    reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute),
+                )
         ChatView._mark_avatar_batch_url_done(self, getattr(reply, "_avatar_url", ""))
         reply.deleteLater()
 

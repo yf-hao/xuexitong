@@ -23,10 +23,10 @@ _file_handler = RotatingFileHandler(
     backupCount=LOG_BACKUP_COUNT,
 )
 _file_handler.setFormatter(_formatter)
-_file_handler.setLevel(logging.ERROR)
+_file_handler.setLevel(logging.INFO)
 
 logger = logging.getLogger("xuexitong")
-logger.setLevel(logging.ERROR)
+logger.setLevel(logging.INFO)
 logger.addHandler(_file_handler)
 logger.propagate = False
 
