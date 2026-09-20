@@ -1,5 +1,6 @@
 import re
 from typing import List, Optional
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from models.data_types import Course
 from core.config import DEFAULT_FID
@@ -64,7 +65,7 @@ class CourseAPI:
             print(f"Error fetching courses: {e}")
             return []
 
-    def get_course_details(self, course_id: str, url: str = None) -> dict:
+    def get_course_details(self, course_id: str, url: str = None, redirect_policy=None) -> dict:
         """获取课程详情及导航参数，使用缓存避免重复请求。"""
         cache_key = course_id
         if url:
@@ -87,7 +88,27 @@ class CourseAPI:
         }
 
         try:
-            resp = self.session.get(url, headers=headers, timeout=10)
+            if redirect_policy is None:
+                resp = self.session.get(url, headers=headers, timeout=10)
+            else:
+                resp = self.session.get(
+                    url,
+                    headers=headers,
+                    timeout=10,
+                    allow_redirects=False,
+                )
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise RuntimeError("重定向响应缺少 Location")
+
+                    redirect_url = redirect_policy.transform(url, urljoin(url, location))
+                    resp = self.session.get(
+                        redirect_url,
+                        headers=headers,
+                        timeout=10,
+                    )
+
             resp.raise_for_status()
             html = resp.text
 

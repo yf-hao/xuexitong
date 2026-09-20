@@ -3,6 +3,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.config import DEFAULT_FID
 from core.excel_parser import parse_students_xls
+from core.utils.redirect_policy import ForceV6ToV2Policy
 
 class CourseWorker(QThread):
     """Worker thread to fetch initial course list."""
@@ -118,7 +119,11 @@ class DetailsWorker(QThread):
     def run(self):
         try:
             # Pass the href from the course object to ensure we visit the correct page
-            details = self.crawler.get_course_details(self.course.id, url=self.course.href)
+            details = self.crawler.get_course_details(
+                self.course.id,
+                url=self.course.href,
+                redirect_policy=ForceV6ToV2Policy(),
+            )
             self.details_ready.emit(details, self.course)
         except Exception as e:
             print(f"DetailsWorker error: {e}")
