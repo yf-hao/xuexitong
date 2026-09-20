@@ -536,6 +536,7 @@ class MSyncClient:
         on_message=None,
         on_error=None,
         on_close=None,
+        on_authenticated=None,
         cookies: str = None,
     ):
         self.app_key = app_key
@@ -548,6 +549,7 @@ class MSyncClient:
         self.on_message = on_message
         self.on_error = on_error
         self.on_close = on_close
+        self.on_authenticated = on_authenticated
         self.cookies = cookies
 
         self._ws = None
@@ -1450,8 +1452,11 @@ class MSyncClient:
             try:
                 decoded = decode_message(data)
                 logger.debug(f"MSync: decoded={decoded}")
+                was_authenticated = self._authenticated
                 if decoded:
                     self._authenticated = True
+                    if not was_authenticated and self.on_authenticated:
+                        self.on_authenticated()
 
                 message_type = self._first(decoded.get(8))
                 meta = self._first(decoded.get(9))

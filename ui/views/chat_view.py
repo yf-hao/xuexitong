@@ -287,6 +287,7 @@ class ChatView(QWidget):
 
     send_message = pyqtSignal(str, str)  # (target_id, message_text)
     msync_message_received = pyqtSignal(dict)
+    msync_status_changed = pyqtSignal(str)
     startup_gate_check_requested = pyqtSignal()
     msync_info_refresh_done = pyqtSignal(bool, bool)  # (auto_triggered, ok)
 
@@ -338,6 +339,7 @@ class ChatView(QWidget):
         self._pending_group_room_id = ""
         self._shutting_down = False
         self._avatar_requests = {}  # QNetworkReply -> ChatSessionItem，用于异步回调
+        self.msync_status_changed.connect(self._set_msync_status)
         self._net_mgr = QNetworkAccessManager(self)
         self._message_refreshing = False
         self._message_auto_refresh_timer = QTimer(self)
@@ -444,10 +446,17 @@ class ChatView(QWidget):
         right_layout.setSpacing(0)
 
         # 聊天标题栏
+        title_layout = QHBoxLayout()
+        title_layout.setContentsMargins(12, 8, 12, 8)
         self.chat_title_label = QLabel("选择一个对话")
         self.chat_title_label.setObjectName("chat_title")
         self.chat_title_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        right_layout.addWidget(self.chat_title_label)
+        title_layout.addWidget(self.chat_title_label, stretch=1)
+        self.msync_status_label = QLabel("未连接")
+        self.msync_status_label.setObjectName("msync_status")
+        self.msync_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        title_layout.addWidget(self.msync_status_label)
+        right_layout.addLayout(title_layout)
 
         # 消息显示区域
         self.chat_messages = QTextEdit()
@@ -2186,6 +2195,16 @@ class ChatView(QWidget):
         self.ai_draft_btn.setEnabled(False)
         self._current_session_display_name = None
 
+    def _set_msync_status(self, status: str):
+        """更新聊天标题栏中的 MSync 连接状态。"""
+        if hasattr(self, "msync_status_label"):
+            self.msync_status_label.setText(status)
+
+    def _emit_msync_status(self, status: str):
+        signal = getattr(self, "msync_status_changed", None)
+        if signal is not None:
+            signal.emit(status)
+
     def _on_chat_selected(self, current: QListWidgetItem, previous: QListWidgetItem):
         """消息列表选中事件"""
         if not current:
@@ -2303,6 +2322,7 @@ class ChatView(QWidget):
             if self._msync_connecting:
                 return
             self._msync_connecting = True
+        ChatView._emit_msync_status(self, "连接中")
 
         def connect_in_background():
             try:
@@ -2311,12 +2331,20 @@ class ChatView(QWidget):
                     self.crawler.get_im_credentials()
                 except Exception as cred_err:
                     logger.warning(f"ChatView: 后台拉取 IM 凭证失败 - {cred_err}")
-                self.crawler.connect_msync(
-                    on_message=lambda msg: self.msync_message_received.emit(msg),
-                    on_error=lambda e: logger.error(f"MSync error: {e}"),
-                    on_close=lambda c, m: logger.info(f"MSync closed: {c} {m}"),
-                    listener_key=self,
-                )
+                connect_kwargs = {
+                    "on_message": lambda msg: self.msync_message_received.emit(msg),
+                    "on_error": lambda e: (logger.error(f"MSync error: {e}"), ChatView._emit_msync_status(self, "连接失败")),
+                    "on_close": lambda c, m: (logger.info(f"MSync closed: {c} {m}"), ChatView._emit_msync_status(self, "已断开")),
+                    "on_authenticated": lambda: ChatView._emit_msync_status(self, "已连接"),
+                    "listener_key": self,
+                }
+                try:
+                    self.crawler.connect_msync(**connect_kwargs)
+                except TypeError as connect_error:
+                    if "on_authenticated" not in str(connect_error):
+                        raise
+                    connect_kwargs.pop("on_authenticated")
+                    self.crawler.connect_msync(**connect_kwargs)
                 self._startup_msync_ready = True
                 if self._raw_sessions:
                     self._request_unread_summary(self._raw_sessions)
@@ -2332,6 +2360,7 @@ class ChatView(QWidget):
                         ChatView._retry_current_chat_history(self, force=True, request_realtime=False)
             except Exception as e:
                 logger.error(f"MSync connect failed: {e}")
+                ChatView._emit_msync_status(self, "连接失败")
             finally:
                 with self._msync_connect_lock:
                     self._msync_connecting = False

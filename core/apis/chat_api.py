@@ -223,7 +223,7 @@ class ChatAPI:
         if hasattr(cls._msync, "on_close"):
             cls._msync.on_close = cls._dispatch_msync_close
 
-    def connect_msync(self, on_message=None, on_error=None, on_close=None, listener_key=None):
+    def connect_msync(self, on_message=None, on_error=None, on_close=None, on_authenticated=None, listener_key=None):
         """
         建立 MSync WebSocket 实时连接。
 
@@ -264,6 +264,7 @@ class ChatAPI:
                     on_message=cls._dispatch_msync_message,
                     on_error=cls._dispatch_msync_error,
                     on_close=cls._dispatch_msync_close,
+                    on_authenticated=on_authenticated,
                     cookies=cookie_str,
                 )
                 cls._msync.connect(token=token, username=tuid)
