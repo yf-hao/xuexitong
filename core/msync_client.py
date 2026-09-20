@@ -607,7 +607,7 @@ class MSyncClient:
         logger.info(f"MSync: connecting to {ws_url}")
 
         headers = {
-            "Origin": "https://im.chaoxing.com",
+            "Origin": "https://fe.chaoxing.com" if self.transport == "direct" else "https://im.chaoxing.com",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         }
         if self.cookies:

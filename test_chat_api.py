@@ -219,9 +219,12 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(client._decode_transport_frames(sent[0][0]), [sent[0][0]])
 
     def test_direct_transport_uses_browser_resource_format(self):
+        captured = {}
+
         class FakeWebSocketApp:
             def __init__(self, url, **kwargs):
                 self.url = url
+                captured["headers"] = kwargs["header"]
 
             def run_forever(self, **kwargs):
                 return None
@@ -232,6 +235,7 @@ class ChatAPITests(unittest.TestCase):
                 client.connect(token="token", username="25278974")
 
         self.assertEqual(client._resource, "webim_web_test-resource-25278974")
+        self.assertEqual(captured["headers"]["Origin"], "https://fe.chaoxing.com")
 
     def test_build_sync_reply_matches_captured_frame(self):
         frame = base64.b64encode(build_sync_reply("25278974")).decode()
