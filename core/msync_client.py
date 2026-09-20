@@ -17,6 +17,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 
 import websocket
 
@@ -578,7 +579,10 @@ class MSyncClient:
         self._authenticated = False
         # resource 和登录帧中的 timestamp 保持一致
         ts = int(time.time() * 1000)
-        self._resource = f"webim_{ts}"
+        if self.transport == "direct":
+            self._resource = f"webim_web_{uuid.uuid4()}-{username}"
+        else:
+            self._resource = f"webim_{ts}"
         self._resource_ts = ts
 
         if self.transport == "sockjs":
