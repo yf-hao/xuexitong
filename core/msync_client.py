@@ -430,16 +430,18 @@ def build_conversation_read(
     return root.bytes()
 
 
-def build_history_open() -> bytes:
+def build_history_open(sync_field20: int = None) -> bytes:
     """构造打开会话历史同步的起始帧。"""
     root = ProtoBufWriter()
     root.uint32(1, 0)
     root.uint32(8, 1)
     root.uint32(11, 0)
+    if sync_field20 is not None:
+        root.uint64(20, int(sync_field20))
     return root.bytes()
 
 
-def build_history_subject(subject: str) -> bytes:
+def build_history_subject(subject: str, sync_field20: int = None) -> bytes:
     """构造会话历史同步的主题帧。"""
     root = ProtoBufWriter()
     root.uint32(1, 0)
@@ -450,10 +452,12 @@ def build_history_subject(subject: str) -> bytes:
     meta.embedded(3, user_ref)
     root.embedded(9, meta)
     root.uint32(11, 0)
+    if sync_field20 is not None:
+        root.uint64(20, int(sync_field20))
     return root.bytes()
 
 
-def build_history_subject_sync(cursor: int, subject: str, domain: str = "") -> bytes:
+def build_history_subject_sync(cursor: int, subject: str, domain: str = "", sync_field20: int = None) -> bytes:
     """构造二阶段逐 subject 历史同步请求帧。"""
     root = ProtoBufWriter()
     root.uint32(1, 0)
@@ -467,10 +471,30 @@ def build_history_subject_sync(cursor: int, subject: str, domain: str = "") -> b
     meta.embedded(3, subject_ref)
     root.embedded(9, meta)
     root.uint32(11, 0)
+    if sync_field20 is not None:
+        root.uint64(20, int(sync_field20))
     return root.bytes()
 
 
-def build_history_sync(timestamp_ms: int) -> bytes:
+def build_history_subject_ack(subject: str, timestamp_ms: int) -> bytes:
+    """构造服务端历史数据后的 subject ACK 帧。"""
+    root = ProtoBufWriter()
+    root.uint32(1, 0)
+    root.uint32(8, 0)
+    meta = ProtoBufWriter()
+    meta_header = ProtoBufWriter()
+    meta_header.uint32(1, 0)
+    meta.embedded(1, meta_header)
+    subject_ref = ProtoBufWriter()
+    subject_ref.string(2, subject)
+    meta.embedded(6, subject_ref)
+    meta.uint32(7, 1)
+    meta.uint64(8, int(timestamp_ms or 0))
+    root.embedded(9, meta)
+    return root.bytes()
+
+
+def build_history_sync(timestamp_ms: int, sync_field20: int = None) -> bytes:
     """构造会话历史同步请求帧。"""
     root = ProtoBufWriter()
     root.uint32(1, 0)
@@ -485,6 +509,8 @@ def build_history_sync(timestamp_ms: int) -> bytes:
     meta.embedded(1, sync)
     root.embedded(9, meta)
     root.uint32(11, 0)
+    if sync_field20 is not None:
+        root.uint64(20, int(sync_field20))
     return root.bytes()
 
 
@@ -543,6 +569,7 @@ class MSyncClient:
         transport: str = "sockjs",
         direct_url: str = "wss://im-api-wechat-vip6.easemob.com/websocket",
         login_nonce: int = None,
+        sync_field20: int = None,
         on_message=None,
         on_error=None,
         on_close=None,
@@ -557,6 +584,7 @@ class MSyncClient:
         self.transport = transport
         self.direct_url = direct_url
         self.login_nonce = login_nonce
+        self.sync_field20 = sync_field20
         self.on_message = on_message
         self.on_error = on_error
         self.on_close = on_close
@@ -576,6 +604,7 @@ class MSyncClient:
         self._pending_history_peers = []
         self._pending_history_summary_peers = []
         self._pending_subject_syncs = []
+        self._pending_history_subject_acks = []
         self._pending_conversation_reads = []
         self._last_history_summary = None
         self._last_history_subject_acks = []
@@ -751,8 +780,17 @@ class MSyncClient:
 
     def send_history_subject_sync(self, subject: str, cursor: int, domain: str = ""):
         """发送二阶段逐 subject 历史同步请求。"""
-        pb = build_history_subject_sync(cursor, subject, domain=domain)
+        pb = build_history_subject_sync(
+            cursor,
+            subject,
+            domain=domain,
+            sync_field20=self.sync_field20,
+        )
         self._send_payload(pb)
+
+    def send_history_subject_ack(self, subject: str, timestamp_ms: int):
+        """确认已处理某个 subject 的历史数据。"""
+        self._send_payload(build_history_subject_ack(subject, timestamp_ms))
 
     def _build_history_subjects(self, peer_ids):
         subjects = []
@@ -764,24 +802,33 @@ class MSyncClient:
 
     def _send_history_request(self, peer_id: str):
         subjects = self._build_history_subjects([peer_id])
-        frames = [build_history_open()]
-        frames.extend(build_history_subject(subject) for subject in subjects)
-        frames.append(build_history_sync(int(time.time() * 1000)))
+        frames = [build_history_open(sync_field20=self.sync_field20)]
+        frames.extend(
+            build_history_subject(subject, sync_field20=self.sync_field20)
+            for subject in subjects
+        )
+        frames.append(build_history_sync(int(time.time() * 1000), sync_field20=self.sync_field20))
 
         for pb in frames:
             self._send_payload(pb)
 
     def _send_history_summary_request(self, peer_ids):
-        subjects = self._build_history_subjects(peer_ids)
-        if not subjects:
-            return
-
-        frames = [build_history_open()]
-        frames.extend(build_history_subject(subject) for subject in subjects)
-        frames.append(build_history_sync(int(time.time() * 1000)))
+        frames = [build_history_open(sync_field20=self.sync_field20)]
+        frames.append(build_history_sync(int(time.time() * 1000), sync_field20=self.sync_field20))
 
         for pb in frames:
             self._send_payload(pb)
+
+    def _send_history_subject_requests(self, subjects):
+        for subject in subjects or []:
+            subject = str(subject or "")
+            if not subject:
+                continue
+            self._pending_history_subject_acks.append(subject)
+            self._send_payload(build_history_subject(subject, sync_field20=self.sync_field20))
+        self._send_payload(
+            build_history_sync(int(time.time() * 1000), sync_field20=self.sync_field20)
+        )
 
     def _send_history_subject_syncs(self, subject_syncs):
         for item in subject_syncs or []:
@@ -1050,7 +1097,7 @@ class MSyncClient:
             "course_name": course_name,
             "class_id": str(value.get("classid") or value.get("classId") or "").strip(),
             "course_id": str(value.get("courseid") or value.get("courseId") or "").strip(),
-            "image_url": str(value.get("imageUrl") or value.get("chatIco") or "").strip(),
+            "image_url": str(value.get("imageUrl") or "").strip(),
             "teacher_factor": str(value.get("teacherfactor") or value.get("teacherFactor") or "").strip(),
             "role": int(value.get("role") or 0) if str(value.get("role") or "").isdigit() else value.get("role") or 0,
             "is_teacher": bool(value.get("isTeacher", False)),
@@ -1177,6 +1224,18 @@ class MSyncClient:
                 return from_user
         return body_from or primary_from or body_to or primary_to
 
+    def _is_group_route(self, *values):
+        return any(
+            isinstance(value, str) and "conference.easemob.com" in value
+            for value in values
+        )
+
+    def _resolve_message_peer(self, route_from, route_to, body_from, body_to, class_info=None):
+        if self._is_group_route(route_from, route_to, body_from, body_to):
+            return route_to or body_to or route_from or body_from
+        chat_id = str((class_info or {}).get("chatid") or "")
+        return self._resolve_peer_from_users(route_from, route_to, body_from, body_to) or chat_id
+
     def _extract_batch_messages(self, decoded: dict):
         messages = []
         for meta in self._iter_meta_dicts(decoded):
@@ -1206,7 +1265,14 @@ class MSyncClient:
                 route_to_resource = self._extract_jid_resource(entry.get(3))
                 body_from = self._extract_jid_username(body.get(2))
                 body_to = self._extract_jid_username(body.get(3))
-                peer_id = self._resolve_peer_from_users(route_from, route_to, body_from, body_to)
+                class_info = self._extract_class_info(entry, body)
+                peer_id = self._resolve_message_peer(
+                    route_from,
+                    route_to,
+                    body_from,
+                    body_to,
+                    class_info,
+                )
                 message = {
                     "from": route_from or body_from,
                     "to": route_to or body_to,
@@ -1216,9 +1282,11 @@ class MSyncClient:
                     "content": text,
                     "timestamp": self._select_timestamp(entry.get(4), meta_timestamp),
                     "message_id": self._select_message_id(entry.get(1), meta.get(5)),
+                    "session_type": "groupchat" if self._is_group_route(
+                        entry.get(2), entry.get(3), body.get(2), body.get(3)
+                    ) else "chat",
                     "history_sync": True,
                 }
-                class_info = self._extract_class_info(entry, body)
                 if class_info:
                     message["class_info"] = class_info
                 messages.append(message)
@@ -1396,6 +1464,22 @@ class MSyncClient:
         self._last_history_subject_acks.append(event)
         return [event]
 
+    def _extract_history_cursor(self, decoded: dict):
+        """提取服务端历史数据帧中的 subject、cursor 和时间戳。"""
+        if not isinstance(decoded, dict) or self._first(decoded.get(8)) != 0:
+            return None
+        meta = self._first(decoded.get(9))
+        if not isinstance(meta, dict):
+            return None
+        cursor = self._first(meta.get(3))
+        timestamp = self._first(meta.get(8))
+        if not isinstance(cursor, int) or not isinstance(timestamp, int):
+            return None
+        subject = self._pending_history_subject_acks.pop(0) if self._pending_history_subject_acks else ""
+        if not subject:
+            return None
+        return {"subject": subject, "cursor": cursor, "timestamp": timestamp}
+
     def _extract_text_push(self, decoded: dict):
         fallback_push = None
         for node, ancestors in self._iter_dict_nodes(decoded):
@@ -1441,10 +1525,31 @@ class MSyncClient:
                     ),
                 }
                 class_info = self._extract_class_info(node, body, ancestors)
+                peer_id = self._resolve_message_peer(
+                    from_user,
+                    to_user,
+                    from_user,
+                    to_user,
+                    class_info,
+                )
+                if self._is_group_route(node.get(2), node.get(3), body.get(2), body.get(3)):
+                    peer_id = to_user or from_user
+                push["peer_id"] = peer_id
+                push["session_type"] = "groupchat" if self._is_group_route(
+                    node.get(2), node.get(3), body.get(2), body.get(3)
+                ) else "chat"
                 if class_info:
                     push["class_info"] = class_info
 
                 if from_user and to_user:
+                    if push["session_type"] == "chat":
+                        logger.info(
+                            "MSync: private message extracted from=%s to=%s peer_id=%s content=%r",
+                            from_user,
+                            to_user,
+                            peer_id,
+                            text,
+                        )
                     return push
                 if fallback_push is None:
                     fallback_push = push
@@ -1489,8 +1594,24 @@ class MSyncClient:
                         self.on_message(event)
 
                 history_summary = self._extract_history_summary(decoded)
-                if history_summary and self.on_message:
-                    self.on_message(history_summary)
+                if history_summary:
+                    if self.on_message:
+                        self.on_message(history_summary)
+                    if self.is_connected():
+                        self._send_history_subject_requests(
+                            item["subject"] for item in history_summary["subjects"]
+                        )
+                    if read_acks:
+                        continue
+
+                history_cursor = self._extract_history_cursor(decoded)
+                if history_cursor:
+                    self.send_history_subject_ack(
+                        history_cursor["subject"],
+                        history_cursor["timestamp"],
+                    )
+                    if self.on_message:
+                        self.on_message({"event": "history_cursor", **history_cursor})
                     if read_acks:
                         continue
 

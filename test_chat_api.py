@@ -27,6 +27,7 @@ from core.msync_client import (
     build_history_open,
     build_history_subject,
     build_history_subject_sync,
+    build_history_subject_ack,
     build_history_sync,
     build_send_message,
     build_receive_ack,
@@ -311,6 +312,14 @@ class ChatAPITests(unittest.TestCase):
             "CABAAEo1EKSYgPqaq6nAFRopEg8zMTM0MzkwMTQ2ODI2MjYaFmNvbmZlcmVuY2UuZWFzZW1vYi5jb21YAA==",
         )
 
+    def test_build_history_subject_ack_matches_captured_frame(self):
+        self.assertEqual(
+            base64.b64encode(
+                build_history_subject_ack("easemob_chat", 1789882565137)
+            ).decode(),
+            "CABAAEodCgIIADIOEgxlYXNlbW9iX2NoYXQ4AUCRhMLqizQ=",
+        )
+
     def test_sockjs_decode_all_splits_multiple_messages(self):
         decoded = sockjs_decode_all('a["QQ==","Qg=="]')
         self.assertEqual(decoded, [b"A", b"B"])
@@ -481,6 +490,30 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["peer_id"], "25278974")
         self.assertEqual(messages[0]["content"], "123")
+
+    def test_extract_text_push_uses_group_room_as_peer(self):
+        client = MSyncClient(app_key="cx-dev#cxstudy")
+        client._username = "25278974"
+        decoded = {
+            9: {
+                4: {
+                    2: {2: "358566812"},
+                    3: {2: "323303876132868", 3: "conference.easemob.com"},
+                    6: {
+                        2: {2: "358566812"},
+                        3: {2: "323303876132868", 3: "conference.easemob.com"},
+                        4: {1: 0, 2: "群消息"},
+                    },
+                }
+            }
+        }
+
+        push = client._extract_text_push(decoded)
+
+        self.assertEqual(push["from"], "358566812")
+        self.assertEqual(push["to"], "323303876132868")
+        self.assertEqual(push["peer_id"], "323303876132868")
+        self.assertEqual(push["session_type"], "groupchat")
 
     def test_extract_read_ack_returns_event_payload(self):
         client = MSyncClient(app_key="cx-dev#cxstudy")
@@ -4315,6 +4348,150 @@ class ChatAPITests(unittest.TestCase):
         self.assertEqual(sessions[0]["subtitle"], "4.03计科2班、区块链1班")
         self.assertEqual(sessions[0]["courseName"], "离散数学（2025-2026-2）")
         self.assertNotIn("subtitle", sessions[1])
+
+    def test_get_message_list_applies_browser_session_top_list(self):
+        response = [
+            _FakeResponse(
+                payload={
+                    "status": "success",
+                    "data": [
+                        {"chatId": "ordinary", "chatName": "普通会话", "isGroup": 0},
+                        {"chatId": "pinned", "chatName": "置顶会话", "isGroup": 1},
+                    ],
+                }
+            ),
+            _FakeResponse(
+                payload={
+                    "data": [
+                        {"sessionId": "pinned", "sort": 1},
+                    ],
+                }
+            ),
+        ]
+        session = _FakeSession(response)
+        api = _FakeChatAPI(
+            session,
+            course_params={
+                "im_tuid": "100",
+                "im_puid": "200",
+                "im_token": "token-1",
+            },
+        )
+
+        sessions = api.get_message_list()
+
+        self.assertEqual([item["chatId"] for item in sessions], ["pinned", "ordinary"])
+        self.assertEqual(session.calls[1]["url"], "https://im.chaoxing.com/webim/apis/message/getSessionTopList")
+        self.assertEqual(session.calls[1]["params"], {"crossOrigin": "true", "puid": "200"})
+
+    def test_get_message_list_initializes_mute_and_encrypt_settings(self):
+        response = [
+            _FakeResponse(
+                payload={
+                    "status": "success",
+                    "data": [
+                        {"chatId": "peer-1", "chatName": "张三", "isGroup": 0},
+                        {"chatId": "group-1", "chatName": "课程群", "isGroup": 1},
+                    ],
+                }
+            ),
+            _FakeResponse(payload={"data": []}),
+            _FakeResponse(payload={"data": [{"user": "100", "value": "ALL"}]}),
+            _FakeResponse(
+                payload={
+                    "result": 1,
+                    "data": {
+                        "list": [
+                            {"chatId": "peer-1", "encryptStr": "enc-peer"},
+                            {"chatId": "group-1", "encryptStr": "enc-group"},
+                        ]
+                    },
+                }
+            ),
+        ]
+        session = _FakeSession(response)
+        api = _FakeChatAPI(
+            session,
+            course_params={
+                "im_tuid": "100",
+                "im_puid": "200",
+                "im_token": "token-1",
+            },
+        )
+
+        sessions = api.get_message_list()
+
+        self.assertEqual(session.calls[2]["url"], "https://a3-vip6.easemob.com/cx-dev/cxstudy/users/100/notification/mute/type")
+        self.assertEqual(session.calls[2]["params"]["limit"], 100)
+        self.assertEqual(session.calls[3]["url"], "https://im.chaoxing.com/webim/message/getEncryptStrList")
+        self.assertEqual(
+            json.loads(session.calls[3]["data"]),
+            {"chatList": [{"chatId": "peer-1", "isGroup": False}, {"chatId": "group-1", "isGroup": True}]},
+        )
+        self.assertEqual(api.session_manager.course_params["im_notification_mute_types"], [{"user": "100", "value": "ALL"}])
+        self.assertEqual(api.session_manager.course_params["im_encrypt_str_map"], {"peer-1": "enc-peer", "group-1": "enc-group"})
+        self.assertEqual([item["encryptStr"] for item in sessions], ["enc-peer", "enc-group"])
+
+    def test_get_message_list_copies_private_profile_avatar_to_chat_icon(self):
+        response = [
+            _FakeResponse(
+                payload={
+                    "status": "success",
+                    "data": {
+                        "channel_infos": [{
+                            "channel_id": "peer-1-channel",
+                            "session_type": "chat",
+                            "session_to": "peer-1",
+                            "meta": {"payload": "{}"},
+                        }]
+                    },
+                }
+            ),
+            _FakeResponse(payload={"data": []}),
+            _FakeResponse(payload={"data": []}),
+            _FakeResponse(payload={"result": 1, "data": {"list": []}}),
+        ]
+        session = _FakeSession(response)
+        api = _FakeChatAPI(
+            session,
+            course_params={"im_tuid": "100", "im_puid": "200", "im_token": "token-1"},
+        )
+        api.get_im_user_info_by_tuid = lambda target_tuid: {"name": "张三", "icon": "https://img.example/avatar.png"}
+
+        sessions = api.get_message_list()
+
+        self.assertEqual(sessions[0]["chatName"], "张三")
+        self.assertEqual(sessions[0]["avatar_url"], "https://img.example/avatar.png")
+
+    def test_get_message_list_enriches_non_group_session_without_is_private_flag(self):
+        response = [
+            _FakeResponse(
+                payload={
+                    "status": "success",
+                    "data": {
+                        "channel_infos": [{
+                            "channel_id": "peer-1-channel",
+                            "session_type": "chat",
+                            "session_to": "peer-1",
+                            "meta": {"payload": "{}"},
+                        }]
+                    },
+                }
+            ),
+            _FakeResponse(payload={"data": []}),
+            _FakeResponse(payload={"data": []}),
+            _FakeResponse(payload={"result": 1, "data": {"list": []}}),
+        ]
+        session = _FakeSession(response)
+        api = _FakeChatAPI(
+            session,
+            course_params={"im_tuid": "100", "im_puid": "200", "im_token": "token-1"},
+        )
+        api.get_im_user_info_by_tuid = lambda target_tuid: {"name": "张三", "pic": "https://img.example/avatar.png"}
+
+        sessions = api.get_message_list()
+
+        self.assertEqual(sessions[0]["avatar_url"], "https://img.example/avatar.png")
 
     def test_refresh_msync_info_calls_ws_info_endpoint(self):
         response = _FakeResponse(payload={"websocket": True, "cookie_needed": False})

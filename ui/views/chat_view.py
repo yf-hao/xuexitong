@@ -3017,6 +3017,8 @@ class ChatView(QWidget):
 
     def _on_msync_message(self, msg: dict):
         """MSync 收到实时消息回调"""
+        if not isinstance(msg, dict):
+            return
         if msg.get("event") == "read_ack":
             self._on_read_ack(msg)
             return
@@ -3031,25 +3033,45 @@ class ChatView(QWidget):
                     )
             return
 
+        content = str(msg.get("content") or "")
+        if not content.strip():
+            return
+
         peer_id = str(msg.get("peer_id") or self._resolve_message_peer_id(msg) or "")
+        current_tuid = str(self.crawler.session_manager.course_params.get("im_tuid", "") or "")
+        from_user = str(msg.get("from", "") or "")
+        to_user = str(msg.get("to", "") or "")
+        if (
+            peer_id == current_tuid
+            and from_user == current_tuid
+            and to_user == current_tuid
+            and self._current_target_id
+            and self._current_target_id != current_tuid
+        ):
+            peer_id = str(self._current_target_id)
+        logger.info(
+            "ChatView: realtime message received from=%s to=%s peer_id=%s session_type=%s content=%r",
+            msg.get("from", ""),
+            msg.get("to", ""),
+            peer_id,
+            msg.get("session_type", "chat"),
+            msg.get("content", ""),
+        )
         try:
             self._store_class_info_metadata(peer_id, msg.get("class_info"), allow_avatar_update=False)
         except TypeError:
             self._store_class_info_metadata(peer_id, msg.get("class_info"))
-        from_user = str(msg.get("from", "") or "")
-        content = msg.get("content", "")
         timestamp = msg.get("timestamp", 0)
-        current_tuid = str(self.crawler.session_manager.course_params.get("im_tuid", "") or "")
         is_self = from_user == current_tuid and not ChatView._is_remote_self_device_message(self, msg, current_tuid)
         sender_name = "我" if is_self else (
             self._current_target_name if self._is_current_conversation_message(peer_id, msg) else (peer_id or from_user)
         )
-        conversation_key = self._conversation_key(
-            peer_id=peer_id,
-            history_id=self._history_id_by_peer.get(peer_id, ""),
-        )
+        history_id = self._history_id_by_peer.get(peer_id, "")
+        if peer_id == str(self._current_target_id or "") and self._current_history_id:
+            history_id = self._current_history_id
+        conversation_key = self._conversation_key(peer_id=peer_id, history_id=history_id)
         appended = self._append_cached_message(
-            sender_id=peer_id or from_user,
+            sender_id=current_tuid if is_self else (peer_id or from_user),
             sender_name=sender_name,
             content=content,
             is_self=is_self,
