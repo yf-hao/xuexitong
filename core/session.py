@@ -18,10 +18,16 @@ class ChaoxingSession:
         self.password = password
         self.session = requests.Session()
         self.session.trust_env = False  # Disable system proxies to avoid ProxyError
+        self._configure_session(self.session)
         self.menu_links = {}
         self.course_params = {} # Store extracted course parameters
         self.logged_in = False
         self._initialized = True
+
+    @staticmethod
+    def _configure_session(session):
+        # Avoid reusing server-side idle connections after the app has been inactive.
+        session.headers.update({"Connection": "close"})
 
     def login(self):
         if not self.logged_in:
@@ -33,6 +39,7 @@ class ChaoxingSession:
             chaoxing.get_login_page()
             chaoxing.login()
             self.session = chaoxing.session
+            self._configure_session(self.session)
             self.logged_in = True
             
             # Extract fid from cookies if available to replace the default
