@@ -10,7 +10,75 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor
 from ui.dialogs.homework_publish_dialog import HomeworkPublishDialog
-from ui.theme import apply_theme_stylesheet, get_theme_palette
+from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette
+
+def _homework_message_box_style(palette) -> str:
+    return f"""
+        QMessageBox {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+        }}
+        QMessageBox QLabel {{
+            color: {palette.text};
+        }}
+        QMessageBox QPushButton {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: 1px solid {palette.accent};
+            border-radius: 4px;
+            padding: 6px 16px;
+            min-width: 64px;
+            font-weight: bold;
+        }}
+        QMessageBox QPushButton:hover {{
+            background-color: {palette.accent_hover};
+            border: 1px solid {palette.accent_hover};
+        }}
+    """
+
+
+def _homework_input_dialog_style(palette) -> str:
+    return f"""
+        QInputDialog {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+        }}
+        QInputDialog QLabel {{
+            color: {palette.text};
+        }}
+        QInputDialog QLineEdit {{
+            background-color: {palette.input_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            padding: 6px 8px;
+        }}
+        QInputDialog QLineEdit:focus {{
+            border: 1px solid {palette.accent};
+        }}
+        QInputDialog QDialogButtonBox QPushButton {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            padding: 6px 16px;
+            min-width: 64px;
+            font-weight: bold;
+        }}
+        QInputDialog QDialogButtonBox QPushButton:hover {{
+            background-color: {palette.hover_bg};
+            border: 1px solid {palette.accent};
+        }}
+        QInputDialog QDialogButtonBox QPushButton:default {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: 1px solid {palette.accent};
+        }}
+        QInputDialog QDialogButtonBox QPushButton:default:hover {{
+            background-color: {palette.accent_hover};
+            color: #ffffff;
+        }}
+    """
 
 
 class FolderSelectDialog(QDialog):
@@ -219,20 +287,21 @@ class HomeworkLibraryView(QWidget):
         self.create_in_folder_btn = QPushButton("在此创建作业")
         self.create_in_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.create_in_folder_btn.setMinimumHeight(28)
-        apply_theme_stylesheet(self.create_in_folder_btn, """
-            QPushButton {
-                background-color: #28a745;
-                color: white;
+        apply_theme_stylesheet(self.create_in_folder_btn, lambda palette: f"""
+            QPushButton {{
+                background-color: {palette.success};
+                color: #ffffff;
                 border: none;
                 border-radius: 4px;
                 padding: 5px 15px;
                 font-size: 13px;
                 font-weight: bold;
                 margin-right: 10px;
-            }
-            QPushButton:hover {
-                background-color: #218838;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {palette.success_hover};
+                color: #ffffff;
+            }}
         """)
         self.create_in_folder_btn.clicked.connect(self.on_create_in_current_folder)
         self.create_in_folder_btn.setVisible(False)
@@ -317,6 +386,12 @@ class HomeworkLibraryView(QWidget):
             }
             QTreeWidget::item:hover {
                 background-color: #2a2d2e;
+            }
+            QTreeWidget::item:selected:hover {
+                background-color: #094771;
+                color: #ffffff;
+                border: none;
+                border-bottom: 1px solid #3e3e42;
             }
             QHeaderView::section {
                 background-color: #333333;
@@ -577,22 +652,24 @@ class HomeworkLibraryView(QWidget):
 
         publish_btn = QPushButton("发布")
         publish_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        apply_theme_stylesheet(publish_btn, """
-            QPushButton {
-                background-color: #28a745;
-                color: white;
+        apply_theme_stylesheet(publish_btn, lambda palette: f"""
+            QPushButton {{
+                background-color: {palette.success};
+                color: #ffffff;
                 border: none;
                 border-radius: 4px;
                 padding: 4px 10px;
                 font-size: 12px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #218838;
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:hover {{
+                background-color: {palette.success_hover};
+                color: #ffffff;
+            }}
+            QPushButton:pressed {{
                 background-color: #1e7e34;
-            }
+                color: #ffffff;
+            }}
         """)
         publish_btn.clicked.connect(lambda checked=False, data=dict(work_data): self.publish_work(data))
         layout.addWidget(publish_btn)
@@ -843,13 +920,19 @@ class HomeworkLibraryView(QWidget):
             QMessageBox.warning(self, "错误", "无法获取课程信息", QMessageBox.StandardButton.Ok)
             return
         
-        reply = QMessageBox.warning(
-            self,
-            "确认删除",
-            f"⚠️ 确定要删除作业「{title}」吗？\n\n此操作将把作业移到回收站！",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+        delete_dialog = QMessageBox(self)
+        delete_dialog.setIcon(QMessageBox.Icon.Warning)
+        delete_dialog.setWindowTitle("确认删除")
+        delete_dialog.setText(
+            f"⚠️ 确定要删除作业「{title}」吗？\n\n此操作将把作业移到回收站！"
         )
+        delete_dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        delete_dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        apply_theme_stylesheet(delete_dialog, _homework_message_box_style)
+        bind_theme_tree(delete_dialog)
+        reply = delete_dialog.exec()
         
         if reply == QMessageBox.StandardButton.Yes:
             self.status_update.emit(f"正在删除作业「{title}」...")
@@ -861,20 +944,24 @@ class HomeworkLibraryView(QWidget):
             )
             
             if result.get('status'):
-                QMessageBox.information(
-                    self,
-                    "删除成功",
-                    f"✅ 作业「{title}」已移到回收站！",
-                    QMessageBox.StandardButton.Ok
-                )
+                success_dialog = QMessageBox(self)
+                success_dialog.setIcon(QMessageBox.Icon.Information)
+                success_dialog.setWindowTitle("删除成功")
+                success_dialog.setText(f"✅ 作业「{title}」已移到回收站！")
+                success_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+                apply_theme_stylesheet(success_dialog, _homework_message_box_style)
+                bind_theme_tree(success_dialog)
+                success_dialog.exec()
                 self.load_library()  # 刷新列表
             else:
-                QMessageBox.warning(
-                    self,
-                    "删除失败",
-                    f"❌ 删除失败: {result.get('msg', '未知错误')}",
-                    QMessageBox.StandardButton.Ok
-                )
+                failure_dialog = QMessageBox(self)
+                failure_dialog.setIcon(QMessageBox.Icon.Warning)
+                failure_dialog.setWindowTitle("删除失败")
+                failure_dialog.setText(f"❌ 删除失败: {result.get('msg', '未知错误')}")
+                failure_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+                apply_theme_stylesheet(failure_dialog, _homework_message_box_style)
+                bind_theme_tree(failure_dialog)
+                failure_dialog.exec()
     
     def publish_work(self, work_data: dict):
         """发布作业"""
@@ -928,13 +1015,15 @@ class HomeworkLibraryView(QWidget):
             return
 
         # 弹出输入对话框
-        folder_name, ok = QInputDialog.getText(
-            self,
-            "新建文件夹",
-            "请输入文件夹名称:",
-            QLineEdit.EchoMode.Normal,
-            ""
-        )
+        folder_dialog = QInputDialog(self)
+        folder_dialog.setWindowTitle("新建文件夹")
+        folder_dialog.setLabelText("请输入文件夹名称:")
+        folder_dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        folder_dialog.setTextEchoMode(QLineEdit.EchoMode.Normal)
+        apply_theme_stylesheet(folder_dialog, _homework_input_dialog_style)
+        bind_theme_tree(folder_dialog)
+        ok = folder_dialog.exec() == QDialog.DialogCode.Accepted
+        folder_name = folder_dialog.textValue()
 
         if not ok or not folder_name:
             return

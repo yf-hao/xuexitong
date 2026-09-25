@@ -81,15 +81,23 @@ def _homework_tree_style(palette) -> str:
             border-bottom: 1px solid {palette.border_strong};
         }}
         QTreeWidget::item:selected {{
-            background-color: {palette.hover_bg};
-            color: {palette.text};
+            background-color: {palette.accent};
+            color: #ffffff;
             border: none;
             border-bottom: 1px solid {palette.border_strong};
         }}
         QTreeWidget::item:hover {{
             background-color: {palette.hover_bg};
         }}
+        QTreeWidget::item:selected:hover {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: none;
+            border-bottom: 1px solid {palette.border_strong};
+        }}
         QTreeWidget::item:selected:active {{
+            background-color: {palette.accent};
+            color: #ffffff;
             border: none;
         }}
         QHeaderView::section {{
@@ -959,13 +967,56 @@ class HomeworkCreateView(QWidget):
         default_title = f"新建作业{datetime.now().strftime('%Y%m%d%H%M%S')}"
         
         # 弹出对话框让用户输入作业名称
-        title, ok = QInputDialog.getText(
-            self,
-            "创建作业",
-            f"请输入作业名称（已选 {len(selected_question_data)} 道题目）：",
-            QLineEdit.EchoMode.Normal,
-            default_title
-        )
+        title_dialog = QInputDialog(self)
+        title_dialog.setWindowTitle("创建作业")
+        title_dialog.setLabelText(f"请输入作业名称（已选 {len(selected_question_data)} 道题目）：")
+        title_dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        title_dialog.setTextEchoMode(QLineEdit.EchoMode.Normal)
+        title_dialog.setTextValue(default_title)
+        apply_theme_stylesheet(title_dialog, lambda palette: f"""
+            QInputDialog {{
+                background-color: {palette.panel_bg};
+                color: {palette.text};
+            }}
+            QInputDialog QLabel {{
+                color: {palette.text};
+            }}
+            QInputDialog QLineEdit {{
+                background-color: {palette.input_bg};
+                color: {palette.text};
+                border: 1px solid {palette.border_strong};
+                border-radius: 4px;
+                padding: 6px 8px;
+            }}
+            QInputDialog QLineEdit:focus {{
+                border: 1px solid {palette.accent};
+            }}
+            QInputDialog QDialogButtonBox QPushButton {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text};
+                border: 1px solid {palette.border_strong};
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-width: 64px;
+                font-weight: bold;
+            }}
+            QInputDialog QDialogButtonBox QPushButton:hover {{
+                background-color: {palette.hover_bg};
+                border: 1px solid {palette.accent};
+            }}
+            QInputDialog QDialogButtonBox QPushButton:default {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border: 1px solid {palette.accent};
+            }}
+            QInputDialog QDialogButtonBox QPushButton:default:hover {{
+                background-color: {palette.accent_hover};
+                color: #ffffff;
+            }}
+        """)
+        bind_theme_tree(title_dialog)
+        ok = title_dialog.exec() == QDialog.DialogCode.Accepted
+        title = title_dialog.textValue()
         
         if not ok or not title:
             # 用户取消或未输入
@@ -1013,12 +1064,37 @@ class HomeworkCreateView(QWidget):
                 target_folder_id = self.target_directory_id
                 
                 # 显示成功对话框
-                QMessageBox.information(
-                    self,
-                    "创建成功",
-                    f"✅ 作业「{title}」创建成功！\n\n已选择 {len(selected_question_data)} 道题目",
-                    QMessageBox.StandardButton.Ok
+                success_dialog = QMessageBox(self)
+                success_dialog.setIcon(QMessageBox.Icon.Information)
+                success_dialog.setWindowTitle("创建成功")
+                success_dialog.setText(
+                    f"✅ 作业「{title}」创建成功！\n\n已选择 {len(selected_question_data)} 道题目"
                 )
+                success_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+                apply_theme_stylesheet(success_dialog, lambda palette: f"""
+                    QMessageBox {{
+                        background-color: {palette.panel_bg};
+                        color: {palette.text};
+                    }}
+                    QMessageBox QLabel {{
+                        color: {palette.text};
+                    }}
+                    QMessageBox QPushButton {{
+                        background-color: {palette.accent};
+                        color: #ffffff;
+                        border: 1px solid {palette.accent};
+                        border-radius: 4px;
+                        padding: 6px 18px;
+                        min-width: 64px;
+                        font-weight: bold;
+                    }}
+                    QMessageBox QPushButton:hover {{
+                        background-color: {palette.accent_hover};
+                        border: 1px solid {palette.accent_hover};
+                    }}
+                """)
+                bind_theme_tree(success_dialog)
+                success_dialog.exec()
                 
                 self.status_update.emit(f"✅ 作业「{title}」创建成功！")
                 # 清空已选题目
