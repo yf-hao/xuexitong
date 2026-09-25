@@ -7,7 +7,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, QEvent, QSettings, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QDialog, QInputDialog, QLineEdit, QMessageBox, QWidget
 
 
 THEME_SETTING_KEY = "ui/theme_mode"
@@ -165,6 +165,91 @@ def apply_application_theme(app: QApplication, mode: str | None = None):
     qt_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
     qt_palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(palette.text_muted))
     app.setPalette(qt_palette)
+    app.setStyleSheet(_application_dialog_stylesheet(palette))
+
+
+def _application_dialog_stylesheet(palette: ThemePalette) -> str:
+    return f"""
+        QMessageBox, QInputDialog {{
+            background-color: {palette.panel_bg};
+            color: {palette.text};
+        }}
+        QMessageBox QLabel, QInputDialog QLabel {{
+            color: {palette.text};
+        }}
+        QInputDialog QLineEdit {{
+            background-color: {palette.input_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            padding: 6px 8px;
+        }}
+        QInputDialog QLineEdit:focus {{
+            border: 1px solid {palette.accent};
+        }}
+        QMessageBox QPushButton, QInputDialog QDialogButtonBox QPushButton {{
+            background-color: {palette.panel_alt_bg};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 4px;
+            padding: 6px 16px;
+            min-width: 64px;
+            font-weight: bold;
+        }}
+        QMessageBox QPushButton:hover, QInputDialog QDialogButtonBox QPushButton:hover {{
+            background-color: {palette.hover_bg};
+            border: 1px solid {palette.accent};
+        }}
+        QMessageBox QPushButton:default, QInputDialog QDialogButtonBox QPushButton:default {{
+            background-color: {palette.accent};
+            color: #ffffff;
+            border: 1px solid {palette.accent};
+        }}
+        QMessageBox QPushButton:default:hover, QInputDialog QDialogButtonBox QPushButton:default:hover {{
+            background-color: {palette.accent_hover};
+            color: #ffffff;
+            border: 1px solid {palette.accent_hover};
+        }}
+    """
+
+
+def themed_message_box(
+    parent: QWidget,
+    title: str,
+    text: str,
+    icon: QMessageBox.Icon = QMessageBox.Icon.Information,
+    buttons: QMessageBox.StandardButton = QMessageBox.StandardButton.Ok,
+    default_button: QMessageBox.StandardButton | None = None,
+) -> QMessageBox.StandardButton:
+    """显示使用当前主题的消息框，避免原生按钮在亮色模式下不可见。"""
+    dialog = QMessageBox(parent)
+    dialog.setIcon(icon)
+    dialog.setWindowTitle(title)
+    dialog.setText(text)
+    dialog.setStandardButtons(buttons)
+    if default_button is not None:
+        dialog.setDefaultButton(default_button)
+    dialog.setStyleSheet(_application_dialog_stylesheet(get_theme_palette()))
+    return dialog.exec()
+
+
+def themed_text_input(
+    parent: QWidget,
+    title: str,
+    label: str,
+    text: str = "",
+    echo_mode: QLineEdit.EchoMode = QLineEdit.EchoMode.Normal,
+) -> tuple[str, bool]:
+    """显示使用当前主题的文本输入框，并返回输入文本和确认状态。"""
+    dialog = QInputDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setLabelText(label)
+    dialog.setInputMode(QInputDialog.InputMode.TextInput)
+    dialog.setTextEchoMode(echo_mode)
+    dialog.setTextValue(text)
+    dialog.setStyleSheet(_application_dialog_stylesheet(get_theme_palette()))
+    accepted = dialog.exec() == QDialog.DialogCode.Accepted
+    return dialog.textValue(), accepted
 
 
 _DECLARATION_REPLACEMENTS = [

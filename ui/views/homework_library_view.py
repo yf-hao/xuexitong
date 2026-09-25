@@ -10,7 +10,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor
 from ui.dialogs.homework_publish_dialog import HomeworkPublishDialog
-from ui.theme import apply_theme_stylesheet, bind_theme_tree, get_theme_palette
+from ui.theme import (
+    apply_theme_stylesheet,
+    bind_theme_tree,
+    get_theme_palette,
+    themed_message_box,
+    themed_text_input,
+)
 
 def _homework_message_box_style(palette) -> str:
     return f"""
@@ -685,19 +691,19 @@ class HomeworkLibraryView(QWidget):
             return
         
         # 弹出输入对话框
-        new_title, ok = QInputDialog.getText(
+        new_title, ok = themed_text_input(
             self,
             "重命名作业",
             "请输入新的作业名称:",
+            old_title,
             QLineEdit.EchoMode.Normal,
-            old_title
         )
         
         if not ok or not new_title:
             return
         
         if new_title == old_title:
-            QMessageBox.information(self, "提示", "作业名称未改变", QMessageBox.StandardButton.Ok)
+            themed_message_box(self, "提示", "作业名称未改变")
             return
         
         self.status_update.emit(f"正在重命名作业...")
@@ -712,19 +718,19 @@ class HomeworkLibraryView(QWidget):
         )
         
         if result.get('status'):
-            QMessageBox.information(
+            themed_message_box(
                 self,
                 "重命名成功",
                 f"✅ 作业已重命名为「{new_title}」",
-                QMessageBox.StandardButton.Ok
+                QMessageBox.Icon.Information,
             )
             self.load_library()  # 刷新列表
         else:
-            QMessageBox.warning(
+            themed_message_box(
                 self,
                 "重命名失败",
                 f"❌ 重命名失败: {result.get('msg', '未知错误')}",
-                QMessageBox.StandardButton.Ok
+                QMessageBox.Icon.Warning,
             )
     
     def show_context_menu(self, position):
@@ -877,12 +883,13 @@ class HomeworkLibraryView(QWidget):
             QMessageBox.warning(self, "错误", "无法获取课程信息", QMessageBox.StandardButton.Ok)
             return
         
-        reply = QMessageBox.question(
+        reply = themed_message_box(
             self,
             "确认复制",
             f"确定要复制作业「{title}」吗？\n\n作业将被复制到当前目录。",
+            QMessageBox.Icon.Question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.No,
         )
         
         if reply == QMessageBox.StandardButton.Yes:
@@ -1075,7 +1082,7 @@ class HomeworkLibraryView(QWidget):
             return
 
         if new_name == old_name:
-            QMessageBox.information(self, "提示", "文件夹名称未改变", QMessageBox.StandardButton.Ok)
+            themed_message_box(self, "提示", "文件夹名称未改变")
             return
 
         self.status_update.emit(f"正在重命名文件夹...")
@@ -1083,19 +1090,19 @@ class HomeworkLibraryView(QWidget):
         result = self.crawler.rename_folder(folder_id, new_name, self.current_course_id)
 
         if result.get('status'):
-            QMessageBox.information(
+            themed_message_box(
                 self,
                 "重命名成功",
                 f"✅ 文件夹已重命名为「{new_name}」",
-                QMessageBox.StandardButton.Ok
+                QMessageBox.Icon.Information,
             )
             self.load_library()
         else:
-            QMessageBox.warning(
+            themed_message_box(
                 self,
                 "重命名失败",
                 f"❌ 重命名失败: {result.get('msg', '未知错误')}",
-                QMessageBox.StandardButton.Ok
+                QMessageBox.Icon.Warning,
             )
 
     def move_folder(self, folder_data: dict):
