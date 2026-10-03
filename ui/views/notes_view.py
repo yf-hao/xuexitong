@@ -394,7 +394,7 @@ class ImageResizeOverlay(QWidget):
             self._start_global_left = overlay_global.x() + 3
             event.accept()
             return
-        event.ignore()
+        event.accept()
 
     def mouseMoveEvent(self, event):
         if not self._dragging:
@@ -419,6 +419,12 @@ class ImageResizeOverlay(QWidget):
             self._start_global_pos = None
             self._start_global_left = None
             event.accept()
+
+    def leaveEvent(self, event):
+        self.unsetCursor()
+        if self.parentWidget() is not None:
+            self.parentWidget().setCursor(Qt.CursorShape.IBeamCursor)
+        super().leaveEvent(event)
 
 
 class MarkdownTextEdit(QTextEdit):
@@ -450,7 +456,10 @@ class MarkdownTextEdit(QTextEdit):
             following.setPosition(cursor.position() + 1)
             candidates.append(following)
         for candidate in candidates:
-            if candidate.charFormat().isImageFormat():
+            if (
+                candidate.position() < self.document().characterCount() - 1
+                and candidate.charFormat().isImageFormat()
+            ):
                 width, height = self._image_size(candidate)
                 image_x, image_y, image_width, image_height = self._image_viewport_rect(
                     candidate, width, height
@@ -528,7 +537,13 @@ class MarkdownTextEdit(QTextEdit):
         image_format.setWidth(width)
         image_format.setHeight(height)
         image_position = cursor.position()
-        cursor.setPosition(image_position + 1, QTextCursor.MoveMode.KeepAnchor)
+        last_position = self.document().characterCount() - 1
+        if image_position >= last_position:
+            return
+        cursor.setPosition(
+            min(image_position + 1, last_position),
+            QTextCursor.MoveMode.KeepAnchor,
+        )
         cursor.setCharFormat(image_format)
         cursor.clearSelection()
         cursor.setPosition(image_position)
@@ -538,12 +553,53 @@ class MarkdownTextEdit(QTextEdit):
     def _set_image_alignment(self, alignment):
         if self._selected_image_cursor is None:
             return
-        cursor = QTextCursor(self._selected_image_cursor)
+        cursor = self._isolate_image_block(self._selected_image_cursor)
         block_format = cursor.blockFormat()
         block_format.setAlignment(alignment)
         cursor.setBlockFormat(block_format)
         self._selected_image_cursor = cursor
         self._show_image_editor(cursor)
+
+    def _isolate_image_block(self, image_cursor):
+        cursor = QTextCursor(image_cursor)
+        document = self.document()
+        image_position = (
+            cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+        )
+        cursor.setPosition(image_position)
+        block = cursor.block()
+        block_start = block.position()
+        block_end = block_start + block.length() - 1
+
+        if image_position + 1 < block_end:
+            split_after = QTextCursor(document)
+            split_after.setPosition(image_position + 1)
+            split_after.insertBlock()
+        if image_position > block_start:
+            split_before = QTextCursor(document)
+            split_before.setPosition(image_position)
+            split_before.insertBlock()
+            image_position += 1
+
+        image_position = min(image_position, document.characterCount() - 2)
+        image_block_cursor = QTextCursor(document)
+        image_block_cursor.setPosition(max(0, image_position))
+        image_block = image_block_cursor.block()
+        if not image_block.next().isValid():
+            split_after = QTextCursor(document)
+            split_after.setPosition(image_position + 1)
+            split_after.insertBlock()
+
+        for text_block in (image_block.previous(), image_block.next()):
+            if text_block.isValid():
+                text_cursor = QTextCursor(text_block)
+                text_format = text_block.blockFormat()
+                text_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                text_cursor.setBlockFormat(text_format)
+
+        isolated_cursor = QTextCursor(document)
+        isolated_cursor.setPosition(max(0, image_position))
+        return isolated_cursor
 
     def _delete_selected_image(self):
         if self._selected_image_cursor is None:
@@ -580,6 +636,10 @@ class MarkdownTextEdit(QTextEdit):
                 if image_cursor is not None else Qt.CursorShape.IBeamCursor
             )
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+        super().leaveEvent(event)
 
     def contextMenuEvent(self, event):
         image_cursor = self._image_cursor_at(event.pos())
@@ -1159,6 +1219,9 @@ class NotesView(QWidget):
         cursor = self._find_text_cursor(content_edit, marker)
         if cursor is None:
             return
+        marker_end = cursor.selectionEnd()
+        editor_cursor = content_edit.textCursor()
+        cursor_is_at_marker = editor_cursor.position() == marker_end
         cursor.removeSelectedText()
         image = QImage.fromData(image_data["remote_image_bytes"])
         if image.isNull():
@@ -1177,7 +1240,15 @@ class NotesView(QWidget):
         display_height = image.height() * display_width / image.width()
         image_format.setWidth(display_width)
         image_format.setHeight(display_height)
+        image_position = cursor.position()
         cursor.insertImage(image_format)
+        image_cursor = QTextCursor(content_edit.document())
+        image_cursor.setPosition(image_position)
+        image_cursor = content_edit._isolate_image_block(image_cursor)
+        if cursor_is_at_marker:
+            following_block = image_cursor.block().next()
+            if following_block.isValid():
+                content_edit.setTextCursor(QTextCursor(following_block))
 
     def _handle_image_upload_failure(self, content_edit, marker, message):
         cursor = self._find_text_cursor(content_edit, marker)
