@@ -6,14 +6,16 @@ import uuid
 from datetime import datetime
 from html import unescape
 
-from PyQt6.QtCore import QBuffer, QIODevice, QThread, QTimer, QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    QBuffer, QIODevice, QPoint, QThread, QTimer, QSize, Qt, QUrl, pyqtSignal,
+)
 from PyQt6.QtGui import (
-    QAction, QFont, QImage, QTextCharFormat, QTextCursor, QTextDocument,
-    QTextImageFormat,
+    QAction, QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QPen,
+    QTextCharFormat, QTextCursor, QTextDocument, QTextImageFormat,
 )
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QButtonGroup, QLineEdit, QMessageBox, QSpinBox, QTabWidget, QTextEdit,
+    QButtonGroup, QFrame, QLineEdit, QMessageBox, QSpinBox, QTabWidget, QTextEdit,
     QMenu, QToolBar, QVBoxLayout, QWidget,
 )
 
@@ -340,12 +342,307 @@ class NoteCard(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
+class ImageResizeOverlay(QWidget):
+    """Draw an image selection frame and provide a bottom-right resize handle."""
+
+    resized = pyqtSignal(int, int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self._dragging = False
+        self._start_pos = None
+        self._start_global_pos = None
+        self._start_global_left = None
+        self._start_width = 0
+        self._start_height = 0
+        self._handle_size = 16
+
+    def set_image_size(self, width, height):
+        self._start_width = max(1, int(width))
+        self._start_height = max(1, int(height))
+        self.update()
+
+    def _handle_rect(self):
+        size = self._handle_size
+        return self.rect().adjusted(
+            self.width() - size - 1,
+            self.height() - size - 1,
+            -1,
+            -1,
+        )
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#007acc"), 1, Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.setBrush(QColor("#007acc"))
+        painter.drawRect(self._handle_rect())
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._handle_rect().contains(event.position().toPoint()):
+            self._dragging = True
+            self._start_pos = event.position().toPoint()
+            self._start_global_pos = event.globalPosition().toPoint()
+            overlay_global = self.mapToGlobal(QPoint(0, 0))
+            self._start_global_left = overlay_global.x() + 3
+            event.accept()
+            return
+        event.ignore()
+
+    def mouseMoveEvent(self, event):
+        if not self._dragging:
+            self.setCursor(
+                Qt.CursorShape.SizeFDiagCursor
+                if self._handle_rect().contains(event.position().toPoint())
+                else Qt.CursorShape.PointingHandCursor
+            )
+            return
+        if not self._dragging or self._start_global_pos is None:
+            return
+        point = event.globalPosition().toPoint()
+        width = max(80, point.x() - (self._start_global_left or point.x()))
+        height = max(40, round(width * self._start_height / self._start_width))
+        self.resized.emit(width, height, point.x())
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self._start_pos = None
+            self._start_global_pos = None
+            self._start_global_left = None
+            event.accept()
+
+
 class MarkdownTextEdit(QTextEdit):
     """提供 Markdown 标题的即时转换。"""
 
     HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
     HEADING_SIZES = {1: 22, 2: 18, 3: 16, 4: 15, 5: 14, 6: 14}
+    COMPOSER_TITLE_SIZE = 18
     image_paste_requested = pyqtSignal(bytes)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._selected_image_cursor = None
+        self._image_overlay = ImageResizeOverlay(self.viewport())
+        self._image_overlay.hide()
+        self._image_overlay.resized.connect(self._resize_selected_image)
+
+    def _image_cursor_at(self, position):
+        cursor = self.cursorForPosition(position)
+        candidates = []
+        if cursor.position() > 0:
+            previous = QTextCursor(cursor)
+            previous.setPosition(cursor.position() - 1)
+            candidates.append(previous)
+        if cursor.charFormat().isImageFormat():
+            candidates.append(cursor)
+        if cursor.position() < self.document().characterCount() - 1:
+            following = QTextCursor(cursor)
+            following.setPosition(cursor.position() + 1)
+            candidates.append(following)
+        for candidate in candidates:
+            if candidate.charFormat().isImageFormat():
+                width, height = self._image_size(candidate)
+                image_x, image_y, image_width, image_height = self._image_viewport_rect(
+                    candidate, width, height
+                )
+                if (
+                    image_x <= position.x() <= image_x + image_width
+                    and image_y <= position.y() <= image_y + image_height
+                ):
+                    return candidate
+        return None
+
+    @staticmethod
+    def _image_size(cursor):
+        image_format = cursor.charFormat().toImageFormat()
+        width = image_format.width()
+        height = image_format.height()
+        if width > 0 and height > 0:
+            return width, height
+        return 320, 180
+
+    def _image_viewport_rect(self, cursor, width, height):
+        block = cursor.block()
+        layout = block.layout()
+        block_rect = self.document().documentLayout().blockBoundingRect(block)
+        position_in_block = cursor.position() - block.position()
+        line = layout.lineForTextPosition(max(0, position_in_block))
+        if not line.isValid():
+            cursor_rect = self.cursorRect(cursor)
+            return cursor_rect.x(), cursor_rect.y(), width, height
+
+        cursor_x = line.cursorToX(max(0, position_in_block))
+        if isinstance(cursor_x, tuple):
+            cursor_x = cursor_x[0]
+        image_x = line.x() + cursor_x
+        image_y = block_rect.y() + line.y() + line.ascent() - height
+        offset_x = self.horizontalScrollBar().value()
+        offset_y = self.verticalScrollBar().value()
+        return image_x - offset_x, image_y - offset_y, width, height
+
+    def _show_image_editor(self, cursor):
+        self._selected_image_cursor = QTextCursor(cursor)
+        width, height = self._image_size(cursor)
+        image_x, image_y, image_width, image_height = self._image_viewport_rect(
+            cursor, width, height
+        )
+        self._image_overlay.set_image_size(width, height)
+        self._image_overlay.setGeometry(
+            round(image_x) - 3,
+            round(image_y) - 3,
+            round(image_width) + 6,
+            round(image_height) + 6,
+        )
+        self._image_overlay.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._image_overlay.show()
+        self._image_overlay.raise_()
+
+    def _hide_image_editor(self):
+        self._selected_image_cursor = None
+        self._image_overlay.hide()
+
+    def _composer_separator_y(self):
+        first_block = self.document().firstBlock()
+        second_block = first_block.next()
+        if second_block.isValid():
+            second_rect = self.cursorRect(QTextCursor(second_block))
+            return second_rect.top() - 4
+        first_rect = self.cursorRect(QTextCursor(first_block))
+        return first_rect.top() + QFontMetrics(self.font()).height() + 8
+
+    def _resize_selected_image(self, width, height, _mouse_x=None):
+        if self._selected_image_cursor is None:
+            return
+        cursor = QTextCursor(self._selected_image_cursor)
+        image_format = cursor.charFormat().toImageFormat()
+        image_format.setWidth(width)
+        image_format.setHeight(height)
+        image_position = cursor.position()
+        cursor.setPosition(image_position + 1, QTextCursor.MoveMode.KeepAnchor)
+        cursor.setCharFormat(image_format)
+        cursor.clearSelection()
+        cursor.setPosition(image_position)
+        self._selected_image_cursor = cursor
+        self._show_image_editor(cursor)
+
+    def _set_image_alignment(self, alignment):
+        if self._selected_image_cursor is None:
+            return
+        cursor = QTextCursor(self._selected_image_cursor)
+        block_format = cursor.blockFormat()
+        block_format.setAlignment(alignment)
+        cursor.setBlockFormat(block_format)
+        self._selected_image_cursor = cursor
+        self._show_image_editor(cursor)
+
+    def _delete_selected_image(self):
+        if self._selected_image_cursor is None:
+            return
+        cursor = QTextCursor(self._selected_image_cursor)
+        cursor.deleteChar()
+        self._hide_image_editor()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if getattr(self, "_note_composer_mode", False):
+                separator_y = self._composer_separator_y()
+                if event.position().y() >= separator_y:
+                    body_block = self.document().firstBlock().next()
+                    if body_block.isValid():
+                        cursor = self.cursorForPosition(event.position().toPoint())
+                        if cursor.block() == self.document().firstBlock():
+                            cursor.setPosition(body_block.position())
+                            self.setTextCursor(cursor)
+                            event.accept()
+                            return
+            image_cursor = self._image_cursor_at(event.position().toPoint())
+            if image_cursor is not None:
+                self._show_image_editor(image_cursor)
+            else:
+                self._hide_image_editor()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self._image_overlay.isVisible():
+            image_cursor = self._image_cursor_at(event.position().toPoint())
+            self.viewport().setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if image_cursor is not None else Qt.CursorShape.IBeamCursor
+            )
+        super().mouseMoveEvent(event)
+
+    def contextMenuEvent(self, event):
+        image_cursor = self._image_cursor_at(event.pos())
+        if image_cursor is None:
+            super().contextMenuEvent(event)
+            return
+
+        self._show_image_editor(image_cursor)
+        menu = QMenu(self)
+        left_action = menu.addAction("左对齐")
+        center_action = menu.addAction("居中")
+        right_action = menu.addAction("右对齐")
+        menu.addSeparator()
+        delete_action = menu.addAction("删除图片")
+        left_action.triggered.connect(
+            lambda: self._set_image_alignment(Qt.AlignmentFlag.AlignLeft)
+        )
+        center_action.triggered.connect(
+            lambda: self._set_image_alignment(Qt.AlignmentFlag.AlignCenter)
+        )
+        right_action.triggered.connect(
+            lambda: self._set_image_alignment(Qt.AlignmentFlag.AlignRight)
+        )
+        delete_action.triggered.connect(self._delete_selected_image)
+        menu.exec(self.viewport().mapToGlobal(event.pos()))
+
+    def enable_note_composer_mode(self):
+        self._note_composer_mode = True
+        self.setPlaceholderText("")
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not getattr(self, "_note_composer_mode", False):
+            return
+        first_block = self.document().firstBlock()
+        if not first_block.isValid() or not first_block.next().isValid():
+            return
+        cursor_rect = self.cursorRect(QTextCursor(first_block))
+        title_font = self.font()
+        title_font.setPointSize(self.COMPOSER_TITLE_SIZE)
+        title_metrics = QFontMetrics(title_font)
+        separator_y = self._composer_separator_y()
+        painter = QPainter(self.viewport())
+        painter.setPen(
+            QPen(self.palette().color(QPalette.ColorRole.Highlight), 1)
+        )
+        painter.drawLine(10, separator_y, self.viewport().width() - 10, separator_y)
+
+        raw_text = self.toPlainText()
+        title = raw_text.split("\n", 1)[0]
+        placeholder_color = self.palette().color(QPalette.ColorRole.PlaceholderText)
+        if not title:
+            painter.setPen(placeholder_color)
+            title_font = self.font()
+            title_font.setPointSize(self.COMPOSER_TITLE_SIZE)
+            title_font.setBold(True)
+            painter.setFont(title_font)
+            painter.drawText(
+                12,
+                cursor_rect.top() + title_metrics.ascent() + 2,
+                "请输入标题",
+            )
 
     def insertFromMimeData(self, source):
         if source.hasImage():
@@ -735,28 +1032,85 @@ class NotesView(QWidget):
 
         dialog = QDialog(self)
         dialog.setWindowTitle("创建笔记")
-        dialog.resize(680, 520)
+        main_size = self.window().size()
+        screen = dialog.screen()
+        available_size = (
+            screen.availableGeometry().size() if screen else main_size
+        )
+        dialog.resize(
+            min(max(800, int(main_size.width() * 0.85)), int(available_size.width() * 0.9)),
+            min(max(600, int(main_size.height() * 0.85)), int(available_size.height() * 0.9)),
+        )
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(10)
 
-        layout.addWidget(QLabel("标题"))
-        title_edit = QLineEdit()
-        title_edit.setPlaceholderText("请输入笔记标题")
-        layout.addWidget(title_edit)
+        composer_panel = QWidget()
+        composer_panel.setObjectName("note_composer")
+        composer_layout = QVBoxLayout(composer_panel)
+        composer_layout.setContentsMargins(12, 8, 12, 10)
+        composer_layout.setSpacing(0)
 
-        layout.addWidget(QLabel("正文"))
+        title_edit = QLineEdit()
+        title_edit.setObjectName("note_composer_title")
+        title_edit.setPlaceholderText("请输入标题")
+        title_edit.setMinimumHeight(42)
+        composer_layout.addWidget(title_edit)
+
+        separator = QFrame()
+        separator.setObjectName("note_composer_separator")
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFixedHeight(1)
+        composer_layout.addWidget(separator)
+
         content_edit = MarkdownTextEdit()
-        content_edit.setPlaceholderText("请输入笔记内容")
+        content_edit.setObjectName("note_composer_body")
+        content_edit.setMinimumHeight(420)
         content_edit.image_paste_requested.connect(
             lambda image_bytes: self._upload_pasted_image(content_edit, image_bytes)
         )
-        layout.addWidget(content_edit)
+        composer_layout.addWidget(content_edit)
+        title_edit.returnPressed.connect(
+            lambda: self._focus_note_composer(content_edit)
+        )
+
+        apply_theme_stylesheet(composer_panel, lambda palette: f"""
+            QWidget#note_composer {{
+                background-color: {palette.card_bg};
+                border: 1px solid {palette.border};
+                border-radius: 6px;
+            }}
+            QLineEdit#note_composer_title {{
+                background: transparent;
+                color: {palette.text};
+                border: none;
+                padding: 2px 4px;
+                font-size: 18px;
+                font-weight: 600;
+            }}
+            QFrame#note_composer_separator {{
+                background-color: {palette.border_strong};
+                border: none;
+            }}
+            QTextEdit#note_composer_body {{
+                background: transparent;
+                color: {palette.text_secondary};
+                border: none;
+                padding: 10px 4px 4px 4px;
+                font-size: 14px;
+            }}
+        """)
+        layout.addWidget(composer_panel)
+        QTimer.singleShot(0, lambda: self._focus_note_composer(content_edit))
 
         action_layout = QHBoxLayout()
         action_layout.addStretch()
         save_button = QPushButton("保存")
         cancel_button = QPushButton("取消")
+        save_button.setAutoDefault(False)
+        save_button.setDefault(False)
+        cancel_button.setAutoDefault(False)
+        cancel_button.setDefault(False)
         save_button.clicked.connect(
             lambda: self._save_new_note(title_edit, content_edit, dialog)
         )
@@ -766,6 +1120,11 @@ class NotesView(QWidget):
         layout.addLayout(action_layout)
         apply_theme_stylesheet(dialog, self._note_detail_stylesheet)
         dialog.exec()
+
+    @staticmethod
+    def _focus_note_composer(content_edit):
+        content_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        content_edit.moveCursor(QTextCursor.MoveOperation.End)
 
     def _upload_pasted_image(self, content_edit, image_bytes):
         marker = f"[图片上传中:{uuid.uuid4().hex}]"
@@ -814,9 +1173,10 @@ class NotesView(QWidget):
         )
         image_format = QTextImageFormat()
         image_format.setName(resource_url.toString())
-        if image.width() > 800:
-            image_format.setWidth(800)
-            image_format.setHeight(image.height() * 800 / image.width())
+        display_width = min(800, image.width())
+        display_height = image.height() * display_width / image.width()
+        image_format.setWidth(display_width)
+        image_format.setHeight(display_height)
         cursor.insertImage(image_format)
 
     def _handle_image_upload_failure(self, content_edit, marker, message):
