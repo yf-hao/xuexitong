@@ -401,7 +401,7 @@ class ImageResizeOverlay(QWidget):
             self.setCursor(
                 Qt.CursorShape.SizeFDiagCursor
                 if self._handle_rect().contains(event.position().toPoint())
-                else Qt.CursorShape.PointingHandCursor
+                else Qt.CursorShape.ArrowCursor
             )
             return
         if not self._dragging or self._start_global_pos is None:
@@ -423,7 +423,7 @@ class ImageResizeOverlay(QWidget):
     def leaveEvent(self, event):
         self.unsetCursor()
         if self.parentWidget() is not None:
-            self.parentWidget().setCursor(Qt.CursorShape.IBeamCursor)
+            self.parentWidget().setCursor(Qt.CursorShape.ArrowCursor)
         super().leaveEvent(event)
 
 
@@ -438,6 +438,8 @@ class MarkdownTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._selected_image_cursor = None
+        self._image_boundary_action = None
+        self._boundary_image_cursor = None
         self._image_overlay = ImageResizeOverlay(self.viewport())
         self._image_overlay.hide()
         self._image_overlay.resized.connect(self._resize_selected_image)
@@ -512,7 +514,7 @@ class MarkdownTextEdit(QTextEdit):
             round(image_width) + 6,
             round(image_height) + 6,
         )
-        self._image_overlay.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._image_overlay.setCursor(Qt.CursorShape.ArrowCursor)
         self._image_overlay.show()
         self._image_overlay.raise_()
 
@@ -601,6 +603,59 @@ class MarkdownTextEdit(QTextEdit):
         isolated_cursor.setPosition(max(0, image_position))
         return isolated_cursor
 
+    @staticmethod
+    def _block_contains_image(block):
+        iterator = block.begin()
+        while not iterator.atEnd():
+            fragment = iterator.fragment()
+            if fragment.isValid() and fragment.charFormat().isImageFormat():
+                return True
+            iterator += 1
+        return False
+
+    def _image_row_at(self, y):
+        return self._image_at_row(y) is not None
+
+    def _image_at_row(self, y):
+        scroll_offset = self.verticalScrollBar().value()
+        block = self.document().firstBlock()
+        layout = self.document().documentLayout()
+        while block.isValid():
+            if self._block_contains_image(block):
+                block_rect = layout.blockBoundingRect(block)
+                row_top = block_rect.top() - scroll_offset
+                row_bottom = block_rect.bottom() - scroll_offset
+                if row_top <= y <= row_bottom:
+                    iterator = block.begin()
+                    while not iterator.atEnd():
+                        fragment = iterator.fragment()
+                        if fragment.isValid() and fragment.charFormat().isImageFormat():
+                            image_cursor = QTextCursor(self.document())
+                            image_cursor.setPosition(fragment.position())
+                            width, height = self._image_size(image_cursor)
+                            image_rect = self._image_viewport_rect(
+                                image_cursor, width, height
+                            )
+                            return image_cursor, image_rect
+                        iterator += 1
+            block = block.next()
+        return None
+
+    def _move_cursor_out_of_image_block(self):
+        cursor = self.textCursor()
+        if cursor.hasSelection() or not self._block_contains_image(cursor.block()):
+            return False
+
+        image_block = cursor.block()
+        following_block = image_block.next()
+        if not following_block.isValid():
+            end_cursor = QTextCursor(image_block)
+            end_cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+            end_cursor.insertBlock()
+            following_block = image_block.next()
+        self.setTextCursor(QTextCursor(following_block))
+        return True
+
     def _delete_selected_image(self):
         if self._selected_image_cursor is None:
             return
@@ -610,6 +665,40 @@ class MarkdownTextEdit(QTextEdit):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            image_row = self._image_at_row(round(event.position().y()))
+            if image_row is not None:
+                image_cursor, image_rect = image_row
+                image_cursor = self._isolate_image_block(image_cursor)
+                self._boundary_image_cursor = QTextCursor(image_cursor)
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                image_x, _image_y, image_width, _image_height = image_rect
+                click_x = event.position().x()
+                if click_x < image_x:
+                    previous_block = image_cursor.block().previous()
+                    if previous_block.isValid():
+                        cursor = QTextCursor(previous_block)
+                        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+                    else:
+                        cursor = QTextCursor(image_cursor.block())
+                    self.setTextCursor(cursor)
+                    self._image_boundary_action = "before"
+                    event.accept()
+                    return
+                if click_x > image_x + image_width:
+                    cursor = QTextCursor(image_cursor)
+                    cursor.setPosition(image_cursor.block().position() + 1)
+                    self.setTextCursor(cursor)
+                    self._image_boundary_action = "after"
+                    event.accept()
+                    return
+                self._image_boundary_action = None
+                self._boundary_image_cursor = None
+                self._show_image_editor(image_cursor)
+                event.accept()
+                return
+
+            self._image_boundary_action = None
+            self._boundary_image_cursor = None
             if getattr(self, "_note_composer_mode", False):
                 separator_y = self._composer_separator_y()
                 if event.position().y() >= separator_y:
@@ -619,6 +708,7 @@ class MarkdownTextEdit(QTextEdit):
                         if cursor.block() == self.document().firstBlock():
                             cursor.setPosition(body_block.position())
                             self.setTextCursor(cursor)
+                            self._move_cursor_out_of_image_block()
                             event.accept()
                             return
             image_cursor = self._image_cursor_at(event.position().toPoint())
@@ -627,19 +717,24 @@ class MarkdownTextEdit(QTextEdit):
             else:
                 self._hide_image_editor()
         super().mousePressEvent(event)
+        self._move_cursor_out_of_image_block()
 
     def mouseMoveEvent(self, event):
-        if not self._image_overlay.isVisible():
-            image_cursor = self._image_cursor_at(event.position().toPoint())
-            self.viewport().setCursor(
-                Qt.CursorShape.PointingHandCursor
-                if image_cursor is not None else Qt.CursorShape.IBeamCursor
-            )
+        self.viewport().setCursor(
+            Qt.CursorShape.ArrowCursor
+            if self._image_row_at(round(event.position().y()))
+            else Qt.CursorShape.IBeamCursor
+        )
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
         self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
         super().leaveEvent(event)
+
+    def focusOutEvent(self, event):
+        self._image_boundary_action = None
+        self._boundary_image_cursor = None
+        super().focusOutEvent(event)
 
     def contextMenuEvent(self, event):
         image_cursor = self._image_cursor_at(event.pos())
@@ -705,6 +800,9 @@ class MarkdownTextEdit(QTextEdit):
             )
 
     def insertFromMimeData(self, source):
+        if self._image_boundary_action is not None:
+            return
+        self._move_cursor_out_of_image_block()
         if source.hasImage():
             image_data = source.imageData()
             image = image_data if isinstance(image_data, QImage) else image_data.toImage()
@@ -716,13 +814,52 @@ class MarkdownTextEdit(QTextEdit):
                     return
         super().insertFromMimeData(source)
 
+    def inputMethodEvent(self, event):
+        if self._image_boundary_action is not None:
+            event.accept()
+            return
+        super().inputMethodEvent(event)
+
     def keyPressEvent(self, event):
+        if self._image_boundary_action is not None:
+            if event.key() not in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                event.accept()
+                return
+            image_cursor = self._boundary_image_cursor
+            if image_cursor is not None:
+                if self._image_boundary_action == "before":
+                    cursor = self.textCursor()
+                    cursor.insertBlock()
+                    previous_block = image_cursor.block().previous()
+                    if previous_block.isValid():
+                        self.setTextCursor(QTextCursor(previous_block))
+                else:
+                    following_block = image_cursor.block().next()
+                    if following_block.isValid():
+                        self.setTextCursor(QTextCursor(following_block))
+            self._image_boundary_action = None
+            self._boundary_image_cursor = None
+            event.accept()
+            return
+
+        self._move_cursor_out_of_image_block()
+        cursor = self.textCursor()
+        if (
+            event.key() == Qt.Key.Key_Backspace
+            and not cursor.hasSelection()
+            and cursor.position() == cursor.block().position()
+            and self._block_contains_image(cursor.block().previous())
+        ):
+            event.accept()
+            return
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if self._convert_current_heading():
                 super().keyPressEvent(event)
                 self._clear_heading_level()
+                self._move_cursor_out_of_image_block()
                 return
         super().keyPressEvent(event)
+        self._move_cursor_out_of_image_block()
 
     def convert_all_headings(self):
         cursor = QTextCursor(self.document())
@@ -1190,6 +1327,7 @@ class NotesView(QWidget):
         marker = f"[图片上传中:{uuid.uuid4().hex}]"
         cursor = content_edit.textCursor()
         cursor.insertText(marker)
+        content_edit.setTextCursor(cursor)
 
         thread = NoteImageUploadThread(self.crawler.session, image_bytes, content_edit)
         if not hasattr(content_edit, "_image_upload_threads"):
