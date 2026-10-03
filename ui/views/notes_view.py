@@ -6,8 +6,11 @@ import uuid
 from datetime import datetime
 from html import unescape
 
-from PyQt6.QtCore import QThread, QTimer, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QFont, QTextCharFormat, QTextCursor, QTextDocument
+from PyQt6.QtCore import QBuffer, QIODevice, QThread, QTimer, QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import (
+    QAction, QFont, QImage, QTextCharFormat, QTextCursor, QTextDocument,
+    QTextImageFormat,
+)
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
     QButtonGroup, QLineEdit, QMessageBox, QSpinBox, QTabWidget, QTextEdit,
@@ -119,6 +122,7 @@ class NotesLoadThread(QThread):
             raise RuntimeError(self._response_error(last_payload))
         except Exception as exc:
             self.failed.emit(self.index, str(exc))
+
 
     @staticmethod
     def _response_error(payload):
@@ -249,6 +253,76 @@ class NotesLoadThread(QThread):
         return ""
 
 
+class NoteImageUploadThread(QThread):
+    """Upload a pasted image to Chaoxing's note cloud storage."""
+
+    uploaded = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, session, image_bytes, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.image_bytes = image_bytes
+
+    def run(self):
+        try:
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Referer": "https://noteyd.chaoxing.com/pc/",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 "
+                    "Safari/537.36"
+                ),
+            }
+            response = self.session.get(
+                "https://noteyd.chaoxing.com/proxy/apis/common/getYunPanUploadUrl",
+                params={"crossOrigin": "true", "from": "note"},
+                headers=headers,
+                timeout=15,
+            )
+            response.raise_for_status()
+            upload_payload = response.json()
+            upload_url = upload_payload.get("data")
+            if not upload_url:
+                raise RuntimeError(upload_payload.get("msg") or "未获取到图片上传地址")
+
+            upload_response = self.session.post(
+                upload_url,
+                files={"file": ("image.png", self.image_bytes, "image/png")},
+                headers=headers,
+                timeout=30,
+            )
+            upload_response.raise_for_status()
+            payload = upload_response.json()
+            image_data = payload.get("data") or {}
+            if not isinstance(image_data, dict):
+                raise RuntimeError("图片上传接口返回格式错误")
+            preview_url = image_data.get("previewUrl") or image_data.get("preview")
+            object_id = image_data.get("objectId") or image_data.get("objectid")
+            if not preview_url or not object_id:
+                raise RuntimeError(payload.get("msg") or "图片上传成功但缺少图片资源信息")
+            preview_response = self.session.get(
+                preview_url,
+                headers=headers,
+                timeout=30,
+            )
+            preview_response.raise_for_status()
+            if not preview_response.content:
+                raise RuntimeError("图片已上传，但远程预览资源为空")
+            self.uploaded.emit({
+                "object_id": str(object_id),
+                "preview_url": str(preview_url),
+                "resid": str(image_data.get("resid") or ""),
+                "remote_image_bytes": preview_response.content,
+            })
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class NoteCard(QWidget):
     """可点击的笔记卡片。"""
 
@@ -271,6 +345,19 @@ class MarkdownTextEdit(QTextEdit):
 
     HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
     HEADING_SIZES = {1: 22, 2: 18, 3: 16, 4: 15, 5: 14, 6: 14}
+    image_paste_requested = pyqtSignal(bytes)
+
+    def insertFromMimeData(self, source):
+        if source.hasImage():
+            image_data = source.imageData()
+            image = image_data if isinstance(image_data, QImage) else image_data.toImage()
+            if not image.isNull():
+                buffer = QBuffer()
+                buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+                if image.save(buffer, "PNG"):
+                    self.image_paste_requested.emit(bytes(buffer.data()))
+                    return
+        super().insertFromMimeData(source)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -661,6 +748,9 @@ class NotesView(QWidget):
         layout.addWidget(QLabel("正文"))
         content_edit = MarkdownTextEdit()
         content_edit.setPlaceholderText("请输入笔记内容")
+        content_edit.image_paste_requested.connect(
+            lambda image_bytes: self._upload_pasted_image(content_edit, image_bytes)
+        )
         layout.addWidget(content_edit)
 
         action_layout = QHBoxLayout()
@@ -676,6 +766,71 @@ class NotesView(QWidget):
         layout.addLayout(action_layout)
         apply_theme_stylesheet(dialog, self._note_detail_stylesheet)
         dialog.exec()
+
+    def _upload_pasted_image(self, content_edit, image_bytes):
+        marker = f"[图片上传中:{uuid.uuid4().hex}]"
+        cursor = content_edit.textCursor()
+        cursor.insertText(marker)
+
+        thread = NoteImageUploadThread(self.crawler.session, image_bytes, content_edit)
+        if not hasattr(content_edit, "_image_upload_threads"):
+            content_edit._image_upload_threads = []
+        content_edit._image_upload_threads.append(thread)
+        thread.uploaded.connect(
+            lambda image_data: self._insert_uploaded_image(
+                content_edit, marker, image_data
+            )
+        )
+        thread.failed.connect(
+            lambda message: self._handle_image_upload_failure(
+                content_edit, marker, message
+            )
+        )
+        thread.finished.connect(
+            lambda: self._cleanup_image_upload_thread(content_edit, thread)
+        )
+        thread.start()
+
+    @staticmethod
+    def _find_text_cursor(content_edit, text):
+        cursor = content_edit.document().find(text)
+        return None if cursor.isNull() else cursor
+
+    def _insert_uploaded_image(self, content_edit, marker, image_data):
+        cursor = self._find_text_cursor(content_edit, marker)
+        if cursor is None:
+            return
+        cursor.removeSelectedText()
+        image = QImage.fromData(image_data["remote_image_bytes"])
+        if image.isNull():
+            self._handle_image_upload_failure(
+                content_edit, marker, "远程图片资源无法解码，未插入笔记"
+            )
+            return
+
+        resource_url = QUrl(image_data["preview_url"])
+        content_edit.document().addResource(
+            QTextDocument.ResourceType.ImageResource, resource_url, image
+        )
+        image_format = QTextImageFormat()
+        image_format.setName(resource_url.toString())
+        if image.width() > 800:
+            image_format.setWidth(800)
+            image_format.setHeight(image.height() * 800 / image.width())
+        cursor.insertImage(image_format)
+
+    def _handle_image_upload_failure(self, content_edit, marker, message):
+        cursor = self._find_text_cursor(content_edit, marker)
+        if cursor is not None:
+            cursor.removeSelectedText()
+        QMessageBox.warning(content_edit, "图片粘贴失败", message)
+
+    @staticmethod
+    def _cleanup_image_upload_thread(content_edit, thread):
+        threads = getattr(content_edit, "_image_upload_threads", [])
+        if thread in threads:
+            threads.remove(thread)
+        thread.deleteLater()
 
     def _select_category(self, index):
         self._active_folder_cids[index] = None
