@@ -17,6 +17,7 @@ from ui.views.learning_view import LearningView
 from ui.views.study_status_view import StudyStatusView
 from ui.views.homework_create_view import HomeworkCreateView
 from ui.views.cloud_drive_view import CloudDriveView
+from ui.views.notes_view import NotesView
 from ui.views.chat_view import ChatView
 from ui.dialogs.ai_settings_dialog import AISettingsDialog
 from core.logger import get_logger
@@ -222,7 +223,11 @@ class MainWindow(QMainWindow):
         self.cloud_drive_view.status_update.connect(self._update_status)
         self.stacked_widget.addWidget(self.cloud_drive_view)
 
-        # Page 9: Chat View
+        # Page 9: Notes View
+        self.notes_view = NotesView(self.crawler, parent=self)
+        self.stacked_widget.addWidget(self.notes_view)
+
+        # Page 10: Chat View
         self.chat_view = ChatView(self.crawler, parent=self)
         self.chat_view.msync_status_changed.connect(self._update_status)
         self.stacked_widget.addWidget(self.chat_view)
@@ -442,8 +447,8 @@ class MainWindow(QMainWindow):
                 continue
             filtered_links.append(link)
         
-        # 定义菜单顺序：签到、题库、作业、学情、统计、云盘、消息、管理
-        menu_order = ["活动", "题库", "作业","学情", "统计", "云盘", "消息", "管理"]
+        # 定义菜单顺序：签到、题库、作业、学情、统计、笔记、云盘、消息、管理
+        menu_order = ["活动", "题库", "作业","学情", "统计", "笔记", "云盘", "消息", "管理"]
         
         for keyword in menu_order:
             if keyword == "题库":
@@ -460,6 +465,10 @@ class MainWindow(QMainWindow):
                 # 添加云盘菜单项
                 item = QListWidgetItem("云盘")
                 item.setData(Qt.ItemDataRole.UserRole, "cloud_drive")
+                self.nav_list.addItem(item)
+            elif keyword == "笔记":
+                item = QListWidgetItem("笔记")
+                item.setData(Qt.ItemDataRole.UserRole, "notes")
                 self.nav_list.addItem(item)
             elif keyword == "消息":
                 # 添加消息菜单项
@@ -527,8 +536,13 @@ class MainWindow(QMainWindow):
             self.download_btn.hide()
             self.status_label.setText(f"已进入: {title}")
             self.cloud_drive_view.on_show()
-        elif "消息" in title or "聊天" in title:
+        elif "笔记" in title:
             self.stacked_widget.setCurrentIndex(9)
+            self.download_btn.hide()
+            self.status_label.setText(f"已进入: {title}")
+            self.notes_view.on_show()
+        elif "消息" in title or "聊天" in title:
+            self.stacked_widget.setCurrentIndex(10)
             self.download_btn.hide()
             self.status_label.setText(f"已进入：{title}")
             self.chat_view.on_show()
@@ -577,6 +591,7 @@ class MainWindow(QMainWindow):
             for view in [
                 getattr(self, "chat_view", None),
                 getattr(self, "cloud_drive_view", None),
+                getattr(self, "notes_view", None),
                 getattr(self, "question_bank_view", None),
                 getattr(self, "study_status_view", None),
                 getattr(self, "homework_create_view", None),

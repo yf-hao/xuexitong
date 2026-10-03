@@ -2,13 +2,16 @@
 
 import re
 import json
+import uuid
 from datetime import datetime
+from html import unescape
 
-from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QTextDocument
+from PyQt6.QtCore import QThread, QTimer, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QFont, QTextCharFormat, QTextCursor, QTextDocument
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QMessageBox, QSpinBox, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget,
+    QButtonGroup, QLineEdit, QMessageBox, QSpinBox, QTabWidget, QTextEdit,
+    QMenu, QToolBar, QVBoxLayout, QWidget,
 )
 
 from core.coop_resource_encoder import CoopResourceEncoder
@@ -18,16 +21,17 @@ from ui.theme import apply_theme_stylesheet, bind_theme_tree
 class NotesLoadThread(QThread):
     """在后台请求笔记列表，避免阻塞主界面。"""
 
-    loaded = pyqtSignal(int, list)
+    loaded = pyqtSignal(int, list, dict, dict)
     failed = pyqtSignal(int, str)
 
-    def __init__(self, crawler, index, user_id, notebook_id, parent_id):
+    def __init__(self, crawler, index, user_id, notebook_id, parent_id, folder_cid):
         super().__init__()
         self.crawler = crawler
         self.index = index
         self.user_id = user_id
         self.notebook_id = notebook_id
         self.parent_id = parent_id
+        self.folder_cid = folder_cid
 
     def run(self):
         try:
@@ -58,7 +62,7 @@ class NotesLoadThread(QThread):
                 if notes is None:
                     raise RuntimeError(self._response_error(payload))
                 self._hydrate_cooperate_notes(session, notes, headers)
-                self.loaded.emit(self.index, notes)
+                self.loaded.emit(self.index, notes, {}, {})
                 return
 
             category_id = (
@@ -70,7 +74,9 @@ class NotesLoadThread(QThread):
                 "https://noteyd.chaoxing.com/pc/note_note/myNotesLatest"
             ]
             query_ids = []
-            for query_id in (category_id, self.parent_id, "root"):
+            for query_id in (
+                self.folder_cid, self.parent_id, category_id, "root"
+            ):
                 if query_id and query_id not in query_ids:
                     query_ids.append(query_id)
 
@@ -89,8 +95,25 @@ class NotesLoadThread(QThread):
                     last_payload = response.json()
                     notes = self._extract_notes(last_payload)
                     if notes is not None:
+                        folder_paths, folder_counts, folder_ids = self._load_folder_paths(
+                            session, self.folder_cid, headers
+                        )
+                        for note in notes:
+                            if not isinstance(note, dict):
+                                continue
+                            note_id = self._note_id(note)
+                            folder_id = str(
+                                note.get("notebookCid") or note.get("pcid") or ""
+                            )
+                            note["folder_name"] = (
+                                folder_paths.get(note_id)
+                                or folder_paths.get(folder_id)
+                                or "未分类"
+                            )
                         self._hydrate_cooperate_notes(session, notes, headers)
-                        self.loaded.emit(self.index, notes)
+                        self.loaded.emit(
+                            self.index, notes, folder_counts, folder_ids
+                        )
                         return
 
             raise RuntimeError(self._response_error(last_payload))
@@ -159,6 +182,64 @@ class NotesLoadThread(QThread):
             except Exception:
                 continue
 
+    @classmethod
+    def _load_folder_paths(cls, session, notebook_cid, headers):
+        paths = {}
+        folder_counts = {}
+        folder_ids = {}
+        visited = set()
+
+        def load_folder(folder_cid, parent_path=""):
+            if not folder_cid or folder_cid in visited:
+                return
+            visited.add(folder_cid)
+            try:
+                response = session.get(
+                    "https://noteyd.chaoxing.com/pc/note_notebook/getNotebooksLatest",
+                    params={
+                        "querySubFolder": 0,
+                        "notebookCid": folder_cid,
+                        "kw": "",
+                        "offsetValue": "",
+                        "top": 0,
+                        "pageSize": 100,
+                        "showCollection": 0,
+                        "_t": datetime.now().day,
+                    },
+                    headers=headers,
+                    timeout=15,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                message = payload.get("msg") if isinstance(payload, dict) else None
+                if not isinstance(message, dict):
+                    return
+                current = message.get("curNoteBook") or {}
+                current_name = str(current.get("name") or folder_cid)
+                current_path = (
+                    f"{parent_path} / {current_name}" if parent_path else current_name
+                )
+                paths[str(folder_cid)] = current_path
+                folder_ids[current_path] = str(folder_cid)
+                folder_counts[current_path] = int(current.get("note_count") or 0)
+                for item in message.get("list") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    item_cid = str(item.get("cid") or "")
+                    if item_cid:
+                        item_name = str(item.get("name") or item_cid)
+                        item_path = f"{current_path} / {item_name}"
+                        paths[item_cid] = item_path
+                        folder_ids[item_path] = item_cid
+                        folder_counts[item_path] = int(item.get("count") or 0)
+                    if item_cid:
+                        load_folder(item_cid, current_path)
+            except Exception:
+                return
+
+        load_folder(str(notebook_cid))
+        return paths, folder_counts, folder_ids
+
     @staticmethod
     def _note_id(note):
         for key in ("noteCid", "note_id", "noteId", "uuid", "cid", "id"):
@@ -185,12 +266,98 @@ class NoteCard(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
+class MarkdownTextEdit(QTextEdit):
+    """提供 Markdown 标题的即时转换。"""
+
+    HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+    HEADING_SIZES = {1: 22, 2: 18, 3: 16, 4: 15, 5: 14, 6: 14}
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self._convert_current_heading():
+                super().keyPressEvent(event)
+                self._clear_heading_level()
+                return
+        super().keyPressEvent(event)
+
+    def convert_all_headings(self):
+        cursor = QTextCursor(self.document())
+        block = self.document().firstBlock()
+        while block.isValid():
+            match = self.HEADING_PATTERN.match(block.text())
+            if match:
+                block_cursor = QTextCursor(block)
+                block_cursor.setPosition(block.position())
+                block_cursor.setPosition(
+                    block.position() + len(block.text()),
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+                block_cursor.insertText(match.group(2))
+                self._apply_heading_format(block_cursor, block.position(), len(match.group(2)), len(match.group(1)))
+            block = block.next()
+
+    def _convert_current_heading(self):
+        cursor = self.textCursor()
+        text = cursor.block().text()
+        if cursor.positionInBlock() != len(text):
+            return False
+        match = self.HEADING_PATTERN.match(text)
+        if not match:
+            return False
+
+        block_cursor = QTextCursor(cursor.block())
+        block_cursor.setPosition(cursor.block().position())
+        block_cursor.setPosition(
+            cursor.block().position() + len(text),
+            QTextCursor.MoveMode.KeepAnchor,
+        )
+        block_cursor.insertText(match.group(2))
+        self._apply_heading_format(
+            block_cursor,
+            cursor.block().position(),
+            len(match.group(2)),
+            len(match.group(1)),
+        )
+        block_cursor.setPosition(
+            cursor.block().position() + len(match.group(2))
+        )
+        self.setTextCursor(block_cursor)
+        return True
+
+    def _clear_heading_level(self):
+        cursor = self.textCursor()
+        block_format = cursor.blockFormat()
+        block_format.setHeadingLevel(0)
+        cursor.setBlockFormat(block_format)
+        char_format = QTextCharFormat()
+        char_format.setFontPointSize(14)
+        char_format.setFontWeight(400)
+        cursor.setCharFormat(char_format)
+        self.setTextCursor(cursor)
+
+    def _apply_heading_format(self, cursor, block_position, text_length, level):
+        cursor.setPosition(block_position)
+        cursor.setPosition(
+            block_position + text_length,
+            QTextCursor.MoveMode.KeepAnchor,
+        )
+        char_format = QTextCharFormat()
+        char_format.setFontPointSize(self.HEADING_SIZES.get(level, 14))
+        char_format.setFontWeight(700)
+        cursor.setCharFormat(char_format)
+        cursor.clearSelection()
+        block_format = cursor.blockFormat()
+        block_format.setHeadingLevel(level)
+        cursor.setBlockFormat(block_format)
+
+
 class NotesView(QWidget):
     """直接请求超星笔记接口并在应用内展示列表。"""
 
     NOTE_HOME_URL = "https://noteyd.chaoxing.com/pc/note_notebook/myNotebooksLatest"
     NOTEBOOK_ID_FALLBACK = "bb551915d9e7d5a86071cdfeb91dc755"
     TAB_NAMES = ("公开笔记", "个人笔记", "推荐")
+    TAB_LABELS = ("🌐 公开笔记", "👤 个人笔记", "⭐ 推荐")
 
     def __init__(self, crawler, parent=None):
         super().__init__(parent)
@@ -200,38 +367,139 @@ class NotesView(QWidget):
         self.parent_id = "root"
         self.load_thread = None
         self._resource_encoder = None
+        self._note_preview_cache = {}
+        self._active_folder_cids = {0: None, 1: None, 2: None}
+        self._active_folder_paths = {0: None, 1: None, 2: None}
+        self._folder_stacks = {0: [], 1: [], 2: []}
         self.setup_ui()
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 20, 10, 10)
+        layout.setContentsMargins(10, 16, 10, 10)
+        layout.setSpacing(10)
 
         header = QHBoxLayout()
-        title = QLabel("笔记")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        header.addWidget(title)
+        self.category_buttons = QButtonGroup(self)
+        self.category_buttons.setExclusive(True)
+        for index, label in enumerate(self.TAB_LABELS):
+            category_button = QPushButton(label)
+            category_button.setCheckable(True)
+            category_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            category_button.setMinimumHeight(28)
+            apply_theme_stylesheet(category_button, """
+                QPushButton {
+                    background-color: #3e3e42;
+                    color: #ffffff;
+                    border: 1px solid #555555;
+                    border-radius: 4px;
+                    padding: 5px 12px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background-color: #4e4e52;
+                    border: 1px solid #007acc;
+                }
+                QPushButton:checked {
+                    background-color: #007acc;
+                    border: 1px solid #007acc;
+                }
+            """)
+            self.category_buttons.addButton(category_button, index)
+            header.addWidget(category_button)
+
+        self.category_buttons.idClicked.connect(self._select_category)
+        self.category_buttons.button(0).setChecked(True)
         header.addStretch()
-        self.refresh_button = QPushButton("刷新")
+
+        self.create_button = QPushButton("📝 写笔记")
+        self.create_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.create_button.setMinimumHeight(28)
+        apply_theme_stylesheet(self.create_button, """
+            QPushButton {
+                background-color: #007acc;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #005c99;
+            }
+        """)
+        self.create_button.clicked.connect(self._create_note)
+        header.addWidget(self.create_button)
+
+        self.refresh_button = QPushButton("🔄 刷新")
+        self.refresh_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_button.setMinimumHeight(28)
+        apply_theme_stylesheet(self.refresh_button, """
+            QPushButton {
+                background-color: #3e3e42;
+                color: #ffffff;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #4e4e52;
+                border: 1px solid #007acc;
+            }
+        """)
         self.refresh_button.clicked.connect(self.refresh_current)
         header.addWidget(self.refresh_button)
         layout.addLayout(header)
 
+        breadcrumb_bar = QWidget()
+        breadcrumb_bar.setObjectName("breadcrumb_bar")
+        self.breadcrumb_layout = QHBoxLayout(breadcrumb_bar)
+        self.breadcrumb_layout.setContentsMargins(4, 0, 4, 0)
+        self.breadcrumb_layout.setSpacing(2)
+        apply_theme_stylesheet(breadcrumb_bar, lambda palette: f"""
+            QWidget#breadcrumb_bar {{
+                background-color: {palette.panel_alt_bg};
+                border: 1px solid {palette.border};
+                border-radius: 5px;
+            }}
+        """)
+        layout.addWidget(breadcrumb_bar)
+        self._render_breadcrumb(0)
+
         self.tabs = QTabWidget()
+        self.tabs.tabBar().setVisible(False)
         self.lists = []
         for name in self.TAB_NAMES:
             note_list = QListWidget()
             apply_theme_stylesheet(note_list, self._note_list_stylesheet)
             note_list.setWordWrap(True)
-            note_list.setSpacing(6)
+            note_list.setSpacing(0)
+            note_list.setAlternatingRowColors(False)
+            note_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            note_list.customContextMenuRequested.connect(
+                lambda position, current_list=note_list:
+                self._show_note_context_menu(current_list, position)
+            )
+            note_list.itemDoubleClicked.connect(
+                lambda item, current_list=note_list:
+                self._open_folder(current_list, item)
+            )
             note_list.currentItemChanged.connect(
                 lambda current, _previous, current_list=note_list:
                 self._sync_note_selection(current_list, current)
             )
             self.lists.append(note_list)
-            self.tabs.addTab(note_list, name)
+            self.tabs.addTab(note_list, self.TAB_LABELS[len(self.lists) - 1])
         self.tabs.setCurrentIndex(0)
         self.tabs.currentChanged.connect(self.load_current)
         layout.addWidget(self.tabs)
+        self.summary_label = QLabel("请选择一个分类")
+        self.summary_label.setObjectName("notes_summary")
+        layout.addWidget(self.summary_label)
+        self.status_label = QLabel()
+        self.status_label.setObjectName("notes_status")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_label)
         bind_theme_tree(self)
 
     @staticmethod
@@ -248,8 +516,9 @@ class NotesView(QWidget):
             QListWidget::item {{
                 background-color: transparent;
                 border: none;
+                border-bottom: 1px solid {palette.border};
                 padding: 0;
-                margin: 3px 0;
+                margin: 0;
             }}
             QListWidget::item:hover {{
                 background-color: {palette.hover_bg};
@@ -276,16 +545,42 @@ class NotesView(QWidget):
         """
 
     @staticmethod
+    def _note_menu_stylesheet(palette):
+        return f"""
+            QMenu {{
+                background-color: {palette.hover_bg};
+                color: {palette.text_secondary};
+                border: 1px solid {palette.border_strong};
+                border-radius: 6px;
+                padding: 5px;
+            }}
+            QMenu::item {{
+                padding: 8px 25px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {palette.accent};
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {palette.border_strong};
+                margin: 5px 10px;
+            }}
+        """
+
+    @staticmethod
     def _note_card_stylesheet(palette):
         return f"""
             QWidget#note_card {{
-                background-color: {palette.panel_bg};
-                border: 1px solid {palette.border};
-                border-radius: 6px;
+                background-color: transparent;
+                border: none;
+                border-bottom: 1px solid {palette.border};
+                border-radius: 0;
             }}
             QWidget#note_card[selected="true"] {{
                 background-color: {palette.hover_bg};
-                border: 2px solid {palette.accent};
+                border-bottom: 1px solid {palette.accent};
             }}
             QLabel#note_title {{
                 color: {palette.text};
@@ -344,6 +639,107 @@ class NotesView(QWidget):
     def on_show(self):
         self.refresh_current()
 
+    def _create_note(self):
+        try:
+            self._prepare_context()
+        except Exception as exc:
+            QMessageBox.warning(self, "创建失败", f"无法获取笔记配置: {exc}")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("创建笔记")
+        dialog.resize(680, 520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("标题"))
+        title_edit = QLineEdit()
+        title_edit.setPlaceholderText("请输入笔记标题")
+        layout.addWidget(title_edit)
+
+        layout.addWidget(QLabel("正文"))
+        content_edit = MarkdownTextEdit()
+        content_edit.setPlaceholderText("请输入笔记内容")
+        layout.addWidget(content_edit)
+
+        action_layout = QHBoxLayout()
+        action_layout.addStretch()
+        save_button = QPushButton("保存")
+        cancel_button = QPushButton("取消")
+        save_button.clicked.connect(
+            lambda: self._save_new_note(title_edit, content_edit, dialog)
+        )
+        cancel_button.clicked.connect(dialog.reject)
+        action_layout.addWidget(save_button)
+        action_layout.addWidget(cancel_button)
+        layout.addLayout(action_layout)
+        apply_theme_stylesheet(dialog, self._note_detail_stylesheet)
+        dialog.exec()
+
+    def _select_category(self, index):
+        self._active_folder_cids[index] = None
+        self._active_folder_paths[index] = None
+        self._folder_stacks[index] = []
+        self._render_breadcrumb(index)
+        if self.tabs.currentIndex() == index:
+            self.load_current(index)
+        else:
+            self.tabs.setCurrentIndex(index)
+
+    def _save_new_note(self, title_edit, content_edit, dialog):
+        title = title_edit.text().strip()
+        content_edit.convert_all_headings()
+        content = content_edit.toPlainText()
+        if not title:
+            QMessageBox.warning(dialog, "无法保存", "请输入笔记标题")
+            title_edit.setFocus()
+            return
+
+        note = {
+            "noteCid": str(uuid.uuid4()),
+            "title": title,
+            "content": content,
+            "contentTxt": content,
+            "notebookCid": (
+                f"gongkaibiji{self.user_id}"
+                if self.tabs.currentIndex() == 0
+                else f"gerenbiji{self.user_id}"
+            ),
+            "extension": json.dumps({"cooperateVersion": 1}, ensure_ascii=False),
+            "isNewNote": 1,
+        }
+        rtf_content = content_edit.toHtml()
+        resource_html = self._resource_editor_html(rtf_content)
+        if self._resource_encoder is None:
+            self._resource_encoder = CoopResourceEncoder(
+                self.crawler.session, note["noteCid"], self
+            )
+        else:
+            self._resource_encoder.set_note_cid(note["noteCid"])
+        self._resource_encoder.encode(
+            resource_html,
+            title,
+            on_encoded=lambda resource: self._finish_new_note(
+                note, content, rtf_content, resource, dialog
+            ),
+            on_failed=lambda message: QMessageBox.warning(dialog, "创建失败", message),
+        )
+
+    def _finish_new_note(self, note, content, rtf_content, resource, dialog):
+        note["coopResource"] = resource
+        try:
+            self._save_note_draft(note, content, rtf_content)
+            self._create_note_remote(note, content, rtf_content)
+        except Exception as exc:
+            QMessageBox.warning(dialog, "创建失败", str(exc))
+            return
+
+        dialog.accept()
+        preview = " ".join(content.split())
+        self._note_preview_cache[self._note_id(note)] = preview
+        self.refresh_current()
+
     def refresh_current(self):
         self.load_current(self.tabs.currentIndex())
 
@@ -351,15 +747,22 @@ class NotesView(QWidget):
         if self.load_thread and self.load_thread.isRunning():
             return
         self.lists[index].clear()
-        self.lists[index].addItem("正在加载笔记...")
+        self._set_status(index, f"正在加载{self.TAB_NAMES[index]}...")
+        self.summary_label.setText(f"{self.TAB_NAMES[index]} · 加载中")
         try:
             self._prepare_context()
         except Exception as exc:
             self._show_error(index, f"无法获取笔记配置: {exc}")
             return
 
+        category_id = (
+            f"gongkaibiji{self.user_id}"
+            if index == 0 else f"gerenbiji{self.user_id}"
+        )
+        folder_cid = self._active_folder_cids.get(index) or category_id
         self.load_thread = NotesLoadThread(
-            self.crawler, index, self.user_id, self.notebook_id, self.parent_id
+            self.crawler, index, self.user_id, self.notebook_id,
+            self.parent_id, folder_cid
         )
         self.load_thread.loaded.connect(self._on_notes_loaded)
         self.load_thread.failed.connect(self._on_notes_failed)
@@ -370,28 +773,247 @@ class NotesView(QWidget):
     def _clear_load_thread(self):
         self.load_thread = None
 
-    def _on_notes_loaded(self, index, notes):
+    def _on_notes_loaded(self, index, notes, folder_counts, folder_ids):
         note_list = self.lists[index]
         note_list.clear()
         if not notes:
-            note_list.addItem("暂无笔记")
-            return
+            self._set_status(index, f"暂无{self.TAB_NAMES[index]}")
+        self._set_status(index, "")
+        self.summary_label.setText(f"{self.TAB_NAMES[index]} · {len(notes)} 条")
+        grouped_notes = {}
+        active_folder_path = self._active_folder_paths.get(index)
+        active_folder_name = (
+            active_folder_path.rsplit(" / ", 1)[-1]
+            if active_folder_path else None
+        )
+        current_folder_name = active_folder_name or self.TAB_NAMES[index]
+        for folder_path in folder_counts:
+            if folder_path in (
+                self.TAB_NAMES[index], active_folder_path, active_folder_name
+            ):
+                continue
+            path_parts = str(folder_path).split(" / ")
+            if len(path_parts) < 2 or path_parts[-2] != current_folder_name:
+                continue
+            grouped_notes.setdefault(folder_path, [])
         for note in notes:
-            item = QListWidgetItem()
-            item.setData(32, note)
-            note_list.addItem(item)
-            note_widget = self._create_note_widget(note)
-            note_widget.clicked.connect(lambda current_item=item: note_list.setCurrentItem(current_item))
-            note_widget.double_clicked.connect(lambda current=note: self._show_note_detail(current))
-            item.setSizeHint(note_widget.sizeHint())
-            note_list.setItemWidget(item, note_widget)
+            folder_name = str(note.get("folder_name") or "未分类")
+            if folder_name in (
+                self.TAB_NAMES[index], active_folder_path, active_folder_name
+            ):
+                folder_name = ""
+            grouped_notes.setdefault(folder_name, []).append(note)
+
+        for folder_name, folder_notes in grouped_notes.items():
+            if folder_name:
+                display_name = folder_name.rsplit(" / ", 1)[-1]
+                folder_item = QListWidgetItem()
+                folder_item.setData(33, True)
+                folder_item.setData(34, folder_ids.get(folder_name))
+                folder_item.setData(35, folder_name)
+                folder_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                note_list.addItem(folder_item)
+
+                folder_widget = QWidget()
+                folder_widget.setObjectName("folder_item")
+                folder_widget.setFixedHeight(92)
+                folder_layout = QHBoxLayout(folder_widget)
+                folder_layout.setContentsMargins(14, 0, 14, 0)
+                folder_layout.setSpacing(8)
+                folder_label = QLabel(f"📁 {display_name}")
+                folder_label.setObjectName("folder_name")
+                folder_label.setFont(QFont("", 16, QFont.Weight.Bold))
+                count_label = QLabel(
+                    str(folder_counts.get(folder_name, len(folder_notes)))
+                )
+                count_label.setObjectName("folder_count")
+                folder_layout.addWidget(
+                    folder_label, alignment=Qt.AlignmentFlag.AlignVCenter
+                )
+                folder_layout.addStretch()
+                folder_layout.addWidget(
+                    count_label, alignment=Qt.AlignmentFlag.AlignVCenter
+                )
+                apply_theme_stylesheet(folder_widget, lambda palette: f"""
+                    QLabel#folder_name {{
+                        color: {palette.text};
+                    }}
+                    QWidget#folder_item {{
+                        background-color: transparent;
+                        border: none;
+                        border-bottom: 1px solid {palette.border};
+                        border-radius: 0;
+                    }}
+                    QLabel#folder_count {{
+                        color: {palette.text_muted};
+                        font-size: 14px;
+                    }}
+                """)
+                folder_item.setSizeHint(QSize(0, 92))
+                note_list.setItemWidget(folder_item, folder_widget)
+
+            for note in folder_notes:
+                cached_preview = self._note_preview_cache.get(self._note_id(note))
+                if cached_preview and not self._note_preview_text(note):
+                    note["content"] = cached_preview
+                    note["contentTxt"] = cached_preview
+                item = QListWidgetItem()
+                item.setData(32, note)
+                note_list.addItem(item)
+                note_widget = self._create_note_widget(note)
+                note_widget.clicked.connect(
+                    lambda current_item=item: note_list.setCurrentItem(current_item)
+                )
+                note_widget.double_clicked.connect(
+                    lambda current=note: self._show_note_detail(current)
+                )
+                item.setSizeHint(note_widget.sizeHint())
+                note_list.setItemWidget(item, note_widget)
+
+    def _render_breadcrumb(self, index):
+        while self.breadcrumb_layout.count():
+            item = self.breadcrumb_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        labels = [self.TAB_NAMES[index]]
+        labels.extend(folder[0] for folder in self._folder_stacks[index])
+        for depth, label in enumerate(labels):
+            button = QPushButton(label)
+            button.setFlat(True)
+            is_current = depth == len(labels) - 1
+            button.setEnabled(not is_current)
+            button.setCursor(
+                Qt.CursorShape.ArrowCursor
+                if is_current else Qt.CursorShape.PointingHandCursor
+            )
+            apply_theme_stylesheet(button, lambda palette, current=is_current: f"""
+                QPushButton {{
+                    color: {palette.text if current else palette.accent};
+                    background: transparent;
+                    border: none;
+                    padding: 3px 6px;
+                    font-size: 12px;
+                    font-weight: {"600" if current else "normal"};
+                }}
+                QPushButton:hover {{
+                    color: {palette.accent_hover};
+                    background-color: {palette.hover_bg};
+                    border-radius: 3px;
+                }}
+                QPushButton:disabled {{
+                    color: {palette.text};
+                }}
+            """)
+            button.clicked.connect(
+                lambda _checked=False, target_depth=depth:
+                self._navigate_breadcrumb(index, target_depth)
+            )
+            self.breadcrumb_layout.addWidget(button)
+            if depth < len(labels) - 1:
+                separator = QLabel("›")
+                apply_theme_stylesheet(
+                    separator,
+                    lambda palette: f"color: {palette.text_muted}; font-size: 14px;"
+                )
+                self.breadcrumb_layout.addWidget(separator)
+        self.breadcrumb_layout.addStretch()
+
+    def _navigate_breadcrumb(self, index, target_depth):
+        if target_depth == 0:
+            self._folder_stacks[index] = []
+            self._active_folder_cids[index] = None
+            self._active_folder_paths[index] = None
+        else:
+            self._folder_stacks[index] = self._folder_stacks[index][:target_depth]
+            _folder_name, folder_cid = self._folder_stacks[index][-1]
+            self._active_folder_cids[index] = folder_cid
+            self._active_folder_paths[index] = " / ".join(
+                [self.TAB_NAMES[index]]
+                + [folder[0] for folder in self._folder_stacks[index]]
+            )
+        self._render_breadcrumb(index)
+        self.load_current(index)
+
+    def _open_folder(self, note_list, item):
+        if not item.data(33):
+            return
+        folder_cid = item.data(34)
+        folder_path = item.data(35)
+        if not folder_cid or not folder_path:
+            return
+        index = self.lists.index(note_list)
+        folder_name = str(folder_path).rsplit(" / ", 1)[-1]
+        self._folder_stacks[index].append((folder_name, str(folder_cid)))
+        self._active_folder_cids[index] = str(folder_cid)
+        self._active_folder_paths[index] = " / ".join(
+            [self.TAB_NAMES[index]]
+            + [folder[0] for folder in self._folder_stacks[index]]
+        )
+        self._render_breadcrumb(index)
+        self.load_current(index)
 
     def _on_notes_failed(self, index, message):
         self._show_error(index, f"笔记加载失败: {message}")
 
+    def _show_note_context_menu(self, note_list, position):
+        item = note_list.itemAt(position)
+        if item is None or item.data(33):
+            return
+        note_list.setCurrentItem(item)
+        note = item.data(32) or {}
+        menu = QMenu(self)
+        apply_theme_stylesheet(menu, self._note_menu_stylesheet)
+        delete_action = menu.addAction("🗑️ 删除")
+        delete_action.triggered.connect(lambda: self._delete_note(note))
+        menu.exec(note_list.viewport().mapToGlobal(position))
+
+    def _delete_note(self, note):
+        note_id = self._note_id(note)
+        if not note_id:
+            QMessageBox.warning(self, "删除失败", "笔记数据中缺少笔记 ID")
+            return
+        title = str(note.get("title") or "无标题").strip()
+        answer = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定要删除《{title}》吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            response = self.crawler.session.get(
+                f"https://noteyd.chaoxing.com/pc/note_note/{note_id}/deleteNoteLatest",
+                headers=self._note_request_headers(
+                    f"https://noteyd.chaoxing.com/pc/{note_id}?from=fetchAdjacent"
+                ),
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("result") not in (1, True, "1", "true", "True"):
+                raise RuntimeError(payload.get("msg") or "服务器未确认删除成功")
+        except Exception as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+
+        self._note_preview_cache.pop(note_id, None)
+        self.refresh_current()
+
     def _show_error(self, index, message):
         self.lists[index].clear()
-        self.lists[index].addItem(message)
+        self._set_status(index, message)
+        self.summary_label.setText(f"{self.TAB_NAMES[index]} · 加载失败")
+
+    def _set_status(self, index, message):
+        self.status_label.setText(message)
+        self.status_label.setVisible(bool(message))
+
+        if message:
+            self.status_label.setStyleSheet("color: #888888; font-size: 14px; padding: 20px;")
 
     @staticmethod
     def _sync_note_selection(note_list, selected_item):
@@ -827,6 +1449,53 @@ class NotesView(QWidget):
         if payload.get("result") not in (1, True, "1", "true", "True"):
             raise RuntimeError(payload.get("msg") or "服务器未确认保存成功")
 
+    def _create_note_remote(self, note, content, rtf_content):
+        """先保存草稿后正式创建新笔记，不能使用已有笔记的编辑接口。"""
+        note_id = self._note_id(note)
+        if not note_id:
+            raise RuntimeError("新笔记缺少笔记 ID，无法创建")
+
+        notebook_id = str(note.get("notebookCid") or self.notebook_id)
+        response = self.crawler.session.post(
+            "https://noteyd.chaoxing.com/pc/note_note/createNote",
+            params={"cid": note_id},
+            data={
+                "title": str(note.get("title") or "").strip(),
+                "encode": 0,
+                "content": content,
+                "files_url": note.get("files_url") or note.get("filesUrl") or "",
+                "attachment": note.get("attachment") or "",
+                "rtf_content": rtf_content,
+                "_t": int(datetime.now().timestamp() * 1000),
+                "isRichText": 1,
+                "isCooperate": 1 if self._uses_resource_note(note) else 0,
+                "notebookCid": notebook_id,
+                "extension": note.get("extension") or json.dumps({
+                    "cooperateVersion": 1,
+                    "storeType": "2",
+                    "useMySQL": True,
+                }, ensure_ascii=False),
+                "isNewNote": 1,
+                "coopResource": note.get("coopResource") or "",
+                "sort": note.get("sort") or "",
+                "cooperatorPuids": note.get("cooperatorPuids") or "",
+                "openInviteSign": note.get("openInviteSign", 0),
+            },
+            headers=self._note_request_headers(
+                "https://noteyd.chaoxing.com/pc/editor"
+                f"?isEdit=1&type=1&cid={note_id}"
+            ),
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("result") not in (1, True, "1", "true", "True"):
+            raise RuntimeError(payload.get("msg") or "服务器未确认创建成功")
+
+        message = payload.get("msg")
+        if isinstance(message, dict) and message.get("newCid"):
+            note["noteCid"] = str(message["newCid"])
+
     @staticmethod
     def _note_id(note):
         candidates = []
@@ -846,7 +1515,7 @@ class NotesView(QWidget):
         return candidates[0] if candidates else ""
 
     def _refresh_note_card(self, note, plain_content=None):
-        content = " ".join(str(plain_content if plain_content is not None else note.get("content") or "").split())
+        content = self._note_preview_text(note, plain_content)
         if len(content) > 180:
             content = content[:180] + "..."
         for note_list in self.lists:
@@ -861,6 +1530,22 @@ class NotesView(QWidget):
                 if content_label is not None:
                     content_label.setText(content)
                 return
+
+    @staticmethod
+    def _note_preview_text(note, plain_content=None):
+        content = plain_content
+        if content is None:
+            content = note.get("content") or note.get("contentTxt") or ""
+        content = str(content or "").strip()
+        if not content:
+            rich_content = str(note.get("rtf_content") or "").strip()
+            rich_content = re.sub(
+                r"<hidden\b[^>]*>.*?</hidden>", " ", rich_content,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            content = re.sub(r"<[^>]+>", " ", rich_content)
+            content = unescape(content)
+        return " ".join(content.split())
 
     @staticmethod
     def _note_detail_stylesheet(palette):
@@ -901,10 +1586,7 @@ class NotesView(QWidget):
     @staticmethod
     def _create_note_widget(note):
         title = str(note.get("title") or "无标题").strip()
-        content = str(
-            note.get("content") or note.get("contentTxt") or note.get("rtf_content") or ""
-        ).strip()
-        content = " ".join(content.split())
+        content = NotesView._note_preview_text(note)
         if len(content) > 180:
             content = content[:180] + "..."
         time_text = str(note.get("ftime") or note.get("createTime") or "")
