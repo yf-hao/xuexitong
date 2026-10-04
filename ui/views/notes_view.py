@@ -53,23 +53,6 @@ class NotesLoadThread(QThread):
                     "Safari/537.36"
                 ),
             }
-            if self.index == 2:
-                response = session.get(
-                    "https://noteyd.chaoxing.com/pc/cooperate/getCooperateNotes",
-                    params={
-                        "kw": "", "lastValue": "", "maxW": 80,
-                        "pageSize": 30, "_t": datetime.now().day,
-                    }, headers=headers, timeout=15,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                notes = self._extract_notes(payload)
-                if notes is None:
-                    raise RuntimeError(self._response_error(payload))
-                self._hydrate_cooperate_notes(session, notes, headers)
-                self.loaded.emit(self.index, notes, {}, {})
-                return
-
             category_id = (
                 f"gongkaibiji{self.user_id}"
                 if self.index == 0
@@ -253,6 +236,66 @@ class NotesLoadThread(QThread):
             if value:
                 return str(value)
         return ""
+
+
+class NoteDetailLoadThread(QThread):
+    loaded = pyqtSignal(object, object, int)
+    failed = pyqtSignal(str, int)
+
+    def __init__(self, session, note, encoder, request_id, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.note = dict(note)
+        self.encoder = encoder
+        self.request_id = request_id
+
+    def run(self):
+        try:
+            note = self.fetch(self.session, self.note)
+            self.loaded.emit(note, self.encoder, self.request_id)
+        except Exception as exc:
+            self.failed.emit(str(exc), self.request_id)
+
+    @staticmethod
+    def fetch(session, note):
+        note_id = NotesView._note_id(note)
+        if not note_id:
+            raise RuntimeError("笔记数据中缺少笔记 ID")
+
+        response = session.get(
+            "https://noteyd.chaoxing.com/pc/note_note/getNoteDetail",
+            params={"cid": note_id, "needCoopResource": 1},
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Referer": f"https://noteyd.chaoxing.com/pc/{note_id}?isEdit=1&type=1",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 "
+                    "Safari/537.36"
+                ),
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        message = payload.get("msg") if isinstance(payload, dict) else None
+        detail = message.get("note") if isinstance(message, dict) else None
+        if payload.get("result") not in (1, True, "1", "true", "True") or not isinstance(detail, dict):
+            raise RuntimeError("详情接口未返回有效笔记数据")
+
+        merged = dict(note)
+        merged.update(detail)
+        resources = detail.get("coopResource")
+        if isinstance(resources, list):
+            for resource in resources:
+                value = resource.get("value") if isinstance(resource, dict) else None
+                if isinstance(value, dict) and value.get("data"):
+                    merged["coopResource"] = value["data"]
+                    break
+        return merged
 
 
 class NoteImageUploadThread(QThread):
@@ -1009,8 +1052,8 @@ class NotesView(QWidget):
 
     NOTE_HOME_URL = "https://noteyd.chaoxing.com/pc/note_notebook/myNotebooksLatest"
     NOTEBOOK_ID_FALLBACK = "bb551915d9e7d5a86071cdfeb91dc755"
-    TAB_NAMES = ("公开笔记", "个人笔记", "推荐")
-    TAB_LABELS = ("🌐 公开笔记", "👤 个人笔记", "⭐ 推荐")
+    TAB_NAMES = ("公开笔记", "个人笔记")
+    TAB_LABELS = ("🌐 公开笔记", "👤 个人笔记")
 
     def __init__(self, crawler, parent=None):
         super().__init__(parent)
@@ -1020,10 +1063,12 @@ class NotesView(QWidget):
         self.parent_id = "root"
         self.load_thread = None
         self._resource_encoder = None
+        self._note_detail_threads = []
+        self._note_detail_request_id = 0
         self._note_preview_cache = {}
-        self._active_folder_cids = {0: None, 1: None, 2: None}
-        self._active_folder_paths = {0: None, 1: None, 2: None}
-        self._folder_stacks = {0: [], 1: [], 2: []}
+        self._active_folder_cids = {0: None, 1: None}
+        self._active_folder_paths = {0: None, 1: None}
+        self._folder_stacks = {0: [], 1: []}
         self.setup_ui()
 
     def setup_ui(self):
@@ -1915,30 +1960,66 @@ class NotesView(QWidget):
             card.update()
 
     def _show_note_detail(self, note):
-        try:
-            note = self._fetch_note_detail(note)
-        except Exception as exc:
-            QMessageBox.warning(self, "加载失败", f"无法加载笔记详情: {exc}")
+        note_id = self._note_id(note)
+        if not note_id:
+            QMessageBox.warning(self, "加载失败", "笔记数据中缺少笔记 ID")
             return
 
-        if self._uses_resource_note(note):
-            encoder = self._prepare_resource_encoder(note)
-            encoder.load_editor_html(
-                lambda html: QTimer.singleShot(
-                    0,
-                    lambda loaded_html=html: self._show_note_composer(
-                        note, initial_html=loaded_html
-                    ),
-                ),
-                on_failed=lambda message: QTimer.singleShot(
-                    0,
-                    lambda error=message: QMessageBox.warning(
-                        self, "加载失败", error
-                    ),
-                ),
-            )
+        self._note_detail_request_id += 1
+        request_id = self._note_detail_request_id
+        encoder = self._prepare_resource_encoder(note) if self._uses_resource_note(note) else None
+        thread = NoteDetailLoadThread(
+            self.crawler.session, note, encoder, request_id, self
+        )
+        self._note_detail_threads.append(thread)
+        thread.loaded.connect(self._on_note_detail_loaded)
+        thread.failed.connect(self._on_note_detail_failed)
+        thread.finished.connect(self._clear_note_detail_thread)
+        thread.start()
+
+    def _on_note_detail_loaded(self, note, encoder, request_id):
+        if request_id != self._note_detail_request_id:
             return
-        self._show_note_composer(note)
+        if not self._uses_resource_note(note):
+            self._show_note_composer(note)
+            return
+
+        if encoder is None:
+            encoder = self._prepare_resource_encoder(note)
+        encoder.load_editor_html(
+            lambda html, current_note=note, current_request_id=request_id:
+            QTimer.singleShot(
+                0,
+                lambda loaded_html=html, note_to_open=current_note, rid=current_request_id:
+                self._open_resource_note_editor(note_to_open, loaded_html, rid),
+            ),
+            on_failed=lambda message, current_request_id=request_id:
+            QTimer.singleShot(
+                0,
+                lambda error=message, rid=current_request_id:
+                self._show_note_detail_error(error, rid),
+            ),
+            resource=str(note.get("coopResource") or ""),
+        )
+
+    def _open_resource_note_editor(self, note, html, request_id):
+        if request_id == self._note_detail_request_id:
+            self._show_note_composer(note, initial_html=html)
+
+    def _on_note_detail_failed(self, message, request_id):
+        self._show_note_detail_error(
+            f"无法加载笔记详情: {message}", request_id
+        )
+
+    def _show_note_detail_error(self, message, request_id):
+        if request_id == self._note_detail_request_id:
+            QMessageBox.warning(self, "加载失败", message)
+
+    def _clear_note_detail_thread(self):
+        thread = self.sender()
+        if thread in self._note_detail_threads:
+            self._note_detail_threads.remove(thread)
+            thread.deleteLater()
 
     def _prepare_resource_encoder(self, note):
         note_id = self._note_id(note)
@@ -1955,44 +2036,7 @@ class NotesView(QWidget):
         return self._resource_encoder
 
     def _fetch_note_detail(self, note):
-        note_id = self._note_id(note)
-        if not note_id:
-            raise RuntimeError("笔记数据中缺少笔记 ID")
-
-        response = self.crawler.session.get(
-            "https://noteyd.chaoxing.com/pc/note_note/getNoteDetail",
-            params={"cid": note_id, "needCoopResource": 1},
-            headers={
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Referer": f"https://noteyd.chaoxing.com/pc/{note_id}?isEdit=1&type=1",
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 "
-                    "Safari/537.36"
-                ),
-            },
-            timeout=15,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        message = payload.get("msg") if isinstance(payload, dict) else None
-        detail = message.get("note") if isinstance(message, dict) else None
-        if payload.get("result") not in (1, True, "1", "true", "True") or not isinstance(detail, dict):
-            raise RuntimeError("详情接口未返回有效笔记数据")
-
-        merged = dict(note)
-        merged.update(detail)
-        resources = detail.get("coopResource")
-        if isinstance(resources, list):
-            for resource in resources:
-                value = resource.get("value") if isinstance(resource, dict) else None
-                if isinstance(value, dict) and value.get("data"):
-                    merged["coopResource"] = value["data"]
-                    break
-        return merged
+        return NoteDetailLoadThread.fetch(self.crawler.session, note)
 
     @staticmethod
     def _toggle_markdown_mode(content_view, enabled):

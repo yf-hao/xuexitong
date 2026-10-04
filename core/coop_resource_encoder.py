@@ -16,6 +16,8 @@ class CoopResourceEncoder(QObject):
         self._session = session
         self._note_cid = str(note_cid)
         self._editor_type = int(editor_type)
+        self._loaded_resource = None
+        self._requested_resource = None
         self._profile = QWebEngineProfile(self)
         self._page = QWebEnginePage(self._profile, self)
         self._html = ""
@@ -38,12 +40,16 @@ class CoopResourceEncoder(QObject):
         if note_cid != self._note_cid:
             self._note_cid = note_cid
             self._ready = False
+            self._loaded_resource = None
+            self._requested_resource = None
 
     def set_editor_type(self, editor_type):
         editor_type = int(editor_type)
         if editor_type != self._editor_type:
             self._editor_type = editor_type
             self._ready = False
+            self._loaded_resource = None
+            self._requested_resource = None
 
     @staticmethod
     def _build_editor_url(note_cid, editor_type):
@@ -71,13 +77,24 @@ class CoopResourceEncoder(QObject):
         self._pending = True
         self.prepare()
 
-    def load_editor_html(self, on_loaded, on_failed=None):
+    def load_editor_html(self, on_loaded, on_failed=None, resource=None):
         self._on_editor_html_callback = on_loaded
         self._on_editor_html_failed_callback = on_failed
         self._editor_html_attempts = 0
+        self._requested_resource = resource
         if self._ready:
-            self._ready = False
-            self._loading = False
+            if (
+                self._loaded_resource is not None
+                and resource is not None
+                and resource != self._loaded_resource
+            ):
+                self._ready = False
+                self._loading = False
+            else:
+                if self._loaded_resource is None:
+                    self._loaded_resource = resource
+                self._read_editor_html()
+                return
         self.prepare()
 
     def _set_cookies(self):
@@ -129,6 +146,7 @@ class CoopResourceEncoder(QObject):
 
     def _on_editor_html_loaded(self, html):
         if isinstance(html, str):
+            self._loaded_resource = self._requested_resource
             callback = self._on_editor_html_callback
             self._on_editor_html_callback = None
             self._on_editor_html_failed_callback = None
