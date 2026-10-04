@@ -325,6 +325,38 @@ class NoteImageUploadThread(QThread):
             self.failed.emit(str(exc))
 
 
+class NoteImageLoadThread(QThread):
+    """Download existing note images for the QTextDocument resource cache."""
+
+    image_loaded = pyqtSignal(str, bytes)
+
+    def __init__(self, session, image_urls, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.image_urls = image_urls
+
+    def run(self):
+        headers = {
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Referer": "https://noteyd.chaoxing.com/",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 "
+                "Safari/537.36"
+            ),
+        }
+        for image_url in self.image_urls:
+            try:
+                response = self.session.get(
+                    image_url, headers=headers, timeout=20
+                )
+                response.raise_for_status()
+                if response.content:
+                    self.image_loaded.emit(image_url, response.content)
+            except Exception:
+                continue
+
+
 class NoteCard(QWidget):
     """可点击的笔记卡片。"""
 
@@ -1318,6 +1350,7 @@ class NotesView(QWidget):
             ).strip()
             if re.search(r"<[a-zA-Z][^>]*>", content):
                 content_edit.setHtml(content)
+                self._load_note_image_resources(content_edit)
             else:
                 content_edit.setPlainText(content)
         content_edit.image_paste_requested.connect(
@@ -1381,6 +1414,62 @@ class NotesView(QWidget):
     def _focus_note_composer(content_edit):
         content_edit.setFocus(Qt.FocusReason.OtherFocusReason)
         content_edit.moveCursor(QTextCursor.MoveOperation.End)
+
+    @staticmethod
+    def _note_image_urls(document):
+        image_urls = set()
+        block = document.begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid() and fragment.charFormat().isImageFormat():
+                    image_url = fragment.charFormat().toImageFormat().name()
+                    if image_url.startswith(("http://", "https://")):
+                        image_urls.add(image_url)
+                iterator += 1
+            block = block.next()
+        return sorted(image_urls)
+
+    def _load_note_image_resources(self, content_edit):
+        image_urls = self._note_image_urls(content_edit.document())
+        if not image_urls:
+            return
+
+        thread = NoteImageLoadThread(
+            self.crawler.session, image_urls, content_edit
+        )
+        if not hasattr(content_edit, "_image_load_threads"):
+            content_edit._image_load_threads = []
+        content_edit._image_load_threads.append(thread)
+        thread.image_loaded.connect(
+            lambda image_url, image_data, editor=content_edit:
+            self._register_note_image_resource(editor, image_url, image_data)
+        )
+        thread.finished.connect(
+            lambda editor=content_edit, current=thread:
+            self._cleanup_note_image_thread(editor, current)
+        )
+        thread.start()
+
+    @staticmethod
+    def _register_note_image_resource(content_edit, image_url, image_data):
+        image = QImage.fromData(image_data)
+        if image.isNull():
+            return
+        document = content_edit.document()
+        document.addResource(
+            QTextDocument.ResourceType.ImageResource, QUrl(image_url), image
+        )
+        document.markContentsDirty(0, document.characterCount())
+        content_edit.viewport().update()
+
+    @staticmethod
+    def _cleanup_note_image_thread(content_edit, thread):
+        threads = getattr(content_edit, "_image_load_threads", [])
+        if thread in threads:
+            threads.remove(thread)
+        thread.deleteLater()
 
     def _upload_pasted_image(self, content_edit, image_bytes):
         marker = f"[图片上传中:{uuid.uuid4().hex}]"
