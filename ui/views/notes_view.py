@@ -378,7 +378,7 @@ class ImageResizeOverlay(QWidget):
         pen = QPen(QColor("#007acc"), 1, Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
         painter.setPen(QPen(QColor("#ffffff"), 1))
         painter.setBrush(QColor("#007acc"))
         painter.drawRect(self._handle_rect())
@@ -391,7 +391,7 @@ class ImageResizeOverlay(QWidget):
             self._start_pos = event.position().toPoint()
             self._start_global_pos = event.globalPosition().toPoint()
             overlay_global = self.mapToGlobal(QPoint(0, 0))
-            self._start_global_left = overlay_global.x() + 3
+            self._start_global_left = overlay_global.x()
             event.accept()
             return
         event.accept()
@@ -495,7 +495,7 @@ class MarkdownTextEdit(QTextEdit):
         cursor_x = line.cursorToX(max(0, position_in_block))
         if isinstance(cursor_x, tuple):
             cursor_x = cursor_x[0]
-        image_x = line.x() + cursor_x
+        image_x = block_rect.x() + line.x() + cursor_x
         image_y = block_rect.y() + line.y() + line.ascent() - height
         offset_x = self.horizontalScrollBar().value()
         offset_y = self.verticalScrollBar().value()
@@ -509,10 +509,10 @@ class MarkdownTextEdit(QTextEdit):
         )
         self._image_overlay.set_image_size(width, height)
         self._image_overlay.setGeometry(
-            round(image_x) - 3,
-            round(image_y) - 3,
-            round(image_width) + 6,
-            round(image_height) + 6,
+            round(image_x),
+            round(image_y),
+            round(image_width),
+            round(image_height),
         )
         self._image_overlay.setCursor(Qt.CursorShape.ArrowCursor)
         self._image_overlay.show()
@@ -587,6 +587,10 @@ class MarkdownTextEdit(QTextEdit):
         image_block_cursor = QTextCursor(document)
         image_block_cursor.setPosition(max(0, image_position))
         image_block = image_block_cursor.block()
+        image_block_format = image_block.blockFormat()
+        image_block_format.setTopMargin(8)
+        image_block_format.setBottomMargin(8)
+        image_block_cursor.setBlockFormat(image_block_format)
         if not image_block.next().isValid():
             split_after = QTextCursor(document)
             split_after.setPosition(image_position + 1)
@@ -674,17 +678,14 @@ class MarkdownTextEdit(QTextEdit):
                 image_x, _image_y, image_width, _image_height = image_rect
                 click_x = event.position().x()
                 if click_x < image_x:
-                    previous_block = image_cursor.block().previous()
-                    if previous_block.isValid():
-                        cursor = QTextCursor(previous_block)
-                        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
-                    else:
-                        cursor = QTextCursor(image_cursor.block())
+                    self._hide_image_editor()
+                    cursor = QTextCursor(image_cursor.block())
                     self.setTextCursor(cursor)
                     self._image_boundary_action = "before"
                     event.accept()
                     return
                 if click_x > image_x + image_width:
+                    self._hide_image_editor()
                     cursor = QTextCursor(image_cursor)
                     cursor.setPosition(image_cursor.block().position() + 1)
                     self.setTextCursor(cursor)
@@ -694,6 +695,7 @@ class MarkdownTextEdit(QTextEdit):
                 self._image_boundary_action = None
                 self._boundary_image_cursor = None
                 self._show_image_editor(image_cursor)
+                self.clearFocus()
                 event.accept()
                 return
 
@@ -719,6 +721,36 @@ class MarkdownTextEdit(QTextEdit):
         super().mousePressEvent(event)
         self._move_cursor_out_of_image_block()
 
+    def mouseDoubleClickEvent(self, event):
+        point = event.position().toPoint()
+        cursor = self.cursorForPosition(point)
+        previous_block = cursor.block().previous()
+        if self._block_contains_image(previous_block):
+            image_cursor = None
+            iterator = previous_block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid() and fragment.charFormat().isImageFormat():
+                    image_cursor = QTextCursor(self.document())
+                    image_cursor.setPosition(fragment.position())
+                    break
+                iterator += 1
+            if image_cursor is not None:
+                width, height = self._image_size(image_cursor)
+                _image_x, image_y, _image_width, _image_height = (
+                    self._image_viewport_rect(image_cursor, width, height)
+                )
+                if point.y() >= image_y + height:
+                    self._image_boundary_action = None
+                    self._boundary_image_cursor = None
+                    self._hide_image_editor()
+                    cursor.clearSelection()
+                    self.setTextCursor(cursor)
+                    self.setFocus(Qt.FocusReason.MouseFocusReason)
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
+
     def mouseMoveEvent(self, event):
         self.viewport().setCursor(
             Qt.CursorShape.ArrowCursor
@@ -743,6 +775,7 @@ class MarkdownTextEdit(QTextEdit):
             return
 
         self._show_image_editor(image_cursor)
+        self.clearFocus()
         menu = QMenu(self)
         left_action = menu.addAction("左对齐")
         center_action = menu.addAction("居中")
@@ -832,7 +865,14 @@ class MarkdownTextEdit(QTextEdit):
                     cursor.insertBlock()
                     previous_block = image_cursor.block().previous()
                     if previous_block.isValid():
-                        self.setTextCursor(QTextCursor(previous_block))
+                        block_format = previous_block.blockFormat()
+                        block_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                        paragraph_cursor = QTextCursor(previous_block)
+                        paragraph_cursor.setBlockFormat(block_format)
+                        paragraph_cursor.movePosition(
+                            QTextCursor.MoveOperation.StartOfBlock
+                        )
+                        self.setTextCursor(paragraph_cursor)
                 else:
                     following_block = image_cursor.block().next()
                     if following_block.isValid():
@@ -1227,8 +1267,12 @@ class NotesView(QWidget):
             QMessageBox.warning(self, "创建失败", f"无法获取笔记配置: {exc}")
             return
 
+        self._show_note_composer()
+
+    def _show_note_composer(self, note=None):
+        is_new_note = note is None
         dialog = QDialog(self)
-        dialog.setWindowTitle("创建笔记")
+        dialog.setWindowTitle("创建笔记" if is_new_note else "编辑笔记")
         main_size = self.window().size()
         screen = dialog.screen()
         available_size = (
@@ -1252,6 +1296,8 @@ class NotesView(QWidget):
         title_edit.setObjectName("note_composer_title")
         title_edit.setPlaceholderText("请输入标题")
         title_edit.setMinimumHeight(42)
+        if not is_new_note:
+            title_edit.setText(str(note.get("title") or ""))
         composer_layout.addWidget(title_edit)
 
         separator = QFrame()
@@ -1263,6 +1309,17 @@ class NotesView(QWidget):
         content_edit = MarkdownTextEdit()
         content_edit.setObjectName("note_composer_body")
         content_edit.setMinimumHeight(420)
+        if not is_new_note:
+            content = str(
+                note.get("rtf_content")
+                or note.get("content")
+                or note.get("contentTxt")
+                or ""
+            ).strip()
+            if re.search(r"<[a-zA-Z][^>]*>", content):
+                content_edit.setHtml(content)
+            else:
+                content_edit.setPlainText(content)
         content_edit.image_paste_requested.connect(
             lambda image_bytes: self._upload_pasted_image(content_edit, image_bytes)
         )
@@ -1302,18 +1359,20 @@ class NotesView(QWidget):
 
         action_layout = QHBoxLayout()
         action_layout.addStretch()
-        save_button = QPushButton("保存")
-        cancel_button = QPushButton("取消")
+        save_button = QPushButton("创建" if is_new_note else "保存")
         save_button.setAutoDefault(False)
         save_button.setDefault(False)
-        cancel_button.setAutoDefault(False)
-        cancel_button.setDefault(False)
-        save_button.clicked.connect(
-            lambda: self._save_new_note(title_edit, content_edit, dialog)
-        )
-        cancel_button.clicked.connect(dialog.reject)
+        if is_new_note:
+            save_button.clicked.connect(
+                lambda: self._save_new_note(title_edit, content_edit, dialog)
+            )
+        else:
+            save_button.clicked.connect(
+                lambda: self._save_edited_note(
+                    note, title_edit, content_edit, dialog
+                )
+            )
         action_layout.addWidget(save_button)
-        action_layout.addWidget(cancel_button)
         layout.addLayout(action_layout)
         apply_theme_stylesheet(dialog, self._note_detail_stylesheet)
         dialog.exec()
@@ -1410,6 +1469,17 @@ class NotesView(QWidget):
             self.load_current(index)
         else:
             self.tabs.setCurrentIndex(index)
+
+    def _save_edited_note(self, note, title_edit, content_edit, dialog):
+        title = title_edit.text().strip()
+        if not title:
+            QMessageBox.warning(dialog, "无法保存", "请输入笔记标题")
+            title_edit.setFocus()
+            return
+
+        content_edit.convert_all_headings()
+        note["title"] = title
+        self._save_note_content(note, content_edit, dialog)
 
     def _save_new_note(self, title_edit, content_edit, dialog):
         title = title_edit.text().strip()
@@ -1758,85 +1828,9 @@ class NotesView(QWidget):
             QMessageBox.warning(self, "加载失败", f"无法加载笔记详情: {exc}")
             return
 
-        title = str(note.get("title") or "无标题").strip()
-        content = str(
-            note.get("rtf_content") or note.get("content") or note.get("contentTxt") or ""
-        ).strip()
         if self._uses_resource_note(note):
             self._prepare_resource_encoder(note)
-        time_text = str(note.get("ftime") or note.get("createTime") or "")
-        read_count = note.get("readCount", note.get("s_readcount", 0))
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(title)
-        dialog.resize(680, 480)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(22, 20, 22, 20)
-        layout.setSpacing(10)
-
-        title_label = QLabel(title)
-        title_label.setObjectName("note_detail_title")
-        layout.addWidget(title_label)
-
-        meta_label = QLabel(f"{time_text}  ·  阅读 {read_count}")
-        meta_label.setObjectName("note_detail_meta")
-        layout.addWidget(meta_label)
-
-        content_view = QTextEdit()
-        content_view.setAcceptRichText(True)
-        if re.search(r"<[a-zA-Z][^>]*>", content):
-            content_view.setHtml(content)
-        else:
-            content_view.setPlainText(content)
-        content_view.setObjectName("note_detail_content")
-        markdown_action = QAction("Markdown 源码", dialog)
-        markdown_action.setCheckable(True)
-
-        toolbar = QToolBar()
-        toolbar.setMovable(False)
-        toolbar.setObjectName("note_edit_toolbar")
-        markdown_action.toggled.connect(
-            lambda checked: self._toggle_markdown_mode(content_view, checked)
-        )
-        bold_action = QAction("加粗", toolbar)
-        bold_action.setCheckable(True)
-        bold_action.toggled.connect(lambda checked: content_view.setFontWeight(700 if checked else 400))
-        toolbar.addAction(bold_action)
-        italic_action = QAction("斜体", toolbar)
-        italic_action.setCheckable(True)
-        italic_action.toggled.connect(content_view.setFontItalic)
-        toolbar.addAction(italic_action)
-        underline_action = QAction("下划线", toolbar)
-        underline_action.setCheckable(True)
-        underline_action.toggled.connect(content_view.setFontUnderline)
-        toolbar.addAction(underline_action)
-        toolbar.addSeparator()
-        toolbar.addAction(markdown_action)
-        toolbar.addSeparator()
-        size_box = QSpinBox()
-        size_box.setRange(8, 48)
-        size_box.setValue(14)
-        size_box.setSuffix(" px")
-        size_box.valueChanged.connect(lambda value: content_view.setFontPointSize(value))
-        toolbar.addWidget(size_box)
-        layout.addWidget(toolbar)
-        layout.addWidget(content_view)
-
-        action_layout = QHBoxLayout()
-        action_layout.addStretch()
-        save_button = QPushButton("保存")
-        save_button.setObjectName("note_save_button")
-        save_button.clicked.connect(
-            lambda: self._save_note_content(note, content_view, dialog, markdown_action.isChecked())
-        )
-        action_layout.addWidget(save_button)
-        cancel_button = QPushButton("取消")
-        cancel_button.clicked.connect(dialog.reject)
-        action_layout.addWidget(cancel_button)
-        layout.addLayout(action_layout)
-
-        apply_theme_stylesheet(dialog, self._note_detail_stylesheet)
-        dialog.exec()
+        self._show_note_composer(note)
 
     def _prepare_resource_encoder(self, note):
         note_id = self._note_id(note)
@@ -2250,6 +2244,10 @@ class NotesView(QWidget):
                 card = note_list.itemWidget(item)
                 if card is None:
                     continue
+                item.setData(32, note)
+                title_label = card.findChild(QLabel, "note_title")
+                if title_label is not None:
+                    title_label.setText(str(note.get("title") or "无标题"))
                 content_label = card.findChild(QLabel, "note_content")
                 if content_label is not None:
                     content_label.setText(content)
