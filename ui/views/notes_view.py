@@ -369,9 +369,9 @@ class NoteCard(QWidget):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
+        super().mouseDoubleClickEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self.double_clicked.emit()
-        super().mouseDoubleClickEvent(event)
 
 
 class ImageResizeOverlay(QWidget):
@@ -1301,7 +1301,7 @@ class NotesView(QWidget):
 
         self._show_note_composer()
 
-    def _show_note_composer(self, note=None):
+    def _show_note_composer(self, note=None, initial_html=None):
         is_new_note = note is None
         dialog = QDialog(self)
         dialog.setWindowTitle("创建笔记" if is_new_note else "编辑笔记")
@@ -1342,12 +1342,12 @@ class NotesView(QWidget):
         content_edit.setObjectName("note_composer_body")
         content_edit.setMinimumHeight(420)
         if not is_new_note:
-            content = str(
+            content = str(initial_html if initial_html is not None else (
                 note.get("rtf_content")
                 or note.get("content")
                 or note.get("contentTxt")
                 or ""
-            ).strip()
+            )).strip()
             if re.search(r"<[a-zA-Z][^>]*>", content):
                 content_edit.setHtml(content)
                 self._load_note_image_resources(content_edit)
@@ -1568,6 +1568,7 @@ class NotesView(QWidget):
 
         content_edit.convert_all_headings()
         note["title"] = title
+        note["isNewNote"] = 0
         self._save_note_content(note, content_edit, dialog)
 
     def _save_new_note(self, title_edit, content_edit, dialog):
@@ -1600,6 +1601,7 @@ class NotesView(QWidget):
             )
         else:
             self._resource_encoder.set_note_cid(note["noteCid"])
+            self._resource_encoder.set_editor_type(1)
         self._resource_encoder.encode(
             resource_html,
             title,
@@ -1748,7 +1750,9 @@ class NotesView(QWidget):
                     lambda current_item=item: note_list.setCurrentItem(current_item)
                 )
                 note_widget.double_clicked.connect(
-                    lambda current=note: self._show_note_detail(current)
+                    lambda current=note: QTimer.singleShot(
+                        0, lambda: self._show_note_detail(current)
+                    )
                 )
                 item.setSizeHint(note_widget.sizeHint())
                 note_list.setItemWidget(item, note_widget)
@@ -1918,7 +1922,22 @@ class NotesView(QWidget):
             return
 
         if self._uses_resource_note(note):
-            self._prepare_resource_encoder(note)
+            encoder = self._prepare_resource_encoder(note)
+            encoder.load_editor_html(
+                lambda html: QTimer.singleShot(
+                    0,
+                    lambda loaded_html=html: self._show_note_composer(
+                        note, initial_html=loaded_html
+                    ),
+                ),
+                on_failed=lambda message: QTimer.singleShot(
+                    0,
+                    lambda error=message: QMessageBox.warning(
+                        self, "加载失败", error
+                    ),
+                ),
+            )
+            return
         self._show_note_composer(note)
 
     def _prepare_resource_encoder(self, note):
@@ -1926,10 +1945,14 @@ class NotesView(QWidget):
         if not note_id:
             return
         if self._resource_encoder is None:
-            self._resource_encoder = CoopResourceEncoder(self.crawler.session, note_id, self)
+            self._resource_encoder = CoopResourceEncoder(
+                self.crawler.session, note_id, self, editor_type=2
+            )
         else:
             self._resource_encoder.set_note_cid(note_id)
+            self._resource_encoder.set_editor_type(2)
         self._resource_encoder.prepare()
+        return self._resource_encoder
 
     def _fetch_note_detail(self, note):
         note_id = self._note_id(note)
@@ -2051,10 +2074,10 @@ class NotesView(QWidget):
     def _save_note_content_with_resource(
         self, note, content, rtf_content, plain_content, resource, dialog, encoder
     ):
+        original_note_id = self._note_id(note)
         original_resource = str(note.get("coopResource") or "")
         note["coopResource"] = resource
         try:
-            draft_payload = self._save_note_draft(note, content, rtf_content)
             if original_resource and resource == original_resource:
                 raise RuntimeError(
                     "网页编辑器生成的 coopResource 未发生变化；"
@@ -2063,20 +2086,12 @@ class NotesView(QWidget):
             note["coopResource"] = resource
             self._save_note_remote(note, content, rtf_content)
             saved_note = self._fetch_note_detail(note)
-            saved_content = str(saved_note.get("content") or "").strip()
             saved_resource = str(saved_note.get("coopResource") or "")
-            if note.get("coopResource"):
-                if saved_resource and saved_resource != str(note["coopResource"]):
-                    raise RuntimeError(
-                        "正式接口返回成功，但服务器回读的 coopResource 与新正文不一致。"
-                    )
-                if not saved_resource and saved_content != plain_content.strip():
-                    raise RuntimeError(
-                        "草稿或正式接口返回成功，但学习通正文仍未更新；"
-                        "服务器没有回读新的 coopResource。"
-                    )
-            elif saved_content != plain_content.strip():
-                raise RuntimeError("服务器返回成功，但重新读取的正文仍未更新。")
+            resource_updated = bool(saved_resource) and saved_resource != original_resource
+            if not resource_updated:
+                raise RuntimeError(
+                    "正式接口返回成功，但 coopResource 回读仍是旧资源。"
+                )
         except Exception as exc:
             QMessageBox.warning(dialog, "保存失败", str(exc))
             return
@@ -2084,6 +2099,14 @@ class NotesView(QWidget):
         note["content"] = content
         note["contentTxt"] = content
         note["rtf_content"] = rtf_content
+        if self._note_id(note) != original_note_id:
+            self._note_preview_cache.pop(original_note_id, None)
+            self._note_preview_cache[self._note_id(note)] = " ".join(
+                plain_content.split()
+            )
+            dialog.accept()
+            self.refresh_current()
+            return
         self._refresh_note_card(note, plain_content)
         dialog.accept()
 
@@ -2095,7 +2118,11 @@ class NotesView(QWidget):
         notebook_id = str(
             note.get("notebookCid") or note.get("notebookId") or self.notebook_id
         )
-        resource_only = self._is_cooperate_note(note) and bool(note.get("coopResource"))
+        resource_only = (
+            self._uses_resource_note(note)
+            and bool(note.get("coopResource"))
+            and not note.get("isNewNote", 0)
+        )
         response = self.crawler.session.post(
             "https://noteyd.chaoxing.com/pc/note_draft/addOrUpdateNoteDraft",
             params={"cid": note_id},
@@ -2109,7 +2136,7 @@ class NotesView(QWidget):
                 "rtf_content": "" if resource_only else rtf_content,
                 "encode": 0,
                 "isRichText": 1,
-                "isCooperate": 0,
+                "isCooperate": 1 if self._uses_resource_note(note) else 0,
                 "notebookCid": notebook_id,
                 "extension": note.get("extension") or json.dumps({
                     "cooperateVersion": 1,
@@ -2184,15 +2211,16 @@ class NotesView(QWidget):
         if not note_id:
             raise RuntimeError("笔记数据中缺少笔记 ID，无法保存")
 
+        uses_resource = self._uses_resource_note(note)
         coop_resource = note.get("coopResource") or ""
-        if not self._uses_resource_note(note):
+        if not uses_resource:
             coop_resource = ""
-        if self._uses_resource_note(note) and not coop_resource:
+        if uses_resource and not coop_resource:
             raise RuntimeError(
                 "该公开笔记使用协作富文本格式，但列表数据没有返回 coopResource；"
                 "仅提交 content 不会更新学习通中的正文。"
             )
-        is_cooperate = 1 if self._is_cooperate_note(note) else 0
+        is_cooperate = 1 if uses_resource else 0
 
         title = str(note.get("title") or "").strip()
         notebook_id = str(
@@ -2201,11 +2229,11 @@ class NotesView(QWidget):
         form_data = {
             "title": title,
             "encode": 0,
-            "content": "" if self._is_cooperate_note(note) else content,
+            "content": content,
             "files_url": note.get("files_url") or note.get("filesUrl") or "",
             "attachment": note.get("attachment") or "",
             "rtf_content": (
-                "" if self._is_cooperate_note(note) else (
+                "" if uses_resource else (
                     rtf_content if rtf_content is not None else content
                 )
             ),
@@ -2218,7 +2246,7 @@ class NotesView(QWidget):
                 "storeType": "2",
                 "useMySQL": True,
             }, ensure_ascii=False),
-            "isNewNote": note.get("isNewNote", 1),
+            "isNewNote": 1 if uses_resource else note.get("isNewNote", 1),
             "coopResource": coop_resource,
             "sort": note.get("sort") or "",
             "cooperatorPuids": note.get("cooperatorPuids") or "",
@@ -2255,6 +2283,14 @@ class NotesView(QWidget):
         payload = response.json()
         if payload.get("result") not in (1, True, "1", "true", "True"):
             raise RuntimeError(payload.get("msg") or "服务器未确认保存成功")
+        message = payload.get("msg")
+        if isinstance(message, str):
+            try:
+                message = json.loads(message)
+            except json.JSONDecodeError:
+                message = None
+        if isinstance(message, dict) and message.get("newCid"):
+            note["noteCid"] = str(message["newCid"])
 
     def _create_note_remote(self, note, content, rtf_content):
         """先保存草稿后正式创建新笔记，不能使用已有笔记的编辑接口。"""
