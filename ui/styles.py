@@ -36,7 +36,7 @@ def MAIN_STYLE(palette):
     QListView::item:hover {{ background-color: {palette.accent}; color: #ffffff; }}
     QListView::item:selected {{ background-color: {palette.accent_hover}; color: #ffffff; }}
 
-    QListWidget#nav_list {{
+    QTreeWidget#nav_list {{
         border: 1px solid {palette.border};
         background-color: {palette.panel_alt_bg};
         border-radius: 8px;
@@ -44,21 +44,24 @@ def MAIN_STYLE(palette):
         min-width: 160px;
         font-size: 15px;
     }}
-    QListWidget#nav_list::item {{
-        padding: 8px 12px;
+    QTreeWidget#nav_list::item {{
+        padding: 8px 6px;
         color: {palette.text_muted};
         border-bottom: 1px solid {palette.disabled_bg};
         border-left: 4px solid transparent;
     }}
-    QListWidget#nav_list::item:hover {{
+    QTreeWidget#nav_list::item:hover {{
         background-color: {palette.hover_bg};
         color: {palette.text};
     }}
-    QListWidget#nav_list::item:selected {{
+    QTreeWidget#nav_list::item:selected {{
         background-color: {palette.accent};
         color: #ffffff;
         border-left: 4px solid {palette.accent_soft};
         border-bottom: 1px solid {palette.disabled_bg};
+    }}
+    QTreeWidget#nav_list::branch {{
+        background-color: transparent;
     }}
 
     QTreeWidget {{

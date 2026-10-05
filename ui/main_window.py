@@ -1,13 +1,15 @@
 import os
 import traceback
+from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QTreeWidget, QTreeWidgetItem,
-                             QPushButton, QLabel, QSplitter, QFrame, QListView,
-                             QListWidget, QListWidgetItem, QStackedWidget, QMessageBox, QFileDialog)
-from PyQt6.QtCore import Qt, QSettings, QCoreApplication
+                             QHeaderView, QPushButton, QLabel, QSplitter, QFrame, QListView,
+                             QStackedWidget, QMessageBox, QFileDialog)
+from PyQt6.QtCore import QByteArray, QSize, Qt, QSettings, QCoreApplication
 from ui.workers import (CourseWorker, DetailsWorker, ClassWorker, MaterialWorker, DownloadWorker)
 from ui.styles import MAIN_STYLE
-from ui.theme import apply_theme_stylesheet, refresh_theme_styles, theme_manager
+from ui.theme import apply_theme_stylesheet, get_theme_palette, refresh_theme_styles, theme_manager
+from PyQt6.QtSvg import QSvgRenderer
 from core.config import SIGNIN_DATA_FILE, APP_TITLE
 from ui.views.stats_view import StatsView
 from ui.views.management_view import ManagementView
@@ -23,8 +25,11 @@ from ui.dialogs.ai_settings_dialog import AISettingsDialog
 from core.logger import get_logger
 
 logger = get_logger()
+NAV_GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 class MainWindow(QMainWindow):
+    SELECTOR_MAX_WIDTH = 640
+
     def __init__(self, crawler):
         super().__init__()
         self.crawler = crawler
@@ -53,6 +58,10 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("选择课程:"))
         self.course_box = QComboBox()
+        self.course_box.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.course_box.setMaximumWidth(self.SELECTOR_MAX_WIDTH)
         self.course_box.setView(QListView())
         self.course_box.currentIndexChanged.connect(self.on_course_changed)
         header_layout.addWidget(self.course_box)
@@ -61,6 +70,10 @@ class MainWindow(QMainWindow):
         
         header_layout.addWidget(QLabel("选择班级:"))
         self.clazz_box = QComboBox()
+        self.clazz_box.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.clazz_box.setMaximumWidth(self.SELECTOR_MAX_WIDTH)
         self.clazz_box.setView(QListView())
         self.clazz_box.currentIndexChanged.connect(self.on_class_selected)
         header_layout.addWidget(self.clazz_box)
@@ -144,7 +157,7 @@ class MainWindow(QMainWindow):
         nav_container = QWidget()
         nav_layout = QVBoxLayout(nav_container)
         nav_layout.setContentsMargins(0, 0, 5, 0)
-        nav_label = QLabel("课程菜单")
+        nav_label = QLabel("功能菜单")
         apply_theme_stylesheet(nav_label, lambda palette: f"""
             QLabel {{
                 background-color: {palette.accent};
@@ -157,11 +170,27 @@ class MainWindow(QMainWindow):
             }}
         """)
         nav_layout.addWidget(nav_label)
-        self.nav_list = QListWidget()
+        self.nav_list = QTreeWidget()
         self.nav_list.setObjectName("nav_list")
+        self.nav_list.setColumnCount(2)
+        self.nav_list.setHeaderHidden(True)
+        self.nav_list.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Fixed
+        )
+        self.nav_list.header().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self.nav_list.setColumnWidth(0, 42)
+        self.nav_list.setRootIsDecorated(True)
+        self.nav_list.setIndentation(8)
+        self.nav_list.setItemsExpandable(True)
+        self.nav_list.setExpandsOnDoubleClick(False)
+        self.nav_list.setIconSize(QSize(18, 18))
         self.nav_list.setMinimumWidth(160)
         self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.nav_list.itemClicked.connect(self.on_nav_selected)
+        self.nav_list.itemClicked.connect(self._on_nav_item_clicked)
+        self.nav_list.itemExpanded.connect(self._save_nav_group_state)
+        self.nav_list.itemCollapsed.connect(self._save_nav_group_state)
         nav_layout.addWidget(self.nav_list)
         splitter.addWidget(nav_container)
         
@@ -273,6 +302,7 @@ class MainWindow(QMainWindow):
             self.theme_toggle_btn.setText("☀️")
             self.theme_toggle_btn.setToolTip("切换到亮色主题")
         refresh_theme_styles(self, mode)
+        self._update_nav_group_icons(mode)
 
     def _update_status(self, message):
         self.status_label.setText(message)
@@ -415,7 +445,7 @@ class MainWindow(QMainWindow):
         
         current_nav = self.nav_list.currentItem()
         if not current_nav and self.last_nav_title:
-            items = self.nav_list.findItems(self.last_nav_title, Qt.MatchFlag.MatchExactly)
+            items = self.nav_list.findItems(self.last_nav_title, Qt.MatchFlag.MatchExactly, 1)
             if items:
                 current_nav = items[0]
                 self.nav_list.setCurrentItem(current_nav)
@@ -424,7 +454,7 @@ class MainWindow(QMainWindow):
             self.on_nav_selected(current_nav)
             
             # Restore sub-feature
-            title = current_nav.text()
+            title = current_nav.text(1)
             if "统计" in title and self.stats_view.last_stats_sub:
                 self.stats_view.restore_sub_feature(self.stats_view.last_stats_sub)
             elif "管理" in title and self.management_view.last_manage_sub:
@@ -447,50 +477,102 @@ class MainWindow(QMainWindow):
                 continue
             filtered_links.append(link)
         
-        # 定义菜单顺序：签到、题库、作业、学情、统计、笔记、云盘、消息、管理
+        course_group = self._add_nav_group("course", "课程功能")
+        shared_group = self._add_nav_group("shared", "通用功能")
+        self._update_nav_group_icons(theme_manager().mode)
+
+        # Keep course-bound items separate from account-wide tools.
         menu_order = ["活动", "题库", "作业","学情", "统计", "笔记", "云盘", "消息", "管理"]
         
         for keyword in menu_order:
             if keyword == "题库":
-                # 添加题库菜单项
-                item = QListWidgetItem("题库")
-                item.setData(Qt.ItemDataRole.UserRole, "question_bank")
-                self.nav_list.addItem(item)
+                self._add_nav_item(shared_group, "题库", "question_bank")
             elif keyword == "学情":
-                # 添加学情菜单项
-                item = QListWidgetItem("学情")
-                item.setData(Qt.ItemDataRole.UserRole, "learning")
-                self.nav_list.addItem(item)
+                self._add_nav_item(course_group, "学情", "learning")
             elif keyword == "云盘":
-                # 添加云盘菜单项
-                item = QListWidgetItem("云盘")
-                item.setData(Qt.ItemDataRole.UserRole, "cloud_drive")
-                self.nav_list.addItem(item)
+                self._add_nav_item(shared_group, "云盘", "cloud_drive")
             elif keyword == "笔记":
-                item = QListWidgetItem("笔记")
-                item.setData(Qt.ItemDataRole.UserRole, "notes")
-                self.nav_list.addItem(item)
+                self._add_nav_item(shared_group, "笔记", "notes")
             elif keyword == "消息":
-                # 添加消息菜单项
-                item = QListWidgetItem("消息")
-                item.setData(Qt.ItemDataRole.UserRole, "chat")
-                self.nav_list.addItem(item)
+                self._add_nav_item(shared_group, "消息", "chat")
             else:
                 # 从 filtered_links 中查找匹配的项目
                 for link in filtered_links:
                     if keyword in link['title']:
                         display_title = "签到" if keyword == "活动" else link['title']
-                        item = QListWidgetItem(display_title)
-                        item.setData(Qt.ItemDataRole.UserRole, link['url'])
-                        self.nav_list.addItem(item)
+                        self._add_nav_item(course_group, display_title, link['url'])
                         break
             
         self.status_label.setText(f"目录同步完成: {course.name}")
         self.nav_list.clearSelection()
         self.download_btn.hide()
 
+    def _add_nav_group(self, group_id, title):
+        item = QTreeWidgetItem(self.nav_list, ["", title])
+        item.setData(0, NAV_GROUP_ROLE, group_id)
+        font = item.font(1)
+        font.setBold(True)
+        item.setFont(1, font)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        settings = QSettings("HaoSoft", "XuexitongManager")
+        expanded = settings.value(
+            f"ui/navigation_groups/{group_id}_expanded", True, type=bool
+        )
+        item.setExpanded(expanded)
+        return item
+
+    def _update_nav_group_icons(self, mode):
+        color = get_theme_palette(mode).text_muted
+        svg_by_group = {
+            "course": f"""<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M12 6.2c-2-1.4-4.8-2-8-1.7v13c3.2-.3 6 .3 8 1.7m0-13c2-1.4 4.8-2 8-1.7v13c-3.2-.3-6 .3-8 1.7m0-13v13" stroke="{color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>""",
+            "shared": f"""<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <rect x="4" y="4" width="6.5" height="6.5" rx="1.2" stroke="{color}" stroke-width="1.8"/>
+                <rect x="13.5" y="4" width="6.5" height="6.5" rx="1.2" stroke="{color}" stroke-width="1.8"/>
+                <rect x="4" y="13.5" width="6.5" height="6.5" rx="1.2" stroke="{color}" stroke-width="1.8"/>
+                <rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.2" stroke="{color}" stroke-width="1.8"/>
+            </svg>""",
+        }
+        for index in range(self.nav_list.topLevelItemCount()):
+            item = self.nav_list.topLevelItem(index)
+            svg = svg_by_group.get(item.data(0, NAV_GROUP_ROLE))
+            if not svg:
+                continue
+            renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            pixmap = QPixmap(18, 18)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            item.setIcon(0, QIcon(pixmap))
+
+    @staticmethod
+    def _add_nav_item(parent, title, action):
+        item = QTreeWidgetItem(parent, ["", title])
+        item.setData(0, Qt.ItemDataRole.UserRole, action)
+        return item
+
+    def _on_nav_item_clicked(self, item, _column):
+        if item.data(0, NAV_GROUP_ROLE):
+            item.setExpanded(not item.isExpanded())
+            return
+        self.on_nav_selected(item)
+
+    @staticmethod
+    def _save_nav_group_state(item):
+        group_id = item.data(0, NAV_GROUP_ROLE)
+        if not group_id:
+            return
+        settings = QSettings("HaoSoft", "XuexitongManager")
+        settings.setValue(
+            f"ui/navigation_groups/{group_id}_expanded", item.isExpanded()
+        )
+
     def on_nav_selected(self, item):
-        title = item.text()
+        if item is None or item.parent() is None:
+            return
+        title = item.text(1)
         self.last_nav_title = title
         course = self.course_box.currentData()
         is_activity_page = "活动" in title or "签到" in title

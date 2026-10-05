@@ -77,7 +77,7 @@ class AppController:
             try:
                 from ui.main_window import MainWindow
                 self.main_win = MainWindow(self.crawler)
-                self.main_win.show()
+                self.main_win.showMaximized()
                 app.setQuitOnLastWindowClosed(True) # 恢复正常退出逻辑
                 exit_code = app.exec()
                 sys.exit(exit_code)
