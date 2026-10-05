@@ -1398,6 +1398,8 @@ class NotesView(QWidget):
                 self._load_note_image_resources(content_edit)
             else:
                 content_edit.setPlainText(content)
+            content_edit._original_note_title = title_edit.text().strip()
+            content_edit._original_note_html = content_edit.toHtml()
         content_edit.image_paste_requested.connect(
             lambda image_bytes: self._upload_pasted_image(content_edit, image_bytes)
         )
@@ -1609,6 +1611,14 @@ class NotesView(QWidget):
         if not title:
             QMessageBox.warning(dialog, "无法保存", "请输入笔记标题")
             title_edit.setFocus()
+            return
+
+        if (
+            title == getattr(content_edit, "_original_note_title", None)
+            and content_edit.toHtml()
+            == getattr(content_edit, "_original_note_html", None)
+        ):
+            dialog.accept()
             return
 
         content_edit.convert_all_headings()
