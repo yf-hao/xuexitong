@@ -1,6 +1,6 @@
 import os
 import traceback
-from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QTreeWidget, QTreeWidgetItem,
                              QHeaderView, QPushButton, QLabel, QSplitter, QFrame, QListView,
@@ -157,19 +157,6 @@ class MainWindow(QMainWindow):
         nav_container = QWidget()
         nav_layout = QVBoxLayout(nav_container)
         nav_layout.setContentsMargins(0, 0, 5, 0)
-        nav_label = QLabel("功能菜单")
-        apply_theme_stylesheet(nav_label, lambda palette: f"""
-            QLabel {{
-                background-color: {palette.accent};
-                color: #ffffff;
-                border-radius: 6px;
-                padding: 8px 12px;
-                margin-bottom: 5px;
-                font-size: 14px;
-                font-weight: bold;
-            }}
-        """)
-        nav_layout.addWidget(nav_label)
         self.nav_list = QTreeWidget()
         self.nav_list.setObjectName("nav_list")
         self.nav_list.setColumnCount(2)
@@ -522,7 +509,9 @@ class MainWindow(QMainWindow):
         return item
 
     def _update_nav_group_icons(self, mode):
-        color = get_theme_palette(mode).text_muted
+        palette = get_theme_palette(mode)
+        color = palette.text_muted
+        group_background = QBrush(QColor(palette.border))
         svg_by_group = {
             "course": f"""<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none">
                 <path d="M12 6.2c-2-1.4-4.8-2-8-1.7v13c3.2-.3 6 .3 8 1.7m0-13c2-1.4 4.8-2 8-1.7v13c-3.2-.3-6 .3-8 1.7m0-13v13" stroke="{color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -539,6 +528,8 @@ class MainWindow(QMainWindow):
             svg = svg_by_group.get(item.data(0, NAV_GROUP_ROLE))
             if not svg:
                 continue
+            item.setBackground(0, group_background)
+            item.setBackground(1, group_background)
             renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
             pixmap = QPixmap(18, 18)
             pixmap.fill(Qt.GlobalColor.transparent)
