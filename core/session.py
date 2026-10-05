@@ -37,7 +37,21 @@ class ChaoxingSession:
             fid = self.course_params.get('fid', DEFAULT_FID)
             chaoxing = ChaoxingLogin(self.phone, self.password, fid=fid)
             chaoxing.get_login_page()
-            chaoxing.login()
+            login_result, _cookies = chaoxing.login()
+            login_succeeded = (
+                isinstance(login_result, dict)
+                and (
+                    login_result.get("status") in (True, 1)
+                    or login_result.get("result") == 1
+                )
+            )
+            if not login_succeeded:
+                message = (
+                    login_result.get("msg") or login_result.get("message")
+                    if isinstance(login_result, dict)
+                    else None
+                )
+                raise RuntimeError(str(message or "登录接口未确认认证成功"))
             self.session = chaoxing.session
             self._configure_session(self.session)
             self.logged_in = True

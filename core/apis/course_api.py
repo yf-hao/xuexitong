@@ -9,9 +9,11 @@ from core.config import DEFAULT_FID
 class CourseAPI:
     """课程相关接口封装，依赖宿主提供 session、session_manager、_details_cache 等属性。"""
 
-    def get_courses(self) -> List[Course]:
+    def get_courses(self, strict: bool = False) -> List[Course]:
         """获取课程列表（教师端），返回 Course 数据对象列表。"""
         if not getattr(self, "is_logged_in", False):
+            if strict:
+                raise RuntimeError("学习通登录状态无效，请重新登录")
             return []
 
         courses_url = "https://mooc2-gray.chaoxing.com/mooc2-ans/visit/courselistdata"
@@ -36,16 +38,36 @@ class CourseAPI:
 
         try:
             resp = self.session.post(courses_url, headers=headers, data=data, timeout=10)
-            if resp.status_code != 200:
+            if strict:
+                resp.raise_for_status()
+                response_url = str(getattr(resp, "url", "") or "").lower()
+                if "passport2.chaoxing.com" in response_url:
+                    raise RuntimeError("课程请求被重定向到登录页，请重新登录")
+            elif resp.status_code != 200:
                 print(f"Failed to fetch courses: HTTP {resp.status_code}")
                 return []
 
             soup = BeautifulSoup(resp.text, 'lxml')
             course_items = soup.select("div.course.teachCourse")
+            if strict and not course_items:
+                response_text = str(resp.text or "").lower()
+                login_markers = (
+                    "passport2.chaoxing.com",
+                    "fanyalogin",
+                    'name="uname"',
+                    "id=\"uname\"",
+                )
+                if any(marker in response_text for marker in login_markers):
+                    raise RuntimeError("课程请求返回了登录页面，请重新登录")
 
             results = []
             for item in course_items:
-                course_id = item.select_one("input.courseId")["value"]
+                course_id_input = item.select_one("input.courseId")
+                course_id = course_id_input.get("value") if course_id_input else None
+                if not course_id:
+                    if strict:
+                        raise RuntimeError("课程列表格式异常，无法解析课程编号")
+                    continue
                 name_tag = item.select_one("span.course-name")
                 name = name_tag.get_text(strip=True) if name_tag else "Unknown Course"
 
@@ -63,9 +85,17 @@ class CourseAPI:
             return results
         except Exception as e:
             print(f"Error fetching courses: {e}")
+            if strict:
+                raise
             return []
 
-    def get_course_details(self, course_id: str, url: str = None, redirect_policy=None) -> dict:
+    def get_course_details(
+        self,
+        course_id: str,
+        url: str = None,
+        redirect_policy=None,
+        strict: bool = False,
+    ) -> dict:
         """获取课程详情及导航参数，使用缓存避免重复请求。"""
         cache_key = course_id
         if url:
@@ -110,7 +140,21 @@ class CourseAPI:
                     )
 
             resp.raise_for_status()
+            if strict and "passport2.chaoxing.com" in str(
+                getattr(resp, "url", "") or ""
+            ).lower():
+                raise RuntimeError("课程目录请求被重定向到登录页，请重新登录")
             html = resp.text
+            if strict:
+                lowered_html = str(html or "").lower()
+                login_markers = (
+                    "passport2.chaoxing.com",
+                    "fanyalogin",
+                    'name="uname"',
+                    "id=\"uname\"",
+                )
+                if any(marker in lowered_html for marker in login_markers):
+                    raise RuntimeError("课程目录请求返回了登录页面，请重新登录")
 
             soup = BeautifulSoup(html, "lxml")
             params = {}
@@ -153,6 +197,8 @@ class CourseAPI:
             return res
         except Exception as e:
             print(f"Error getting course details: {e}")
+            if strict:
+                raise
             return {}
 
     def extract_course_params(self, course_id: str) -> dict:

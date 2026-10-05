@@ -8,7 +8,9 @@ from core.config import DEFAULT_FID
 class ClassAPI:
     """班级、学生相关接口封装，依赖宿主提供 session、session_manager。"""
 
-    def get_class_list(self, course_id: str, fid: str = None) -> List[dict]:
+    def get_class_list(
+        self, course_id: str, fid: str = None, strict: bool = False
+    ) -> List[dict]:
         """根据课程ID获取班级列表。"""
         sess_params = self.session_manager.course_params
         if fid is None:
@@ -35,6 +37,8 @@ class ClassAPI:
 
             if data.get("result") != 1:
                 print(f"API returned error: {data.get('msg')}")
+                if strict:
+                    raise RuntimeError(data.get("msg") or "班级列表接口返回失败")
                 return []
 
             classes = []
@@ -78,6 +82,8 @@ class ClassAPI:
             return classes
         except Exception as e:
             print(f"Error fetching class list: {e}")
+            if strict:
+                raise
             return []
 
     def get_clazz_manage_list(self, course_id: str, clazz_id: str) -> List[dict]:

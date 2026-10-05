@@ -57,7 +57,7 @@ def MAIN_STYLE(palette):
     QTreeWidget#nav_list::item:selected {{
         background-color: {palette.accent};
         color: #ffffff;
-        border-left: 4px solid {palette.accent_soft};
+        border-left: 4px solid transparent;
         border-bottom: 1px solid {palette.disabled_bg};
     }}
     QTreeWidget#nav_list::branch {{

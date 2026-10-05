@@ -11,11 +11,13 @@ class AuthAPI:
         self.session_manager.phone = phone
         self.session_manager.password = password
         self.session_manager.course_params['fid'] = fid
+        self.last_login_error = ""
         try:
             self.is_logged_in = self.session_manager.login()
         except Exception as e:
             print(f"Login failed: {e}")
             self.is_logged_in = False
+            self.last_login_error = str(e)
         return self.is_logged_in
 
     def logout(self):

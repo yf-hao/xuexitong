@@ -42,6 +42,8 @@ class MainWindow(QMainWindow):
         
         # State tracking for UI consistency
         self.last_nav_title = None
+        self._startup_retry_actions = {}
+        self._startup_retry_messages = {}
         
         # Ensure data directory exists
         os.makedirs(os.path.dirname(SIGNIN_DATA_FILE), exist_ok=True)
@@ -263,11 +265,17 @@ class MainWindow(QMainWindow):
         
         self.status_label = QLabel("正在初始化...")
         apply_theme_stylesheet(self.status_label, lambda palette: f"font-weight: normal; color: {palette.accent}; font-size: 12px; border: none;")
+        self.retry_startup_btn = QPushButton("重试")
+        self.retry_startup_btn.setToolTip("重新加载失败的课程、班级或目录")
+        self.retry_startup_btn.setFixedHeight(24)
+        self.retry_startup_btn.setVisible(False)
+        self.retry_startup_btn.clicked.connect(self._retry_failed_startup_loads)
         self.download_btn = QPushButton("下载选中资料")
         self.download_btn.setMinimumWidth(180)
         self.download_btn.clicked.connect(self.download_selected)
         
         bottom_bar.addWidget(self.status_label)
+        bottom_bar.addWidget(self.retry_startup_btn)
         bottom_bar.addStretch()
         bottom_bar.addWidget(self.download_btn)
         main_layout.addWidget(self.bottom_widget)
@@ -307,15 +315,25 @@ class MainWindow(QMainWindow):
         return self.clazz_box.currentData()
 
     def load_courses(self):
+        self._clear_startup_retries()
         self.status_label.setText("正在异步加载课程列表...")
         self.course_box.blockSignals(True)
         self.course_box.clear()
         
         self.course_loader = CourseWorker(self.crawler)
         self.course_loader.courses_ready.connect(self.on_courses_delivered)
+        self.course_loader.failed.connect(self.on_courses_failed)
         self.course_loader.start()
 
     def on_courses_delivered(self, courses):
+        self._clear_startup_retry("courses")
+        if not courses:
+            self.course_box.blockSignals(False)
+            self.clazz_box.clear()
+            self.nav_list.clear()
+            self.status_label.setText("当前账号暂无课程")
+            return
+
         # 显示所有课程，已结课的标记“(已结课)”以便新建课程立即可见
         ongoing_courses = [c for c in courses if not c.is_finished]
         finished_courses = [c for c in courses if c.is_finished]
@@ -344,13 +362,47 @@ class MainWindow(QMainWindow):
             self.course_box.setCurrentIndex(selected_index)
             self.course_box.blockSignals(False)
             self.on_course_changed(selected_index)
+
+    def on_courses_failed(self, message):
+        self.course_box.blockSignals(False)
+        self.course_box.clear()
+        self.clazz_box.clear()
+        self.nav_list.clear()
+        self._show_startup_retry(
+            "courses", f"课程列表加载失败：{message}", self.load_courses
+        )
+
+    def _show_startup_retry(self, key, message, action):
+        self._startup_retry_actions[key] = action
+        self._startup_retry_messages[key] = message
+        self.status_label.setText("；".join(self._startup_retry_messages.values()))
+        self.retry_startup_btn.setVisible(True)
+
+    def _clear_startup_retry(self, key):
+        self._startup_retry_actions.pop(key, None)
+        self._startup_retry_messages.pop(key, None)
+        if self._startup_retry_messages:
+            self.status_label.setText("；".join(self._startup_retry_messages.values()))
         else:
-            self.course_box.blockSignals(False)
+            self.retry_startup_btn.setVisible(False)
+
+    def _clear_startup_retries(self):
+        self._startup_retry_actions.clear()
+        self._startup_retry_messages.clear()
+        self.retry_startup_btn.setVisible(False)
+
+    def _retry_failed_startup_loads(self):
+        actions = list(self._startup_retry_actions.values())
+        self._clear_startup_retries()
+        self.status_label.setText("正在重新加载失败的项目...")
+        for action in actions:
+            action()
 
     def on_course_changed(self, index):
         course = self.course_box.itemData(index)
         if not course: return
 
+        self._clear_startup_retries()
         settings = QSettings("HaoSoft", "XuexitongManager")
         settings.setValue("last_course_id", str(course.id))
 
@@ -363,15 +415,40 @@ class MainWindow(QMainWindow):
         self.material_tree.clear()
         self.clazz_box.clear()
         
-        # 1. Fetch Details (Navigation)
+        self._load_course_details(course)
+        self._load_class_list(course)
+
+    def _load_course_details(self, course):
         self.details_worker = DetailsWorker(self.crawler, course)
         self.details_worker.details_ready.connect(self.on_details_loaded)
+        self.details_worker.failed.connect(self.on_course_details_failed)
         self.details_worker.start()
 
-        # 2. Fetch Class List
+    def _load_class_list(self, course):
         self.class_worker = ClassWorker(self.crawler, course)
         self.class_worker.classes_ready.connect(self.on_classes_loaded)
+        self.class_worker.failed.connect(self.on_class_load_failed)
         self.class_worker.start()
+
+    def on_course_details_failed(self, message, course):
+        current_course = self.course_box.currentData()
+        if not current_course or str(current_course.id) != str(course.id):
+            return
+        self._show_startup_retry(
+            "details",
+            f"课程功能列表加载失败：{message}",
+            lambda selected_course=course: self._load_course_details(selected_course),
+        )
+
+    def on_class_load_failed(self, message, course):
+        current_course = self.course_box.currentData()
+        if not current_course or str(current_course.id) != str(course.id):
+            return
+        self._show_startup_retry(
+            "classes",
+            f"班级列表加载失败：{message}",
+            lambda selected_course=course: self._load_class_list(selected_course),
+        )
 
     def refresh_class_list(self):
         """重新拉取当前课程的班级列表，并尽量保留当前班级选择。"""
@@ -388,9 +465,11 @@ class MainWindow(QMainWindow):
                 classes, current_course, preferred_class_id
             )
         )
+        self.class_worker.failed.connect(self.on_class_load_failed)
         self.class_worker.start()
 
     def on_classes_loaded(self, classes, course, preferred_class_id=None):
+        self._clear_startup_retry("classes")
         self.clazz_box.blockSignals(True)
         self.clazz_box.clear()
         
@@ -411,9 +490,9 @@ class MainWindow(QMainWindow):
 
             self.clazz_box.setCurrentIndex(selected_index)
             hidden_count = len(classes) - len(ongoing_classes)
-            if hidden_count > 0:
+            if hidden_count > 0 and not self._startup_retry_messages:
                 self.status_label.setText(f"已加载 {len(ongoing_classes)} 个进行中的班级 (已隐藏 {hidden_count} 个结课班级)")
-        else:
+        elif not self._startup_retry_messages:
             self.status_label.setText(f"提示: {course.name} 下未找到正在进行中的班级 (已过滤 {len(classes)} 个结课班级)")
 
     def on_class_selected(self, index):
@@ -421,14 +500,36 @@ class MainWindow(QMainWindow):
         course = self.course_box.currentData()
         if class_id and course:
             self.crawler.session_manager.course_params['clazzid'] = class_id
-            self.status_label.setText(f"切换班级 {class_id}")
-            
-            self.details_worker = DetailsWorker(self.crawler, course)
-            self.details_worker.details_ready.connect(lambda d, c: self.on_class_params_refreshed(d, c))
-            self.details_worker.start()
+            if not self._startup_retry_messages:
+                self.status_label.setText(f"切换班级 {class_id}")
+            self._refresh_class_params(course)
+
+    def _refresh_class_params(self, course):
+        self.details_worker = DetailsWorker(self.crawler, course)
+        self.details_worker.details_ready.connect(self.on_class_params_refreshed)
+        self.details_worker.failed.connect(self.on_class_params_refresh_failed)
+        self.details_worker.start()
+
+    def on_class_params_refresh_failed(self, message, course):
+        current_course = self.course_box.currentData()
+        if not current_course or str(current_course.id) != str(course.id):
+            return
+        self._show_startup_retry(
+            "class_params",
+            f"班级参数同步失败：{message}",
+            lambda selected_course=course: self._refresh_class_params(selected_course),
+        )
 
     def on_class_params_refreshed(self, details, course):
-        self.status_label.setText(f"授权同步完成")
+        self._clear_startup_retry("class_params")
+        if (
+            self.nav_list.topLevelItemCount() == 0
+            and details
+            and "nav_links" in details
+        ):
+            self.on_details_loaded(details, course)
+        if not self._startup_retry_messages:
+            self.status_label.setText("授权同步完成")
         
         current_nav = self.nav_list.currentItem()
         if not current_nav and self.last_nav_title:
@@ -451,8 +552,10 @@ class MainWindow(QMainWindow):
 
     def on_details_loaded(self, details, course):
         if not details or "nav_links" not in details:
-            self.status_label.setText(f"目录获取失败: {course.name}")
+            self.on_course_details_failed("服务器返回的课程目录为空", course)
             return
+
+        self._clear_startup_retry("details")
 
         nav_links = details.get("nav_links", [])
         skip_keywords = ["AI工作台", "任务引擎", "课件","教案","章节","考试","资料","通知","讨论","课程图谱","AI知识库","直播课/见面课"]
@@ -490,7 +593,8 @@ class MainWindow(QMainWindow):
                         self._add_nav_item(course_group, display_title, link['url'])
                         break
             
-        self.status_label.setText(f"目录同步完成: {course.name}")
+        if not self._startup_retry_messages:
+            self.status_label.setText(f"目录同步完成: {course.name}")
         self.nav_list.clearSelection()
         self.download_btn.hide()
 

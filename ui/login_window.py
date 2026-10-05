@@ -199,7 +199,8 @@ class LoginWindow(QDialog):
             self.save_settings()
             self.accept()
         else:
-            self.status_label.setText("身份验证失败，请重试")
+            error = getattr(self.crawler, "last_login_error", "")
+            self.status_label.setText(error or "身份验证失败，请重试")
             self.login_btn.setEnabled(True)
 
     def load_settings(self):

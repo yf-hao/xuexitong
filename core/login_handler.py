@@ -52,7 +52,9 @@ class ChaoxingLogin:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "User-Agent": "Mozilla/5.0",
         }
-        resp = self.session.get(self.login_page_url, headers=headers, params=params)
+        resp = self.session.get(
+            self.login_page_url, headers=headers, params=params, timeout=15
+        )
         if resp.status_code != 200:
             raise Exception(f"GET login page failed: {resp.status_code}")
         return resp
@@ -84,7 +86,9 @@ class ChaoxingLogin:
             "X-Requested-With": "XMLHttpRequest",
         }
 
-        resp = self.session.post(self.login_post_url, headers=headers_post, data=data_post)
+        resp = self.session.post(
+            self.login_post_url, headers=headers_post, data=data_post, timeout=15
+        )
         if resp.status_code != 200:
             raise Exception(f"POST login failed: {resp.status_code}")
 

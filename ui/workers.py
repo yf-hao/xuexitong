@@ -1,4 +1,7 @@
 from datetime import datetime
+import time
+
+import requests
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.config import DEFAULT_FID
@@ -8,6 +11,9 @@ from core.utils.redirect_policy import ForceV6ToV2Policy
 class CourseWorker(QThread):
     """Worker thread to fetch initial course list."""
     courses_ready = pyqtSignal(list)
+    failed = pyqtSignal(str)
+
+    MAX_ATTEMPTS = 3
 
     def __init__(self, crawler):
         super().__init__()
@@ -15,10 +21,12 @@ class CourseWorker(QThread):
 
     def run(self):
         try:
-            courses = self.crawler.get_courses()
+            courses = _with_startup_retries(
+                lambda: self.crawler.get_courses(strict=True)
+            )
             self.courses_ready.emit(courses)
-        except Exception as e:
-            self.courses_ready.emit([])
+        except Exception as exc:
+            self.failed.emit(str(exc) or "课程列表加载失败")
 
 class StatsWorker(QThread):
     """Worker thread to fetch statistics reports (attendance, etc.)."""
@@ -110,6 +118,7 @@ class DownloadWorker(QThread):
 class DetailsWorker(QThread):
     """Worker thread to fetch course details and navigation links."""
     details_ready = pyqtSignal(dict, object)  # details, course
+    failed = pyqtSignal(str, object)
 
     def __init__(self, crawler, course):
         super().__init__()
@@ -119,19 +128,23 @@ class DetailsWorker(QThread):
     def run(self):
         try:
             # Pass the href from the course object to ensure we visit the correct page
-            details = self.crawler.get_course_details(
-                self.course.id,
-                url=self.course.href,
-                redirect_policy=ForceV6ToV2Policy(),
+            details = _with_startup_retries(
+                lambda: self.crawler.get_course_details(
+                    self.course.id,
+                    url=self.course.href,
+                    redirect_policy=ForceV6ToV2Policy(),
+                    strict=True,
+                )
             )
             self.details_ready.emit(details, self.course)
         except Exception as e:
             print(f"DetailsWorker error: {e}")
-            self.details_ready.emit({}, self.course)
+            self.failed.emit(str(e) or "课程目录加载失败", self.course)
 
 class ClassWorker(QThread):
     """Worker thread to fetch class list for a course."""
     classes_ready = pyqtSignal(list, object)  # class_list, course
+    failed = pyqtSignal(str, object)
 
     def __init__(self, crawler, course):
         super().__init__()
@@ -140,11 +153,35 @@ class ClassWorker(QThread):
 
     def run(self):
         try:
-            classes = self.crawler.get_class_list(self.course.id)
+            classes = _with_startup_retries(
+                lambda: self.crawler.get_class_list(self.course.id, strict=True)
+            )
             self.classes_ready.emit(classes, self.course)
         except Exception as e:
             print(f"ClassWorker error: {e}")
-            self.classes_ready.emit([], self.course)
+            self.failed.emit(str(e) or "班级列表加载失败", self.course)
+
+
+def _with_startup_retries(operation, max_attempts=3):
+    for attempt in range(max_attempts):
+        try:
+            return operation()
+        except Exception as exc:
+            retryable = isinstance(
+                exc,
+                (
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError,
+                ),
+            )
+            if isinstance(exc, requests.exceptions.HTTPError):
+                response = exc.response
+                retryable = response is not None and (
+                    response.status_code == 429 or response.status_code >= 500
+                )
+            if not retryable or attempt + 1 == max_attempts:
+                raise
+            time.sleep(0.8 * (2 ** attempt))
 
 class GetWeightWorker(QThread):
     """Background worker for fetching initial grade weights."""
