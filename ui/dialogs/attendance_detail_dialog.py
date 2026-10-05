@@ -505,7 +505,7 @@ class AttendanceDetailDialog(QDialog):
         self.setWindowTitle(f"签到详情 - {self.activity.title}")
         screen = QApplication.primaryScreen()
         available_height = screen.availableGeometry().height() if screen else 720
-        dialog_height = max(420, min(540, available_height - 180))
+        dialog_height = max(420, min(672, available_height - 80))
         self.resize(860, dialog_height)
         
         # 设置对话框背景为暗色主题

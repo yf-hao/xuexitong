@@ -1322,13 +1322,13 @@ class ActivitiesView(QWidget):
 
         dialog_parent = qr_dialog or self
         dialog = AttendanceDetailDialog(self.crawler, activity, detail, dialog_parent)
+        self.status_callback("签到详情加载完成")
         if qr_dialog is not None:
             dialog.setModal(False)
             dialog.setWindowModality(Qt.WindowModality.NonModal)
             qr_dialog.attach_details_dialog(dialog)
         else:
             dialog.exec()
-        self.status_callback("签到详情加载完成")
 
     def _open_qrcode_dialog(self, dialog):
         self._qr_dialogs.append(dialog)
