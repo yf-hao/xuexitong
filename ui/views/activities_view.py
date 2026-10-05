@@ -231,6 +231,24 @@ def _activity_small_button_style(palette, bg: str, hover: str) -> str:
         }}
     """
 
+
+def _activity_delete_button_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: {palette.danger_soft};
+            color: {palette.text};
+            border: 1px solid {palette.danger};
+            border-radius: 4px;
+            padding: 5px;
+            font-size: 12px;
+        }}
+        QPushButton:hover {{
+            background-color: {palette.danger};
+            color: {palette.window_bg};
+        }}
+    """
+
+
 class ActivitiesView(QWidget):
     def __init__(self, crawler, status_callback, get_course_callback, get_class_name_callback, get_class_id_callback, parent=None):
         super().__init__(parent)
@@ -700,23 +718,7 @@ class ActivitiesView(QWidget):
             del_btn = QPushButton("删除")
             del_btn.setFixedWidth(60)
             del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            apply_theme_stylesheet(
-                del_btn,
-                lambda palette: f"""
-                    QPushButton {{
-                        background-color: {palette.danger_soft};
-                        color: {palette.danger};
-                        border: 1px solid {palette.danger};
-                        border-radius: 4px;
-                        padding: 5px;
-                        font-size: 12px;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {palette.danger};
-                        color: #ffffff;
-                    }}
-                """,
-            )
+            apply_theme_stylesheet(del_btn, _activity_delete_button_style)
             del_btn.clicked.connect(lambda checked, n=name, pub=is_published, aid=item.get('activeId'): self._handle_delete_action(n, pub, aid))
             card_layout.addWidget(del_btn)
 
@@ -1219,7 +1221,7 @@ class ActivitiesView(QWidget):
                     del_btn = QPushButton("删除")
                     del_btn.setFixedWidth(60)
                     del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    apply_theme_stylesheet(del_btn, lambda palette: _activity_small_button_style(palette, palette.text_muted, palette.border_strong))
+                    apply_theme_stylesheet(del_btn, _activity_delete_button_style)
                     del_btn.clicked.connect(lambda checked, a=act: self._handle_delete_active(a))
                     card_layout.addWidget(del_btn)
                 elif act.is_active:
@@ -1259,7 +1261,7 @@ class ActivitiesView(QWidget):
                     del_btn = QPushButton("删除")
                     del_btn.setFixedWidth(60)
                     del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    apply_theme_stylesheet(del_btn, lambda palette: _activity_small_button_style(palette, palette.text_muted, palette.border_strong))
+                    apply_theme_stylesheet(del_btn, _activity_delete_button_style)
                     del_btn.clicked.connect(lambda checked, a=act: self._handle_delete_active(a))
                     card_layout.addWidget(del_btn)
                     self._bind_ended_activity_detail_trigger(card, act, title_lbl, status_lbl, time_lbl)
