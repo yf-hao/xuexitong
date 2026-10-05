@@ -1635,7 +1635,11 @@ class NotesView(QWidget):
                 if self.tabs.currentIndex() == 0
                 else f"gerenbiji{self.user_id}"
             ),
-            "extension": json.dumps({"cooperateVersion": 1}, ensure_ascii=False),
+            "extension": json.dumps({
+                "cooperateVersion": 1,
+                "storeType": "2",
+                "useMySQL": True,
+            }, ensure_ascii=False),
             "isNewNote": 1,
         }
         rtf_content = content_edit.toHtml()
@@ -1658,15 +1662,24 @@ class NotesView(QWidget):
 
     def _finish_new_note(self, note, content, rtf_content, resource, dialog):
         note["coopResource"] = resource
+        is_personal_note = str(note.get("notebookCid") or "").startswith("gerenbiji")
         try:
-            self._save_note_draft(note, content, rtf_content)
+            if not is_personal_note:
+                self._save_note_draft(note, content, rtf_content)
             self._create_note_remote(note, content, rtf_content)
         except Exception as exc:
             QMessageBox.warning(dialog, "创建失败", str(exc))
             return
 
+        if is_personal_note:
+            try:
+                note.update(self._fetch_note_detail(note))
+            except Exception:
+                pass
+
         dialog.accept()
-        preview = " ".join(content.split())
+        preview_source = str(note.get("content") or note.get("contentTxt") or content)
+        preview = " ".join(preview_source.split())
         self._note_preview_cache[self._note_id(note)] = preview
         self.refresh_current()
 
@@ -2337,25 +2350,26 @@ class NotesView(QWidget):
             note["noteCid"] = str(message["newCid"])
 
     def _create_note_remote(self, note, content, rtf_content):
-        """先保存草稿后正式创建新笔记，不能使用已有笔记的编辑接口。"""
+        """Create a note with its notebook-specific resource payload."""
         note_id = self._note_id(note)
         if not note_id:
             raise RuntimeError("新笔记缺少笔记 ID，无法创建")
 
         notebook_id = str(note.get("notebookCid") or self.notebook_id)
+        is_personal_note = notebook_id.startswith("gerenbiji")
         response = self.crawler.session.post(
             "https://noteyd.chaoxing.com/pc/note_note/createNote",
             params={"cid": note_id},
             data={
-                "title": str(note.get("title") or "").strip(),
+                "title": "" if is_personal_note else str(note.get("title") or "").strip(),
                 "encode": 0,
-                "content": content,
+                "content": "" if is_personal_note else content,
                 "files_url": note.get("files_url") or note.get("filesUrl") or "",
                 "attachment": note.get("attachment") or "",
-                "rtf_content": rtf_content,
+                "rtf_content": "" if is_personal_note else rtf_content,
                 "_t": int(datetime.now().timestamp() * 1000),
                 "isRichText": 1,
-                "isCooperate": 1 if self._uses_resource_note(note) else 0,
+                "isCooperate": 1 if is_personal_note else int(self._uses_resource_note(note)),
                 "notebookCid": notebook_id,
                 "extension": note.get("extension") or json.dumps({
                     "cooperateVersion": 1,
