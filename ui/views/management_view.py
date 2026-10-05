@@ -402,6 +402,8 @@ class ManagementView(QWidget):
         self.layout.addWidget(self.btn_grade_weight, 0, 1)
         self.layout.addWidget(self.btn_teacher_team, 0, 2)
         self.layout.addWidget(self.btn_course_management, 0, 3)
+        for column in range(4):
+            self.layout.setColumnStretch(column, 1)
         
         # Result area
         self.management_scroll = QFrame()

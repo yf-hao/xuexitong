@@ -85,6 +85,8 @@ class StudyStatusView(QWidget):
         self.layout.addWidget(self.btn_homework, 0, 1)
         self.layout.addWidget(self.btn_quiz, 0, 2)
         self.layout.addWidget(self.btn_midterm, 0, 3)
+        for column in range(4):
+            self.layout.setColumnStretch(column, 1)
         
         # 结果区域
         self.content_frame = QFrame()
