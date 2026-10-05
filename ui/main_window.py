@@ -105,24 +105,24 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.theme_toggle_btn)
 
         # AI Settings Button
-        self.btn_ai_settings = QPushButton("🤖")
+        self.btn_ai_settings = QPushButton()
         self.btn_ai_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ai_settings.setAccessibleName("AI 设置")
         self.btn_ai_settings.setToolTip("配置生成式AI答疑助手（API Key、模型、提示词）")
         self.btn_ai_settings.setFixedSize(36, 36)
+        self.btn_ai_settings.setIconSize(QSize(22, 22))
         apply_theme_stylesheet(self.btn_ai_settings, lambda palette: f"""
             QPushButton {{
                 background-color: {palette.panel_alt_bg};
-                color: #a8e6c1;
-                border: 1px solid #2d7d46;
+                color: {palette.text_muted};
+                border: 1px solid {palette.border};
                 border-radius: 18px;
                 padding: 0;
-                font-size: 16px;
-                font-weight: normal;
             }}
             QPushButton:hover {{
-                background-color: #1a472a;
-                color: #ffffff;
-                border: 1px solid #4caf50;
+                background-color: {palette.hover_bg};
+                color: {palette.text};
+                border: 1px solid {palette.accent};
             }}
         """)
         self.btn_ai_settings.clicked.connect(self._on_ai_settings_clicked)
@@ -194,6 +194,7 @@ class MainWindow(QMainWindow):
         # Page 0: Material View
         self.material_tree = QTreeWidget()
         self.material_tree.setHeaderLabels(["资源名称", "资源类型", "同步状态"])
+        self.material_tree.setHeaderHidden(True)
         self.material_tree.setColumnWidth(0, 500)
         self.material_tree.setAlternatingRowColors(True)
         self.stacked_widget.addWidget(self.material_tree)
@@ -288,6 +289,25 @@ class MainWindow(QMainWindow):
         mode = theme_manager().mode
         theme_manager().set_mode("dark" if mode == "light" else "light")
 
+    def _update_ai_settings_icon(self, mode):
+        palette = get_theme_palette(mode)
+        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <path d="M12 6.5V4" stroke="{palette.text_muted}" stroke-width="1.7" stroke-linecap="round"/>
+            <circle cx="12" cy="2.8" r="1" fill="{palette.accent}"/>
+            <rect x="4.5" y="6.5" width="15" height="12" rx="4" stroke="{palette.text_muted}" stroke-width="1.7"/>
+            <path d="M4.5 11.5H2.8m18.7 0h-1.7M9 18.5v1.8m6-1.8v1.8M7.8 21h8.4" stroke="{palette.text_muted}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="9.4" cy="12" r="1" fill="{palette.accent}"/>
+            <circle cx="14.6" cy="12" r="1" fill="{palette.accent}"/>
+            <path d="M9.5 15h5" stroke="{palette.text_muted}" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>'''
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        self.btn_ai_settings.setIcon(QIcon(pixmap))
+
     def _apply_theme(self, mode):
         apply_theme_stylesheet(self, MAIN_STYLE, mode)
         if mode == "light":
@@ -297,6 +317,7 @@ class MainWindow(QMainWindow):
             self.theme_toggle_btn.setText("☀️")
             self.theme_toggle_btn.setToolTip("切换到亮色主题")
         refresh_theme_styles(self, mode)
+        self._update_ai_settings_icon(mode)
         self._update_nav_group_icons(mode)
 
     def _update_status(self, message):

@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
     QTextEdit, QPushButton, QMessageBox, QFormLayout, QFrame, QComboBox
 )
-from ui.theme import apply_theme_stylesheet
+from ui.theme import apply_theme_stylesheet, bind_theme_tree
 from core.apis.ai_service import DiscreteMathAIService
 
 class AITestWorker(QThread):
@@ -56,54 +56,92 @@ class AISettingsDialog(QDialog):
         self.resize(580, 480)
         self.setModal(True)
         
-        # 使用统一暗色系样式
-        apply_theme_stylesheet(self, """
-            QDialog {
-                background-color: #1e1e1e;
-            }
-            QLabel {
-                color: #e6e6e6;
+        apply_theme_stylesheet(self, lambda palette: f"""
+            QDialog {{
+                background-color: {palette.window_bg};
+            }}
+            QLabel {{
+                color: {palette.text};
                 font-size: 13px;
-            }
-            QLineEdit, QTextEdit {
-                background-color: #252526;
-                color: #e6e6e6;
-                border: 1px solid #3d3d3d;
+            }}
+            QLineEdit, QTextEdit {{
+                background-color: {palette.input_bg};
+                color: {palette.text};
+                border: 1px solid {palette.border};
                 border-radius: 4px;
                 padding: 6px;
                 font-family: Consolas, "Courier New", monospace;
-            }
-            QLineEdit:focus, QTextEdit:focus {
-                border: 1px solid #007acc;
-            }
-            QPushButton {
-                background-color: #3d3d3d;
-                color: #ffffff;
-                border: none;
+            }}
+            QLineEdit:focus, QTextEdit:focus {{
+                border: 1px solid {palette.accent_focus};
+            }}
+            QComboBox {{
+                background-color: {palette.input_bg};
+                color: {palette.text};
+                border: 1px solid {palette.border};
+                border-radius: 4px;
+                padding: 5px 8px;
+            }}
+            QComboBox:hover {{
+                border: 1px solid {palette.border_strong};
+            }}
+            QComboBox:focus {{
+                border: 1px solid {palette.accent_focus};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {palette.panel_bg};
+                color: {palette.text};
+                border: 1px solid {palette.border};
+                selection-background-color: {palette.accent};
+                selection-color: #ffffff;
+            }}
+            QPushButton {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text};
+                border: 1px solid {palette.border};
                 border-radius: 4px;
                 padding: 8px 16px;
                 font-weight: bold;
                 min-width: 80px;
-            }
-            QPushButton:hover {
-                background-color: #505050;
-            }
-            QPushButton#save_btn {
-                background-color: #007acc;
-            }
-            QPushButton#save_btn:hover {
-                background-color: #005c99;
-            }
-            QPushButton#test_btn {
-                background-color: #2d7d46;
-            }
-            QPushButton#test_btn:hover {
-                background-color: #225e35;
-            }
-            QPushButton:disabled {
-                background-color: #2d2d2d;
-                color: #777777;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {palette.hover_bg};
+                border: 1px solid {palette.border_strong};
+            }}
+            QPushButton#save_btn {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border: 1px solid {palette.accent};
+            }}
+            QPushButton#save_btn:hover {{
+                background-color: {palette.accent_hover};
+                border: 1px solid {palette.accent_hover};
+            }}
+            QPushButton#test_btn {{
+                background-color: {palette.success};
+                color: #ffffff;
+                border: 1px solid {palette.success};
+            }}
+            QPushButton#test_btn:hover {{
+                background-color: {palette.success_hover};
+                border: 1px solid {palette.success_hover};
+            }}
+            QPushButton#show_key_btn {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text_muted};
+                border: 1px solid {palette.border};
+                min-width: 0;
+                padding: 2px;
+            }}
+            QPushButton#show_key_btn:hover {{
+                background-color: {palette.hover_bg};
+                color: {palette.text};
+            }}
+            QPushButton:disabled {{
+                background-color: {palette.disabled_bg};
+                color: {palette.disabled_text};
+                border: 1px solid {palette.border};
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -111,7 +149,10 @@ class AISettingsDialog(QDialog):
         layout.setSpacing(14)
 
         title_label = QLabel("配置大模型 AI 接口（支持 DeepSeek / OpenAI / 聚合接口）")
-        apply_theme_stylesheet(title_label, "font-weight: bold; font-size: 14px; color: #007acc;")
+        apply_theme_stylesheet(
+            title_label,
+            lambda palette: f"font-weight: bold; font-size: 14px; color: {palette.accent};",
+        )
         layout.addWidget(title_label)
 
         form_layout = QFormLayout()
@@ -131,8 +172,8 @@ class AISettingsDialog(QDialog):
         key_layout.addWidget(self.key_input, stretch=1)
         
         self.show_key_btn = QPushButton("👁️")
+        self.show_key_btn.setObjectName("show_key_btn")
         self.show_key_btn.setFixedSize(30, 28)
-        apply_theme_stylesheet(self.show_key_btn, "padding: 2px; font-size: 14px;")
         self.show_key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.show_key_btn.clicked.connect(self._toggle_key_visibility)
         key_layout.addWidget(self.show_key_btn)
@@ -159,7 +200,7 @@ class AISettingsDialog(QDialog):
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        apply_theme_stylesheet(line, "background-color: #3d3d3d;")
+        apply_theme_stylesheet(line, lambda palette: f"background-color: {palette.border};")
         layout.addWidget(line)
 
         # 底部按钮栏
@@ -184,6 +225,7 @@ class AISettingsDialog(QDialog):
         btn_layout.addWidget(self.save_btn)
 
         layout.addLayout(btn_layout)
+        bind_theme_tree(self)
 
     def _load_current_settings(self):
         """填充当前配置"""
