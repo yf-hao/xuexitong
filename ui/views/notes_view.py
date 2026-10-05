@@ -2204,7 +2204,10 @@ class NotesView(QWidget):
         self.status_label.setVisible(bool(message))
 
         if message:
-            self.status_label.setStyleSheet("color: #888888; font-size: 14px; padding: 20px;")
+            apply_theme_stylesheet(
+                self.status_label,
+                lambda palette: f"color: {palette.text_muted}; font-size: 14px; padding: 20px;",
+            )
 
     @staticmethod
     def _sync_note_selection(note_list, selected_item):
