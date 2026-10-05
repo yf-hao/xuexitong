@@ -6,7 +6,7 @@ from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QHeaderView, QRadioButton, QTableWidget,
-    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+    QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout, QWidget
 )
 from models.attendance_record import AttendanceDetail
 from models.activity import Activity
@@ -589,12 +589,23 @@ class AttendanceDetailDialog(QDialog):
         """)
         self.search_btn.clicked.connect(self._execute_search)
 
+        self.refresh_btn = QToolButton()
+        self.refresh_btn.setFixedSize(32, 30)
+        self.refresh_btn.setIconSize(QSize(18, 18))
+        self.refresh_btn.setAutoRaise(True)
+        self.refresh_btn.setToolTip("刷新签到详情")
+        self.refresh_btn.setAccessibleName("刷新签到详情")
+        self.refresh_btn.clicked.connect(self._on_refresh_clicked)
+
         search_container = QWidget()
         search_layout = QHBoxLayout(search_container)
         search_layout.setContentsMargins(0, 0, 0, 0)
         search_layout.setSpacing(8)
         search_layout.addWidget(self.search_input)
         search_layout.addWidget(self.search_btn)
+        search_layout.addWidget(
+            self.refresh_btn, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
         self.tabs.setCornerWidget(search_container, Qt.Corner.TopRightCorner)
         layout.addWidget(self.tabs, stretch=1)
         self._refresh_tables()
@@ -658,6 +669,21 @@ class AttendanceDetailDialog(QDialog):
         layout.addWidget(table)
         return container
 
+    def _build_refresh_icon(self, mode: str | None = None) -> QIcon:
+        color = get_theme_palette(mode).text_secondary
+        svg = f"""
+        <svg width="24" height="24" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+            <path d="M934.4 206.933333c-17.066667-4.266667-34.133333 6.4-38.4 23.466667l-23.466667 87.466667C797.866667 183.466667 654.933333 96 497.066667 96 264.533333 96 74.666667 281.6 74.666667 512s189.866667 416 422.4 416c179.2 0 339.2-110.933333 398.933333-275.2 6.4-17.066667-2.133333-34.133333-19.2-40.533333-17.066667-6.4-34.133333 2.133333-40.533333 19.2-51.2 138.666667-187.733333 232.533333-339.2 232.533333C298.666667 864 138.666667 706.133333 138.666667 512S300.8 160 497.066667 160c145.066667 0 277.333333 87.466667 330.666666 217.6l-128-36.266667c-17.066667-4.266667-34.133333 6.4-38.4 23.466667-4.266667 17.066667 6.4 34.133333 23.466667 38.4l185.6 49.066667c2.133333 0 6.4 2.133333 8.533333 2.133333 6.4 0 10.666667-2.133333 17.066667-4.266667 6.4-4.266667 12.8-10.666667 14.933333-19.2l49.066667-185.6c0-17.066667-8.533333-34.133333-25.6-38.4z" fill="{color}"/>
+        </svg>
+        """
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+
     def _build_activity_info_text(self, mode: str | None = None) -> str:
         palette = get_theme_palette(mode)
         return (
@@ -682,6 +708,8 @@ class AttendanceDetailDialog(QDialog):
     def _apply_runtime_theme(self, mode: str):
         self.info_label.setText(self._build_activity_info_text(mode))
         self.stats_label.setText(self._build_stats_text(mode))
+        if hasattr(self, "refresh_btn"):
+            self.refresh_btn.setIcon(self._build_refresh_icon(mode))
         palette = get_theme_palette(mode)
         for table in self._tables.values():
             tab_key = str(table.property("tab_key") or "")
@@ -740,6 +768,9 @@ class AttendanceDetailDialog(QDialog):
     def _refresh_attendance_detail_from_server(self, preferred_uid: str = "", preferred_tab_key: str = ""):
         if self._detail_worker is not None:
             return
+        if hasattr(self, "refresh_btn"):
+            self.refresh_btn.setEnabled(False)
+            self.refresh_btn.setToolTip("正在刷新签到详情…")
         self._detail_worker = AttendanceDetailWorker(self.crawler, self.activity.active_id)
         self._detail_worker.detail_ready.connect(
             lambda result, uid=preferred_uid, tab_key=preferred_tab_key: (
@@ -753,9 +784,14 @@ class AttendanceDetailDialog(QDialog):
         self._detail_worker = None
         if worker is not None:
             worker.deleteLater()
+        if hasattr(self, "refresh_btn"):
+            self.refresh_btn.setEnabled(True)
+            self.refresh_btn.setToolTip("刷新签到详情")
         if isinstance(result, AttendanceDetail):
             self.detail = result
             self._refresh_tables(preferred_uid=preferred_uid, preferred_tab_key=preferred_tab_key)
+        else:
+            QMessageBox.warning(self, "刷新失败", f"获取签到详情失败：\n{result}")
 
     def _records_for_table(self, table: QTableWidget):
         tab_key = table.property("tab_key")
@@ -844,6 +880,20 @@ class AttendanceDetailDialog(QDialog):
     def _execute_search(self):
         self._active_search_query = str(self.search_input.text() or "").strip().lower()
         self._refresh_tables(preferred_tab_key=self._tab_key_for_index(self.tabs.currentIndex() if self.tabs.count() else 0))
+
+    def _on_refresh_clicked(self):
+        tab_key = self._tab_key_for_index(self.tabs.currentIndex() if self.tabs.count() else 0)
+        preferred_uid = ""
+        table = self._tables.get(tab_key)
+        if table is not None:
+            row = table.currentRow()
+            records = self._filtered_records_for_tab_key(tab_key)
+            if 0 <= row < len(records):
+                preferred_uid = str(records[row].uid)
+        self._refresh_attendance_detail_from_server(
+            preferred_uid=preferred_uid,
+            preferred_tab_key=tab_key,
+        )
 
     def _on_search_text_changed(self, _text: str):
         if str(_text or "").strip():
