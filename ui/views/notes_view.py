@@ -1672,20 +1672,16 @@ class NotesView(QWidget):
 
     def _finish_new_note(self, note, content, rtf_content, resource, dialog):
         note["coopResource"] = resource
-        is_personal_note = str(note.get("notebookCid") or "").startswith("gerenbiji")
         try:
-            if not is_personal_note:
-                self._save_note_draft(note, content, rtf_content)
             self._create_note_remote(note, content, rtf_content)
         except Exception as exc:
             QMessageBox.warning(dialog, "创建失败", str(exc))
             return
 
-        if is_personal_note:
-            try:
-                note.update(self._fetch_note_detail(note))
-            except Exception:
-                pass
+        try:
+            note.update(self._fetch_note_detail(note))
+        except Exception:
+            pass
 
         dialog.accept()
         preview_source = str(note.get("content") or note.get("contentTxt") or content)
@@ -2366,20 +2362,20 @@ class NotesView(QWidget):
             raise RuntimeError("新笔记缺少笔记 ID，无法创建")
 
         notebook_id = str(note.get("notebookCid") or self.notebook_id)
-        is_personal_note = notebook_id.startswith("gerenbiji")
+        uses_resource = self._uses_resource_note(note)
         response = self.crawler.session.post(
             "https://noteyd.chaoxing.com/pc/note_note/createNote",
             params={"cid": note_id},
             data={
-                "title": "" if is_personal_note else str(note.get("title") or "").strip(),
+                "title": "" if uses_resource else str(note.get("title") or "").strip(),
                 "encode": 0,
-                "content": "" if is_personal_note else content,
+                "content": "" if uses_resource else content,
                 "files_url": note.get("files_url") or note.get("filesUrl") or "",
                 "attachment": note.get("attachment") or "",
-                "rtf_content": "" if is_personal_note else rtf_content,
+                "rtf_content": "" if uses_resource else rtf_content,
                 "_t": int(datetime.now().timestamp() * 1000),
                 "isRichText": 1,
-                "isCooperate": 1 if is_personal_note else int(self._uses_resource_note(note)),
+                "isCooperate": 1 if uses_resource else 0,
                 "notebookCid": notebook_id,
                 "extension": note.get("extension") or json.dumps({
                     "cooperateVersion": 1,
