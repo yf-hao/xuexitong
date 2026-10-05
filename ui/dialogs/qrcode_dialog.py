@@ -2,9 +2,10 @@
 
 import io
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy
+    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QStackedLayout, QLabel,
+    QPushButton, QSizePolicy, QWidget,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
 from PyQt6.QtGui import QPixmap, QImage
 from ui.theme import apply_theme_stylesheet, refresh_theme_styles
 
@@ -43,10 +44,48 @@ def _qr_close_button_style(palette) -> str:
     """
 
 
+def _qr_details_link_style(palette) -> str:
+    return f"""
+        QPushButton {{
+            background-color: transparent;
+            color: {palette.accent};
+            border: none;
+            padding: 2px 4px;
+            font-size: 12px;
+        }}
+        QPushButton:hover {{
+            color: {palette.accent_hover};
+            text-decoration: underline;
+        }}
+    """
+
+
+class _CompanionMoveFilter(QObject):
+    def __init__(self, qr_dialog):
+        super().__init__(qr_dialog)
+        self.qr_dialog = qr_dialog
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QEvent.Type.Move
+            and not self.qr_dialog._syncing_companion
+        ):
+            self.qr_dialog._sync_companion_position()
+        return False
+
+
 class QRCodeDialog(QDialog):
     """显示签到二维码的弹窗，每秒轮询 enc 变化自动刷新。"""
 
-    def __init__(self, crawler, active_id: str, title: str = "", end_time_ms: int = 0, parent=None):
+    def __init__(
+        self,
+        crawler,
+        active_id: str,
+        title: str = "",
+        end_time_ms: int = 0,
+        parent=None,
+        details_callback=None,
+    ):
         super().__init__(parent)
         self.crawler = crawler
         self.active_id = active_id
@@ -57,6 +96,10 @@ class QRCodeDialog(QDialog):
         self._last_processed_request = 0
         self._poll_in_progress = False
         self._end_time_ms = end_time_ms  # 结束时间（毫秒时间戳），0表示不判断
+        self._details_dialog = None
+        self._details_move_filter = None
+        self._syncing_companion = False
+        self.details_btn = None
 
         self.setWindowTitle(f"签到二维码 - {title}" if title else "签到二维码")
         self.setFixedSize(572, 672)
@@ -87,7 +130,14 @@ class QRCodeDialog(QDialog):
         layout.addWidget(self.qr_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # 状态栏
-        status_layout = QHBoxLayout()
+        status_bar = QWidget(self)
+        status_stack = QStackedLayout(status_bar)
+        status_stack.setContentsMargins(0, 0, 0, 0)
+        status_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+
+        status_content = QWidget(status_bar)
+        status_layout = QHBoxLayout(status_content)
+        status_layout.setContentsMargins(0, 0, 0, 0)
         self.status_lbl = QLabel("正在获取二维码...")
         apply_theme_stylesheet(self.status_lbl, "font-size: 12px; color: #888888;")
         status_layout.addWidget(self.status_lbl)
@@ -96,7 +146,27 @@ class QRCodeDialog(QDialog):
         apply_theme_stylesheet(self.refresh_lbl, "font-size: 11px; color: #555555;")
         status_layout.addStretch()
         status_layout.addWidget(self.refresh_lbl)
-        layout.addLayout(status_layout)
+        status_stack.addWidget(status_content)
+
+        if details_callback:
+            details_btn = QPushButton("签到详情")
+            details_btn.setFlat(True)
+            details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            details_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            apply_theme_stylesheet(details_btn, _qr_details_link_style)
+            details_btn.clicked.connect(
+                lambda _checked=False: details_callback(self)
+            )
+            self.details_btn = details_btn
+            button_overlay = QWidget(status_bar)
+            button_layout = QHBoxLayout(button_overlay)
+            button_layout.setContentsMargins(0, 0, 0, 0)
+            button_layout.addWidget(
+                details_btn, alignment=Qt.AlignmentFlag.AlignCenter
+            )
+            status_stack.addWidget(button_overlay)
+            status_stack.setCurrentWidget(button_overlay)
+        layout.addWidget(status_bar)
 
         # 关闭按钮
         close_btn = QPushButton("关闭")
@@ -110,10 +180,100 @@ class QRCodeDialog(QDialog):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._poll_qrcode)
+        self.finished.connect(self._on_dialog_finished)
 
         # 首次获取
         self._poll_qrcode()
         self._poll_timer.start()
+
+    def set_details_loading(self, loading: bool):
+        if self.details_btn is not None:
+            self.details_btn.setEnabled(not loading)
+
+    def attach_details_dialog(self, dialog):
+        if self._details_dialog is dialog:
+            return
+        if self._details_dialog is not None:
+            self._details_dialog.close()
+
+        self._details_dialog = dialog
+        self._details_move_filter = _CompanionMoveFilter(self)
+        dialog.installEventFilter(self._details_move_filter)
+        dialog.finished.connect(
+            lambda _result, attached=dialog: self.detach_details_dialog(attached)
+        )
+        self._position_companion_pair()
+        dialog.show()
+
+    def detach_details_dialog(self, dialog):
+        if self._details_dialog is not dialog:
+            return
+        if self._details_move_filter is not None:
+            dialog.removeEventFilter(self._details_move_filter)
+            self._details_move_filter.deleteLater()
+        self._details_dialog = None
+        self._details_move_filter = None
+        self.set_details_loading(False)
+
+    def _position_companion_pair(self):
+        dialog = self._details_dialog
+        if dialog is None:
+            return
+
+        screen = QApplication.screenAt(self.frameGeometry().center()) or self.screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+
+        self._syncing_companion = True
+        try:
+            if available is not None:
+                qr_width = self.frameGeometry().width()
+                details_width = dialog.frameGeometry().width() or dialog.width()
+                max_details_width = available.width() - qr_width
+                if 0 < max_details_width < details_width:
+                    dialog.resize(max_details_width, dialog.height())
+
+                group_width = qr_width + (dialog.frameGeometry().width() or dialog.width())
+                group_height = max(
+                    self.frameGeometry().height(),
+                    dialog.frameGeometry().height() or dialog.height(),
+                )
+                x = available.left() + max(0, (available.width() - group_width) // 2)
+                y = available.top() + max(0, (available.height() - group_height) // 2)
+                self.move(x, y)
+
+            self._move_companion_to_anchor()
+        finally:
+            self._syncing_companion = False
+
+    def _move_companion_to_anchor(self):
+        if self._details_dialog is None:
+            return
+        frame = self.frameGeometry()
+        target = QPoint(frame.right() + 1, frame.top())
+        if self._details_dialog.frameGeometry().topLeft() != target:
+            self._details_dialog.move(target)
+
+    def _sync_companion_position(self):
+        if self._syncing_companion or self._details_dialog is None:
+            return
+        self._syncing_companion = True
+        try:
+            self._move_companion_to_anchor()
+        finally:
+            self._syncing_companion = False
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._sync_companion_position()
+
+    def _on_dialog_finished(self, _result):
+        self._poll_timer.stop()
+        dialog = self._details_dialog
+        if dialog is not None:
+            self.detach_details_dialog(dialog)
+            dialog.close()
 
     def _poll_qrcode(self):
         """轮询获取二维码 enc，enc 变化时重新生成。"""

@@ -258,6 +258,7 @@ class ActivitiesView(QWidget):
         self.get_class_name_callback = get_class_name_callback
         self.get_class_id_callback = get_class_id_callback
         self.workers = []
+        self._qr_dialogs = []
         self.last_activity_sub = None
         self._activity_view_generation = 0
         self._batch_publish_generation = 0
@@ -1283,26 +1284,63 @@ class ActivitiesView(QWidget):
             return
         self._load_attendance_detail(activity)
 
-    def _load_attendance_detail(self, activity):
+    def _load_attendance_detail(self, activity, qr_dialog=None):
+        if qr_dialog is not None:
+            if not qr_dialog.isVisible():
+                return
+            if qr_dialog._details_dialog is not None:
+                qr_dialog._details_dialog.raise_()
+                return
+            qr_dialog.set_details_loading(True)
+
         self.status_callback(f"正在加载 {activity.title} 的签到详情...")
 
         worker = AttendanceDetailWorker(self.crawler, activity.active_id)
         self.workers.append(worker)
-        worker.detail_ready.connect(lambda detail, a=activity: self._show_attendance_detail(activity=a, detail=detail))
+        worker.detail_ready.connect(
+            lambda detail, a=activity, qr=qr_dialog: self._show_attendance_detail(
+                activity=a, detail=detail, qr_dialog=qr
+            )
+        )
         worker.detail_ready.connect(lambda _detail, w=worker: self.workers.remove(w) if w in self.workers else None)
         worker.start()
 
-    def _show_attendance_detail(self, activity, detail):
+    def _show_attendance_detail(self, activity, detail, qr_dialog=None):
+        if qr_dialog is not None and not qr_dialog.isVisible():
+            qr_dialog.set_details_loading(False)
+            return
+
         if isinstance(detail, str):
-            QMessageBox.warning(self, "加载失败", f"获取签到详情失败：\n{detail}")
+            if qr_dialog is not None:
+                qr_dialog.set_details_loading(False)
+            QMessageBox.warning(qr_dialog or self, "加载失败", f"获取签到详情失败：\n{detail}")
             self.status_callback("签到详情加载失败")
             return
 
         from ui.dialogs.attendance_detail_dialog import AttendanceDetailDialog
 
-        dialog = AttendanceDetailDialog(self.crawler, activity, detail, self)
-        dialog.exec()
+        dialog_parent = qr_dialog or self
+        dialog = AttendanceDetailDialog(self.crawler, activity, detail, dialog_parent)
+        if qr_dialog is not None:
+            dialog.setModal(False)
+            dialog.setWindowModality(Qt.WindowModality.NonModal)
+            qr_dialog.attach_details_dialog(dialog)
+        else:
+            dialog.exec()
         self.status_callback("签到详情加载完成")
+
+    def _open_qrcode_dialog(self, dialog):
+        self._qr_dialogs.append(dialog)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.finished.connect(
+            lambda _result, opened=dialog: self._forget_qrcode_dialog(opened)
+        )
+        dialog.show()
+
+    def _forget_qrcode_dialog(self, dialog):
+        if dialog in self._qr_dialogs:
+            self._qr_dialogs.remove(dialog)
     
     def _handle_start_active(self, act):
         """处理点击开始按钮启动签到活动"""
@@ -1348,8 +1386,17 @@ class ActivitiesView(QWidget):
             except Exception:
                 pass
         
-        dialog = QRCodeDialog(self.crawler, act.active_id, act.title, end_time_ms, self)
-        dialog.exec()
+        dialog = QRCodeDialog(
+            self.crawler,
+            act.active_id,
+            act.title,
+            end_time_ms,
+            self,
+            details_callback=lambda qr_dialog, selected_activity=act: self._load_attendance_detail(
+                selected_activity, qr_dialog=qr_dialog
+            ),
+        )
+        self._open_qrcode_dialog(dialog)
 
     def _on_start_active_finished(self, success, message, active_id, data):
         if success:
@@ -1361,9 +1408,26 @@ class ActivitiesView(QWidget):
                 end_time_ms = data["startTime"] + data["timeLong"]
                 # 用启动返回的 title 或默认标题
                 title = getattr(self, '_last_start_title', "签到二维码")
+                from models.activity import Activity
+
+                activity = Activity.from_dict({
+                    "activeId": str(active_id),
+                    "title": title,
+                    "activeType": 2,
+                    "status": "1",
+                })
                 from ui.dialogs.qrcode_dialog import QRCodeDialog
-                dialog = QRCodeDialog(self.crawler, str(active_id), title, end_time_ms, self)
-                dialog.exec()
+                dialog = QRCodeDialog(
+                    self.crawler,
+                    str(active_id),
+                    title,
+                    end_time_ms,
+                    self,
+                    details_callback=lambda qr_dialog, selected_activity=activity: self._load_attendance_detail(
+                        selected_activity, qr_dialog=qr_dialog
+                    ),
+                )
+                self._open_qrcode_dialog(dialog)
         else:
             QMessageBox.warning(self, "启动失败", message)
             self.status_callback(f"启动失败: {message}")
