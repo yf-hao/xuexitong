@@ -1289,7 +1289,8 @@ class ActivitiesView(QWidget):
             if not qr_dialog.isVisible():
                 return
             if qr_dialog._details_dialog is not None:
-                qr_dialog._details_dialog.raise_()
+                qr_dialog.detach_details_dialog(qr_dialog._details_dialog)
+                self.status_callback("签到详情已关闭")
                 return
             qr_dialog.set_details_loading(True)
 
