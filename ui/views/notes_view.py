@@ -7,20 +7,24 @@ from datetime import datetime
 from html import unescape
 
 from PyQt6.QtCore import (
-    QBuffer, QEvent, QIODevice, QPoint, QThread, QTimer, QSize, Qt, QUrl, pyqtSignal,
+    QByteArray, QBuffer, QEvent, QIODevice, QPoint, QThread, QTimer, QSize, Qt,
+    QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QAction, QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QPen,
-    QTextCharFormat, QTextCursor, QTextDocument, QTextImageFormat,
+    QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPalette,
+    QPen, QPixmap, QTextCharFormat, QTextCursor, QTextDocument, QTextImageFormat,
 )
 from PyQt6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QButtonGroup, QFrame, QInputDialog, QLineEdit, QMessageBox, QSpinBox, QTabWidget, QTextEdit,
-    QMenu, QToolBar, QVBoxLayout, QWidget,
+    QApplication, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QPushButton, QButtonGroup, QFrame, QInputDialog, QLineEdit, QMessageBox,
+    QSpinBox, QTabWidget, QTextEdit, QMenu, QToolBar, QVBoxLayout, QWidget,
 )
+from PyQt6.QtSvg import QSvgRenderer
 
 from core.coop_resource_encoder import CoopResourceEncoder
-from ui.theme import apply_theme_stylesheet, bind_theme_tree
+from ui.theme import (
+    apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
+)
 
 
 class NotesLoadThread(QThread):
@@ -296,6 +300,66 @@ class NoteDetailLoadThread(QThread):
                     merged["coopResource"] = value["data"]
                     break
         return merged
+
+
+class NoteShareThread(QThread):
+    completed = pyqtSignal(int, str)
+    failed = pyqtSignal(int, str)
+
+    def __init__(self, session, note_id, request_id, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.note_id = str(note_id)
+        self.request_id = request_id
+
+    def run(self):
+        try:
+            referer = f"https://noteyd.chaoxing.com/pc/{self.note_id}"
+            headers = NotesView._note_request_headers(referer)
+            cooperators_response = self.session.get(
+                "https://noteyd.chaoxing.com/pc/cooperate/getCooperators",
+                params={"noteCid": self.note_id},
+                headers=headers,
+                timeout=15,
+            )
+            cooperators_response.raise_for_status()
+            cooperators = cooperators_response.json()
+            if not self._is_success(cooperators):
+                raise RuntimeError(
+                    cooperators.get("msg") or "无法获取笔记协作者信息"
+                )
+
+            resource_response = self.session.get(
+                "https://noteyd.chaoxing.com/pc/cooperate/getCooperateResource",
+                params={"cid": self.note_id},
+                headers=headers,
+                timeout=15,
+            )
+            resource_response.raise_for_status()
+            resource = resource_response.json()
+            has_no_resource = (
+                isinstance(resource, dict)
+                and str(resource.get("result")) == "0"
+                and resource.get("msg") == "暂无数据"
+            )
+            if not self._is_success(resource) and not has_no_resource:
+                raise RuntimeError(
+                    resource.get("msg") or "无法获取笔记分享信息"
+                )
+
+            self.completed.emit(
+                self.request_id,
+                f"https://noteyd.chaoxing.com/pc/{self.note_id}",
+            )
+        except Exception as exc:
+            self.failed.emit(self.request_id, str(exc))
+
+    @staticmethod
+    def _is_success(payload):
+        return (
+            isinstance(payload, dict)
+            and str(payload.get("result")).lower() in {"1", "true"}
+        )
 
 
 class NoteImageUploadThread(QThread):
@@ -1144,10 +1208,14 @@ class NotesView(QWidget):
         self._note_detail_threads = []
         self._note_detail_request_id = 0
         self._note_preview_cache = {}
+        self._note_share_threads = []
+        self._note_share_buttons = {}
+        self._note_share_request_id = 0
         self._active_folder_cids = {0: None, 1: None}
         self._active_folder_paths = {0: None, 1: None}
         self._folder_stacks = {0: [], 1: []}
         self.setup_ui()
+        theme_manager().theme_changed.connect(self._refresh_note_share_icons)
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1395,6 +1463,20 @@ class NotesView(QWidget):
             QLabel#note_meta {{
                 color: {palette.disabled_text};
                 font-size: 12px;
+            }}
+            QPushButton#note_share_button {{
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 2px;
+            }}
+            QPushButton#note_share_button:hover {{
+                background-color: {palette.hover_bg};
+                border: 1px solid {palette.border};
+            }}
+            QPushButton#note_share_button:disabled {{
+                background-color: transparent;
+                border: 1px solid transparent;
             }}
         """
 
@@ -2739,7 +2821,80 @@ class NotesView(QWidget):
         """
 
     @staticmethod
-    def _create_note_widget(note):
+    def _note_share_icon(mode):
+        palette = get_theme_palette(mode)
+        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <path d="m8.6 10.7 6.8-3.9m-6.8 6.5 6.8 3.9" stroke="{palette.text_muted}" stroke-width="1.8" stroke-linecap="round"/>
+            <circle cx="6" cy="12" r="2.5" stroke="{palette.accent}" stroke-width="1.8"/>
+            <circle cx="18" cy="5" r="2.5" stroke="{palette.accent}" stroke-width="1.8"/>
+            <circle cx="18" cy="19" r="2.5" stroke="{palette.accent}" stroke-width="1.8"/>
+        </svg>'''
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(18, 18)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _refresh_note_share_icons(self, mode):
+        icon = self._note_share_icon(mode)
+        for button in self.findChildren(QPushButton, "note_share_button"):
+            button.setIcon(icon)
+
+    def _share_note(self, note, button):
+        note_id = self._note_id(note)
+        if not note_id:
+            QMessageBox.warning(self, "分享失败", "笔记数据中缺少笔记 ID")
+            return
+
+        self._note_share_request_id += 1
+        request_id = self._note_share_request_id
+        self._note_share_buttons[request_id] = button
+        button.setEnabled(False)
+        button.setToolTip("正在获取分享链接...")
+        thread = NoteShareThread(
+            self.crawler.session, note_id, request_id, self
+        )
+        self._note_share_threads.append(thread)
+        thread.completed.connect(self._on_note_share_completed)
+        thread.failed.connect(self._on_note_share_failed)
+        thread.finished.connect(self._clear_note_share_thread)
+        thread.start()
+
+    def _on_note_share_completed(self, request_id, share_url):
+        QApplication.clipboard().setText(share_url)
+        button = self._note_share_buttons.pop(request_id, None)
+        if button is not None:
+            button.setEnabled(True)
+            button.setToolTip("分享链接已复制")
+            QTimer.singleShot(
+                2500,
+                lambda current=button: current.setToolTip("复制分享链接"),
+            )
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Icon.Information)
+        message_box.setWindowTitle("分享成功")
+        message_box.setText("分享链接已复制到剪切板")
+        message_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        message_box.button(QMessageBox.StandardButton.Ok).setText("关闭")
+        QTimer.singleShot(3000, message_box.accept)
+        message_box.exec()
+
+    def _on_note_share_failed(self, request_id, message):
+        button = self._note_share_buttons.pop(request_id, None)
+        if button is not None:
+            button.setEnabled(True)
+            button.setToolTip("复制分享链接")
+        QMessageBox.warning(self, "分享失败", message)
+
+    def _clear_note_share_thread(self):
+        thread = self.sender()
+        if thread in self._note_share_threads:
+            self._note_share_threads.remove(thread)
+            thread.deleteLater()
+
+    def _create_note_widget(self, note):
         title = str(note.get("title") or "无标题").strip()
         content = NotesView._note_preview_text(note)
         if len(content) > 180:
@@ -2767,11 +2922,33 @@ class NotesView(QWidget):
             content_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             card_layout.addWidget(content_label)
 
+        meta_parts = []
+        if time_text:
+            meta_parts.append(time_text)
         if time_text or read_count:
-            meta_label = QLabel(f"{time_text}  ·  阅读 {read_count}")
-            meta_label.setObjectName("note_meta")
-            meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            card_layout.addWidget(meta_label)
+            meta_parts.append(f"阅读 {read_count}")
+        meta_label = QLabel("  ·  ".join(meta_parts))
+        meta_label.setObjectName("note_meta")
+        meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(0, 0, 0, 0)
+        meta_row.setSpacing(8)
+        meta_row.addWidget(meta_label, 1)
+
+        share_button = QPushButton()
+        share_button.setObjectName("note_share_button")
+        share_button.setAccessibleName("复制笔记分享链接")
+        share_button.setToolTip("复制分享链接")
+        share_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        share_button.setFixedSize(28, 26)
+        share_button.setIconSize(QSize(18, 18))
+        share_button.setIcon(self._note_share_icon(theme_manager().mode))
+        share_button.clicked.connect(
+            lambda _checked=False, current_note=dict(note), current_button=share_button:
+            self._share_note(current_note, current_button)
+        )
+        meta_row.addWidget(share_button)
+        card_layout.addLayout(meta_row)
 
         apply_theme_stylesheet(card, NotesView._note_card_stylesheet)
         return card
