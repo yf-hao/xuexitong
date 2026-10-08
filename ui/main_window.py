@@ -597,7 +597,7 @@ class MainWindow(QMainWindow):
         
         for keyword in menu_order:
             if keyword == "题库":
-                self._add_nav_item(shared_group, "题库", "question_bank")
+                self._add_nav_item(course_group, "题库", "question_bank")
             elif keyword == "学情":
                 self._add_nav_item(course_group, "学情", "learning")
             elif keyword == "云盘":
