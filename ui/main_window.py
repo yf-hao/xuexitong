@@ -21,6 +21,7 @@ from ui.views.homework_create_view import HomeworkCreateView
 from ui.views.cloud_drive_view import CloudDriveView
 from ui.views.notes_view import NotesView
 from ui.views.chat_view import ChatView
+from ui.views.exam_view import ExamView
 from ui.dialogs.ai_settings_dialog import AISettingsDialog
 from core.logger import get_logger
 
@@ -250,6 +251,10 @@ class MainWindow(QMainWindow):
         self.chat_view = ChatView(self.crawler, parent=self)
         self.chat_view.msync_status_changed.connect(self._update_status)
         self.stacked_widget.addWidget(self.chat_view)
+
+        # Page 11: Exam View
+        self.exam_view = ExamView(self.crawler, parent=self)
+        self.stacked_widget.addWidget(self.exam_view)
 
         content_layout.addWidget(self.stacked_widget)
         splitter.addWidget(content_container)
@@ -593,10 +598,12 @@ class MainWindow(QMainWindow):
         self._update_nav_group_icons(theme_manager().mode)
 
         # Keep course-bound items separate from account-wide tools.
-        menu_order = ["活动", "题库", "作业","学情", "统计", "笔记", "云盘", "消息", "管理"]
+        menu_order = ["活动", "考试", "题库", "作业","学情", "统计", "笔记", "云盘", "消息", "管理"]
         
         for keyword in menu_order:
-            if keyword == "题库":
+            if keyword == "考试":
+                self._add_nav_item(course_group, "考试", "exam")
+            elif keyword == "题库":
                 self._add_nav_item(course_group, "题库", "question_bank")
             elif keyword == "学情":
                 self._add_nav_item(course_group, "学情", "learning")
@@ -714,6 +721,11 @@ class MainWindow(QMainWindow):
             self.download_btn.hide()
             self.status_label.setText(f"已进入: {title}")
             self.activities_view.on_show()
+        elif "考试" in title:
+            self.stacked_widget.setCurrentIndex(11)
+            self.download_btn.hide()
+            self.status_label.setText(f"已进入: {title}")
+            self.exam_view.on_show()
         elif "题库" in title:
             self.stacked_widget.setCurrentIndex(4)
             self.download_btn.hide()
