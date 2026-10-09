@@ -253,7 +253,12 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(self.chat_view)
 
         # Page 11: Exam View
-        self.exam_view = ExamView(self.crawler, parent=self)
+        self.exam_view = ExamView(
+            self.crawler,
+            self._get_current_class_id,
+            self._get_current_class_name,
+            parent=self,
+        )
         self.stacked_widget.addWidget(self.exam_view)
 
         content_layout.addWidget(self.stacked_widget)
