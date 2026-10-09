@@ -1,0 +1,179 @@
+from dataclasses import dataclass
+
+
+EXAM_REVIEW_LIST_URL = (
+    "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/markresult-new"
+)
+EXAM_RECEIVE_IP_URL = (
+    "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/answers-receiveip"
+)
+
+
+@dataclass(frozen=True)
+class ExamReviewContext:
+    course_id: str
+    class_id: str
+    cpi: str
+    exam_id: str
+    exam_title: str
+    class_name: str
+    marklist_url: str = ""
+
+
+@dataclass(frozen=True)
+class ExamReviewPage:
+    records: list
+    total: int
+    class_size: int
+    page_num: int
+    page_size: int
+    total_pages: int
+
+
+def fetch_exam_review_page(
+    session,
+    context: ExamReviewContext,
+    state: int,
+    page_num: int = 1,
+    page_size: int = 20,
+) -> ExamReviewPage:
+    if state not in (0, 1):
+        raise ValueError("state must be 0 (unsubmitted) or 1 (submitted)")
+    if not context.course_id or not context.class_id or not context.cpi or not context.exam_id:
+        raise ValueError("课程、班级或考试参数缺失")
+    if page_num < 1 or page_size < 1:
+        raise ValueError("页码和每页数量必须为正数")
+
+    form_data = {
+        "courseid": context.course_id,
+        "clazzid": context.class_id,
+        "cpi": context.cpi,
+        "ut": "",
+        "id": context.exam_id,
+        "sw": "",
+        "schoolId": "-1",
+        "schoolName": "",
+        "sort": "",
+        "sorttype": "",
+        "state": str(state),
+        "status": "-1",
+        "groupIds": "",
+        "groupid": "-1",
+        "collegeId": "-1",
+        "majorId": "-1",
+        "clazzId": "-1",
+        "reviewMarkLabel": "0",
+        "markType": "0",
+        "hideInvigilation": "0",
+        "hideRetest": "false",
+        "updateScore": "1",
+        "allowAnnotationRedoDownload": "1",
+    }
+    if page_num > 1:
+        form_data.update({
+            "pages": str(page_num),
+            "size": str(page_size),
+            "groupId": "-1",
+            "mark": "-1",
+        })
+    elif page_size != 20:
+        form_data["size"] = str(page_size)
+
+    headers = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": (
+            "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5"
+        ),
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://mooc2-gray.chaoxing.com",
+        "Pragma": "no-cache",
+        "Referer": context.marklist_url,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/154.0.0.0 Safari/537.36"
+        ),
+        "X-Requested-With": "XMLHttpRequest",
+        "sec-ch-ua": (
+            '"Chromium";v="154", "Google Chrome";v="154", '
+            '"Not A(Brand";v="99"'
+        ),
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+    }
+    response = session.post(
+        EXAM_REVIEW_LIST_URL,
+        data=form_data,
+        headers=headers,
+        timeout=20,
+    )
+    if response.status_code == 403:
+        raise RuntimeError(
+            "批阅接口返回 HTTP 403：服务器拒绝请求，请确认登录状态和考试批阅权限"
+        )
+    response.raise_for_status()
+
+    payload = response.json()
+    if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+        message = payload.get("msg") if isinstance(payload, dict) else "响应格式错误"
+        raise RuntimeError(message or "考试批阅列表加载失败")
+
+    records = payload.get("data")
+    if not isinstance(records, list):
+        raise RuntimeError("考试批阅列表响应缺少 data 数组")
+
+    if state == 1:
+        record_ids = [
+            str(record["id"])
+            for record in records
+            if isinstance(record, dict) and record.get("id") is not None
+        ]
+        if record_ids:
+            ip_response = session.post(
+                EXAM_RECEIVE_IP_URL,
+                data={
+                    "courseId": context.course_id,
+                    "classId": context.class_id,
+                    "cpi": context.cpi,
+                    "ids": ",".join(record_ids),
+                },
+                headers=headers,
+                timeout=20,
+            )
+            if ip_response.status_code == 403:
+                raise RuntimeError(
+                    "提交 IP 接口返回 HTTP 403：请确认登录状态和考试批阅权限"
+                )
+            ip_response.raise_for_status()
+            ip_payload = ip_response.json()
+            if (
+                not isinstance(ip_payload, dict)
+                or str(ip_payload.get("status")).lower() not in ("true", "1")
+                or not isinstance(ip_payload.get("receiveIps"), list)
+            ):
+                raise RuntimeError("提交 IP 信息加载失败")
+
+            receive_ips = {
+                str(item["id"]): item.get("receiveIp", "")
+                for item in ip_payload["receiveIps"]
+                if isinstance(item, dict) and item.get("id") is not None
+            }
+            for record in records:
+                if isinstance(record, dict):
+                    record["receiveIp"] = receive_ips.get(
+                        str(record.get("id")), record.get("receiveIp", "")
+                    )
+
+    return ExamReviewPage(
+        records=records,
+        total=int(payload.get("total") or 0),
+        class_size=int(payload.get("classSize") or 0),
+        page_num=int(payload.get("pageNum") or page_num),
+        page_size=int(payload.get("size") or page_size),
+        total_pages=int(payload.get("totalPage") or 0),
+    )

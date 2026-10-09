@@ -1,13 +1,32 @@
+import re
 from urllib.parse import urlencode, urljoin
 
 from bs4 import BeautifulSoup
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView, QHeaderView, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ui.theme import apply_theme_stylesheet, bind_theme_tree
+
+
+def _extract_progress_counts(progress_node):
+    labels = ("待批", "已交", "未交")
+    counts = {label: "—" for label in labels}
+    if not progress_node:
+        return counts
+
+    spans = progress_node.find_all("span", recursive=False)
+    for index, span in enumerate(spans[:len(labels)]):
+        text = span.get_text(" ", strip=True)
+        match = re.search(r"\d+", text)
+        count = match.group(0) if match else "0"
+        label = next((candidate for candidate in labels if candidate in text), None)
+        if label is None:
+            label = labels[index]
+        counts[label] = count
+    return counts
 
 
 class ExamListLoadWorker(QThread):
@@ -96,6 +115,9 @@ class ExamListLoadWorker(QThread):
                 exams.append({
                     "id": task_id,
                     "title": title or "未命名考试",
+                    "course_id": course_id,
+                    "class_id": self.class_id,
+                    "cpi": cpi,
                     "class_name": (
                         str(class_node.get("title") or "").strip()
                         or class_node.get_text(" ", strip=True)
@@ -104,13 +126,7 @@ class ExamListLoadWorker(QThread):
                     "exam_time": (
                         time_node.get_text(" ", strip=True) if time_node else ""
                     ),
-                    "progress": (
-                        " / ".join(
-                            node.get_text(" ", strip=True)
-                            for node in progress_node.find_all("span", recursive=False)
-                        )
-                        if progress_node else ""
-                    ),
+                    "progress_counts": _extract_progress_counts(progress_node),
                     "marking_url": (
                         urljoin(self.URL, marking_node.get("href", ""))
                         if marking_node else ""
@@ -122,48 +138,9 @@ class ExamListLoadWorker(QThread):
             self.failed.emit(self.request_id, str(exc))
 
 
-class ExamMarkingRequestWorker(QThread):
-    completed = pyqtSignal(str, str, bool, str)
-
-    def __init__(self, session, exam, parent=None):
-        super().__init__(parent)
-        self.session = session
-        self.task_id = str(exam.get("id") or "")
-        self.title = str(exam.get("title") or "未命名考试")
-        self.url = str(exam.get("marking_url") or "")
-
-    def run(self):
-        try:
-            if not self.url:
-                raise RuntimeError("该考试没有可用的批阅入口")
-            response = self.session.get(
-                self.url,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Referer": ExamListLoadWorker.URL,
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/154.0.0.0 Safari/537.36"
-                    ),
-                },
-                timeout=20,
-            )
-            response.raise_for_status()
-            response_url = str(getattr(response, "url", "") or "").lower()
-            if "passport2.chaoxing.com" in response_url:
-                raise RuntimeError("登录状态已失效，请重新登录")
-            self.completed.emit(
-                self.task_id,
-                self.title,
-                True,
-                f"HTTP {response.status_code}",
-            )
-        except Exception as exc:
-            self.completed.emit(self.task_id, self.title, False, str(exc))
-
-
 class ExamView(QWidget):
+    review_requested = pyqtSignal(object)
+
     def __init__(
         self, crawler, get_class_id_callback, get_class_name_callback, parent=None
     ):
@@ -173,8 +150,6 @@ class ExamView(QWidget):
         self.get_class_name_callback = get_class_name_callback
         self._exam_request_id = 0
         self._exam_workers = []
-        self._marking_workers = []
-        self._marking_pending = set()
         self._marking_buttons = {}
         self._setup_ui()
 
@@ -187,9 +162,9 @@ class ExamView(QWidget):
         self.status_label.setObjectName("exam_status")
         layout.addWidget(self.status_label)
 
-        self.exam_table = QTableWidget(0, 5)
+        self.exam_table = QTableWidget(0, 7)
         self.exam_table.setHorizontalHeaderLabels(
-            ["考试名称", "班级", "考试时间", "提交进度", "操作"]
+            ["考试名称", "班级", "考试时间", "待批", "已交", "未交", "操作"]
         )
         self.exam_table.verticalHeader().setVisible(False)
         self.exam_table.setEditTriggers(
@@ -201,13 +176,14 @@ class ExamView(QWidget):
         self.exam_table.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
         )
-        self.exam_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        for column in range(1, 5):
-            self.exam_table.horizontalHeader().setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents
-            )
+        self.exam_table.setWordWrap(True)
+        self.exam_table.setAlternatingRowColors(True)
+        self.exam_table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.exam_table.viewport().installEventFilter(self)
+        header = self.exam_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._resize_exam_columns()
         layout.addWidget(self.exam_table, 1)
 
         apply_theme_stylesheet(self, lambda palette: f"""
@@ -222,6 +198,12 @@ class ExamView(QWidget):
                 gridline-color: {palette.border};
                 selection-background-color: {palette.accent};
                 selection-color: #ffffff;
+            }}
+            QTableWidget::item {{
+                padding: 6px;
+            }}
+            QTableWidget::item:alternate {{
+                background-color: {palette.panel_alt_bg};
             }}
             QPushButton {{
                 background-color: {palette.accent};
@@ -255,6 +237,56 @@ class ExamView(QWidget):
         """)
         bind_theme_tree(self)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._resize_exam_columns)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._resize_exam_columns)
+
+    def eventFilter(self, watched, event):
+        if (
+            hasattr(self, "exam_table")
+            and watched is self.exam_table.viewport()
+            and event.type() == QEvent.Type.Resize
+        ):
+            QTimer.singleShot(0, self._resize_exam_columns)
+        return super().eventFilter(watched, event)
+
+    def _resize_exam_columns(self):
+        if not hasattr(self, "exam_table"):
+            return
+
+        available_width = self.exam_table.viewport().width()
+        if available_width <= 0:
+            available_width = self.exam_table.width()
+
+        min_widths = (240, 150, 170, 76, 76, 76, 90)
+        if available_width < sum(min_widths):
+            widths = min_widths
+        else:
+            action_width = 90
+            extra_width = available_width - sum(min_widths)
+            title_width = 240 + min(int(extra_width * 0.35), 180)
+            count_width = 76 + min(int(extra_width * 0.10), 34)
+            metadata_extra = extra_width - (title_width - 240) - 3 * (count_width - 76)
+            class_extra = int(metadata_extra * 0.45)
+            class_width = 150 + class_extra
+            time_width = 170 + metadata_extra - class_extra
+            widths = (
+                title_width,
+                class_width,
+                time_width,
+                count_width,
+                count_width,
+                count_width,
+                action_width,
+            )
+
+        for column, width in enumerate(widths):
+            self.exam_table.setColumnWidth(column, width)
+
     def on_show(self):
         self._exam_request_id += 1
         request_id = self._exam_request_id
@@ -281,6 +313,7 @@ class ExamView(QWidget):
             f"正在加载“{class_name}”的考试列表..."
             if class_name else "正在加载考试列表..."
         )
+        self.status_label.show()
         self.status_label.setText(loading_text)
 
         worker = ExamListLoadWorker(
@@ -305,69 +338,50 @@ class ExamView(QWidget):
                 exam["title"],
                 exam["class_name"],
                 exam["exam_time"],
-                exam["progress"],
+                exam["progress_counts"]["待批"],
+                exam["progress_counts"]["已交"],
+                exam["progress_counts"]["未交"],
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignVCenter
+                    | (
+                        Qt.AlignmentFlag.AlignLeft
+                        if column == 0
+                        else Qt.AlignmentFlag.AlignCenter
+                    )
+                )
                 item.setData(Qt.ItemDataRole.UserRole, exam["id"])
                 self.exam_table.setItem(row, column, item)
             marking_button = QPushButton("批阅")
+            marking_button.setMinimumHeight(36)
             marking_button.setEnabled(bool(exam["marking_url"]))
             if not exam["marking_url"]:
                 marking_button.setToolTip("该考试没有可用的批阅入口")
-            elif exam["id"] in self._marking_pending:
-                marking_button.setEnabled(False)
-                marking_button.setText("请求中...")
             marking_button.clicked.connect(
-                lambda checked=False, entry=exam: self._request_marking(entry)
+                lambda checked=False, entry=exam: self.review_requested.emit(entry)
             )
-            self.exam_table.setCellWidget(row, 4, marking_button)
+            self.exam_table.setCellWidget(row, 6, marking_button)
             self._marking_buttons[exam["id"]] = marking_button
-        self.status_label.setText(
-            f"已加载 {len(exams)} 场考试" if exams else "该班级暂无考试"
-        )
+        self.exam_table.resizeRowsToContents()
+        for row in range(len(exams)):
+            self.exam_table.setRowHeight(
+                row, max(self.exam_table.rowHeight(row), 44)
+            )
+        if exams:
+            self.status_label.clear()
+            self.status_label.hide()
+        else:
+            self.status_label.setText("该班级暂无考试")
+            self.status_label.show()
 
     def _on_exam_list_failed(self, request_id, message):
         if request_id != self._exam_request_id:
             return
+        self.status_label.show()
         self.status_label.setText(f"考试列表加载失败: {message}")
-
-    def _request_marking(self, exam):
-        task_id = str(exam.get("id") or "")
-        if not task_id or task_id in self._marking_pending:
-            return
-
-        button = self._marking_buttons.get(task_id)
-        if button:
-            button.setEnabled(False)
-            button.setText("请求中...")
-        self._marking_pending.add(task_id)
-        self.status_label.setText(f"正在请求“{exam['title']}”的批阅接口...")
-
-        worker = ExamMarkingRequestWorker(self.crawler.session, exam, self)
-        self._marking_workers.append(worker)
-        worker.completed.connect(self._on_marking_request_completed)
-        worker.finished.connect(self._on_marking_worker_finished)
-        worker.start()
-
-    def _on_marking_request_completed(self, task_id, title, success, message):
-        self._marking_pending.discard(task_id)
-        button = self._marking_buttons.get(task_id)
-        if button:
-            button.setEnabled(True)
-            button.setText("批阅")
-        if success:
-            self.status_label.setText(
-                f"已请求“{title}”的批阅接口（{message}），未打开网页"
-            )
-        else:
-            self.status_label.setText(f"批阅接口请求失败: {message}")
-
-    def _on_marking_worker_finished(self):
-        worker = self.sender()
-        if worker in self._marking_workers:
-            self._marking_workers.remove(worker)
-            worker.deleteLater()
 
     def _on_exam_worker_finished(self):
         worker = self.sender()

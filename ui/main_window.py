@@ -22,6 +22,8 @@ from ui.views.cloud_drive_view import CloudDriveView
 from ui.views.notes_view import NotesView
 from ui.views.chat_view import ChatView
 from ui.views.exam_view import ExamView
+from ui.views.exam_review_view import ExamReviewView
+from core.apis.exam_api import ExamReviewContext
 from ui.dialogs.ai_settings_dialog import AISettingsDialog
 from core.logger import get_logger
 
@@ -259,7 +261,12 @@ class MainWindow(QMainWindow):
             self._get_current_class_name,
             parent=self,
         )
+        self.exam_view.review_requested.connect(self._open_exam_review)
         self.stacked_widget.addWidget(self.exam_view)
+
+        self.exam_review_view = ExamReviewView(self.crawler, parent=self)
+        self.exam_review_view.back_requested.connect(self._return_to_exam_list)
+        self.stacked_widget.addWidget(self.exam_review_view)
 
         content_layout.addWidget(self.stacked_widget)
         splitter.addWidget(content_container)
@@ -332,6 +339,29 @@ class MainWindow(QMainWindow):
 
     def _update_status(self, message):
         self.status_label.setText(message)
+
+    def _open_exam_review(self, exam):
+        context = ExamReviewContext(
+            course_id=str(exam.get("course_id") or ""),
+            class_id=str(exam.get("class_id") or ""),
+            cpi=str(exam.get("cpi") or ""),
+            exam_id=str(exam.get("id") or ""),
+            exam_title=str(exam.get("title") or "考试批阅"),
+            class_name=str(exam.get("class_name") or ""),
+            marklist_url=str(exam.get("marking_url") or ""),
+        )
+        if not all((context.course_id, context.class_id, context.cpi, context.exam_id)):
+            self._update_status("考试或班级参数缺失，无法打开批阅工作区")
+            return
+
+        self.exam_review_view.open_exam(context)
+        self.stacked_widget.setCurrentWidget(self.exam_review_view)
+        self.download_btn.hide()
+        self._update_status(f"已进入: {context.exam_title} - 批阅")
+
+    def _return_to_exam_list(self):
+        self.stacked_widget.setCurrentWidget(self.exam_view)
+        self._update_status("已返回考试列表")
 
     def _get_current_class_ids(self):
         return [str(self.clazz_box.itemData(i)) for i in range(self.clazz_box.count())]
