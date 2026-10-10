@@ -177,3 +177,31 @@ def fetch_exam_review_page(
         page_size=int(payload.get("size") or page_size),
         total_pages=int(payload.get("totalPage") or 0),
     )
+
+
+def fetch_all_submitted_exam_records(
+    session,
+    context: ExamReviewContext,
+    page_size: int = 100,
+    progress_callback=None,
+) -> list:
+    first_page = fetch_exam_review_page(
+        session, context, state=1, page_num=1, page_size=page_size
+    )
+    records = list(first_page.records)
+    total_pages = max(1, first_page.total_pages)
+    if progress_callback is not None:
+        progress_callback(1, total_pages)
+
+    for page_num in range(2, total_pages + 1):
+        page = fetch_exam_review_page(
+            session,
+            context,
+            state=1,
+            page_num=page_num,
+            page_size=page_size,
+        )
+        records.extend(page.records)
+        if progress_callback is not None:
+            progress_callback(page_num, total_pages)
+    return records

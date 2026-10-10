@@ -1,6 +1,10 @@
 import unittest
 
-from core.apis.exam_api import ExamReviewContext, fetch_exam_review_page
+from core.apis.exam_api import (
+    ExamReviewContext,
+    fetch_all_submitted_exam_records,
+    fetch_exam_review_page,
+)
 
 
 class FakeResponse:
@@ -143,6 +147,45 @@ class ExamReviewAPITests(unittest.TestCase):
         )
         self.assertEqual(page.records[0]["receiveIp"], "192.0.2.1/河南")
         self.assertEqual(page.records[1]["receiveIp"], "192.0.2.2/河南")
+
+    def test_fetches_all_submitted_pages_for_ip_analysis(self):
+        session = FakeSession([
+            {
+                "code": 0,
+                "total": 2,
+                "classSize": 2,
+                "size": 100,
+                "pageNum": 1,
+                "totalPage": 2,
+                "data": [{"id": 101, "loginName": "s101"}],
+            },
+            {"status": True, "receiveIps": [{"id": 101, "receiveIp": "192.0.2.1/河南"}]},
+            {
+                "code": 0,
+                "total": 2,
+                "classSize": 2,
+                "size": 100,
+                "pageNum": 2,
+                "totalPage": 2,
+                "data": [{"id": 102, "loginName": "s102"}],
+            },
+            {"status": True, "receiveIps": [{"id": 102, "receiveIp": "192.0.2.1/河南"}]},
+        ])
+        progress = []
+
+        records = fetch_all_submitted_exam_records(
+            session,
+            self.context,
+            page_size=100,
+            progress_callback=lambda current, total: progress.append((current, total)),
+        )
+
+        self.assertEqual([record["id"] for record in records], [101, 102])
+        self.assertEqual([record["receiveIp"] for record in records], [
+            "192.0.2.1/河南", "192.0.2.1/河南",
+        ])
+        self.assertEqual(progress, [(1, 2), (2, 2)])
+        self.assertEqual(len(session.calls), 4)
 
     def test_rejects_unknown_state_without_sending_request(self):
         session = FakeSession({})

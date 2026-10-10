@@ -2,12 +2,13 @@ from PyQt6.QtCore import QByteArray, QEvent, QSettings, QThread, QTimer, Qt, QSi
 from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QComboBox, QHeaderView, QHBoxLayout,
-    QLabel, QPushButton, QTableWidget, QTableWidgetItem, QToolButton,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractItemView, QButtonGroup, QComboBox, QGridLayout, QHeaderView,
+    QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+    QToolButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from core.apis.exam_api import ExamReviewContext, fetch_exam_review_page
+from ui.dialogs.exam_ip_analysis_dialog import ExamIpAnalysisDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
 )
@@ -179,8 +180,15 @@ class ExamReviewView(QWidget):
         self._resize_record_columns()
         person_layout.addWidget(self.records_table, 1)
 
-        page_row = QHBoxLayout()
-        page_row.addStretch()
+        page_row = QGridLayout()
+        page_row.setColumnStretch(1, 1)
+        side_gutter = QWidget()
+        side_gutter.setFixedWidth(88)
+        page_row.addWidget(side_gutter, 0, 0)
+        page_controls = QWidget()
+        page_controls_layout = QHBoxLayout(page_controls)
+        page_controls_layout.setContentsMargins(0, 0, 0, 0)
+        page_controls_layout.setSpacing(6)
         self.previous_button = QPushButton("上一页")
         self.previous_button.clicked.connect(self._previous_page)
         self.page_label = QLabel("第 0 / 0 页")
@@ -188,10 +196,17 @@ class ExamReviewView(QWidget):
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.next_button = QPushButton("下一页")
         self.next_button.clicked.connect(self._next_page)
-        page_row.addWidget(self.previous_button)
-        page_row.addWidget(self.page_label)
-        page_row.addWidget(self.next_button)
-        page_row.addStretch()
+        page_controls_layout.addWidget(self.previous_button)
+        page_controls_layout.addWidget(self.page_label)
+        page_controls_layout.addWidget(self.next_button)
+        page_row.addWidget(page_controls, 0, 1, Qt.AlignmentFlag.AlignCenter)
+        self.ip_analysis_button = QPushButton("IP分析")
+        self.ip_analysis_button.setFixedWidth(88)
+        self.ip_analysis_button.setToolTip("分析本场考试已交记录的重复 IP 与提交时间线索")
+        self.ip_analysis_button.clicked.connect(self._open_ip_analysis)
+        page_row.addWidget(
+            self.ip_analysis_button, 0, 2, Qt.AlignmentFlag.AlignRight
+        )
         person_layout.addLayout(page_row)
         layout.addWidget(self.person_panel, 1)
 
@@ -537,3 +552,11 @@ class ExamReviewView(QWidget):
 
     def _refresh_current_page(self):
         self._load_page(self.page_num or 1)
+
+    def _open_ip_analysis(self):
+        if self.context is None:
+            return
+        dialog = ExamIpAnalysisDialog(
+            self.crawler.session, self.context, self
+        )
+        dialog.exec()
