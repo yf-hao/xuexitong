@@ -62,6 +62,8 @@ class QRCodeLoginWorker(QThread):
 
 
 class LoginWindow(QDialog):
+    WINDOW_SIZE = (380, 450)
+
     def __init__(self, crawler):
         super().__init__()
         self.crawler = crawler
@@ -254,8 +256,7 @@ class LoginWindow(QDialog):
         
         self.setLayout(layout)
         # 根据内容计算初始尺寸并锁定，模式切换时会重新计算。
-        self.adjustSize()
-        self.setFixedSize(self.size())
+        self.setFixedSize(*self.WINDOW_SIZE)
         theme_manager().theme_changed.connect(self._apply_theme)
         self._apply_theme(theme_manager().mode)
         self._apply_mode_button_style()
@@ -339,13 +340,7 @@ class LoginWindow(QDialog):
         self._adjust_to_content()
 
     def _adjust_to_content(self):
-        self.setMinimumSize(0, 0)
-        self.setMaximumSize(16777215, 16777215)
-        self.layout().activate()
-        size = self.sizeHint()
-        minimum_height = 450 if not self.qrcode_panel.isHidden() else 377
-        self.resize(max(380, size.width()), max(minimum_height, size.height()))
-        self.setFixedSize(self.size())
+        self.setFixedSize(*self.WINDOW_SIZE)
 
     def _start_qrcode_login(self):
         self._stop_qrcode_worker()
