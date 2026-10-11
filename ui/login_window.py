@@ -138,40 +138,18 @@ class LoginWindow(QDialog):
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(8) # 缩小间距，使标签和输入框成对出现
 
-        theme_row = QHBoxLayout()
-        theme_row.addStretch()
         self.theme_toggle_btn = QPushButton("☀️")
         self.theme_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.theme_toggle_btn.clicked.connect(self._toggle_theme)
-        apply_theme_stylesheet(self.theme_toggle_btn, """
-            QPushButton {
-                background-color: #252526;
-                color: #aaaaaa;
-                border: 1px solid #3d3d3d;
-                border-radius: 16px;
-                padding: 0;
-                min-width: 32px;
-                max-width: 32px;
-                min-height: 32px;
-                max-height: 32px;
-                font-size: 15px;
-                font-weight: normal;
-                margin-top: 0;
-            }
-            QPushButton:hover {
-                background-color: #2a2d2e;
-                color: #ffffff;
-                border: 1px solid #007acc;
-            }
-        """)
-        theme_row.addWidget(self.theme_toggle_btn)
-        layout.addLayout(theme_row)
-        
         self.mode_switch_btn = QPushButton("扫码登录")
         self.mode_switch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mode_switch_btn.setFlat(True)
         self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
-        layout.addWidget(self.mode_switch_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        control_row = QHBoxLayout()
+        control_row.addWidget(self.mode_switch_btn)
+        control_row.addStretch()
+        control_row.addWidget(self.theme_toggle_btn)
+        layout.addLayout(control_row)
 
         self.password_panel = QWidget()
         password_layout = QVBoxLayout(self.password_panel)
@@ -273,6 +251,27 @@ class LoginWindow(QDialog):
 
     def _apply_mode_button_style(self):
         palette = get_theme_palette(theme_manager().mode)
+        apply_theme_stylesheet(self.theme_toggle_btn, f"""
+            QPushButton {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text_muted};
+                border: 1px solid {palette.border_strong};
+                border-radius: 16px;
+                padding: 0;
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
+                font-size: 15px;
+                font-weight: normal;
+                margin-top: 0;
+            }}
+            QPushButton:hover {{
+                background-color: {palette.hover_bg};
+                color: {palette.text};
+                border: 1px solid {palette.accent};
+            }}
+        """)
         for button in (self.mode_switch_btn, self.qr_refresh_btn):
             apply_theme_stylesheet(button, f"""
                 QPushButton {{
