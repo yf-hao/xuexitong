@@ -361,7 +361,7 @@ class LoginWindow(QDialog):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
-        self.qr_refresh_btn.setEnabled(False)
+        self.qr_refresh_btn.setEnabled(True)
 
     def _on_qrcode_completed(self, success, error):
         self._qrcode_login_success = success
