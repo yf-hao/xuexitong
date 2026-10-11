@@ -686,6 +686,8 @@ class ExamReviewView(QWidget):
             student_id,
             content,
             self,
+            exam_id=self.context.exam_id,
+            answer_id=record_id,
         )
         dialog.exec()
 

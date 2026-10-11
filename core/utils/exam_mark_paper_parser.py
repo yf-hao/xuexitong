@@ -1,8 +1,20 @@
 from copy import deepcopy
+import base64
+import binascii
 from dataclasses import dataclass
+import json
 import re
+from urllib.parse import unquote
 
 from bs4 import Tag
+
+
+@dataclass(frozen=True)
+class ExamAnswerAttachment:
+    object_id: str
+    filename: str
+    file_type: str = ""
+    file_size: str = ""
 
 
 @dataclass(frozen=True)
@@ -15,7 +27,23 @@ class ExamQuestionContent:
     question_id: str
     stem_html: str
     student_answer_html: str
-    reference_answer_html: str
+    correct_answer_html: str
+    explanation_html: str
+    attachments: tuple[ExamAnswerAttachment, ...] = ()
+
+    @property
+    def grading_status(self):
+        if not self.score_confirmed or self.earned_score is None:
+            return "pending"
+        if self.question_type not in {"单选题", "多选题", "判断题"}:
+            return "graded"
+        if self.score is None or self.score <= 0:
+            return "graded"
+        if self.earned_score >= self.score - 1e-6:
+            return "correct"
+        if self.earned_score <= 1e-6:
+            return "incorrect"
+        return "partial"
 
 
 @dataclass(frozen=True)
@@ -107,7 +135,7 @@ def _earned_score(question_node):
     return earned_score, score_node.has_attr("readonly")
 
 
-def _stem_fragment(stem_node, choices_node=None):
+def _stem_fragment(stem_node, choices_node=None, question_number=None):
     if stem_node is None:
         return ""
     stem_body = deepcopy(stem_node)
@@ -120,8 +148,22 @@ def _stem_fragment(stem_node, choices_node=None):
     ):
         wrapper.unwrap()
     stem_html = _safe_fragment(stem_body)
+    if question_number:
+        stem_html = re.sub(
+            rf"^\s*{re.escape(str(question_number))}\s*[.．、]\s*",
+            "",
+            stem_html,
+            count=1,
+        )
     if choices_node is not None:
-        stem_html += _safe_fragment(choices_node)
+        choices_body = deepcopy(choices_node)
+        for choice in choices_body.find_all("li", recursive=False):
+            choice.name = "div"
+        stem_html += (
+            '<div class="choices">'
+            f'{_safe_fragment(choices_body)}'
+            '</div>'
+        )
     return stem_html
 
 
@@ -145,6 +187,98 @@ def _student_answer_fragment(answer_node):
     return _safe_fragment(answer_body)
 
 
+def _student_answer_attachments(answer_node):
+    if answer_node is None:
+        return ()
+
+    attachments = []
+    for iframe in answer_node.select("iframe.attach-iframe"):
+        metadata = {}
+        encoded_metadata = iframe.get("name")
+        if encoded_metadata:
+            try:
+                encoded_json = base64.b64decode(
+                    encoded_metadata, validate=True
+                ).decode("utf-8")
+                metadata = json.loads(unquote(encoded_json))
+            except (
+                binascii.Error, UnicodeDecodeError, ValueError, TypeError,
+            ):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+        object_id = iframe.get("objectid") or metadata.get("objectid")
+        filename = iframe.get("filename") or metadata.get("name")
+        if not object_id or not filename:
+            continue
+        attachments.append(ExamAnswerAttachment(
+            object_id=str(object_id),
+            filename=str(filename),
+            file_type=str(
+                iframe.get("filetype") or metadata.get("type") or ""
+            ),
+            file_size=str(
+                iframe.get("filesize") or metadata.get("size") or ""
+            ),
+        ))
+    return tuple(attachments)
+
+
+def _correct_answer_fragment(question_node):
+    right_answer = question_node.select_one(".topicRightAnswer")
+    if right_answer is None:
+        return ""
+
+    mark_key = right_answer.select_one(".mark_key")
+    if mark_key is not None:
+        answer_body = deepcopy(mark_key)
+        for icon in answer_body.select(".studenticon"):
+            icon.decompose()
+        for label in answer_body.select(".fontWeight"):
+            if label.get_text(" ", strip=True).rstrip("：:") in {
+                "正确答案", "标准答案", "答案",
+            }:
+                label.decompose()
+        for text_node in list(answer_body.find_all(string=True)):
+            cleaned_text = re.sub(
+                r"^\s*(?:正确答案|标准答案|答案)\s*[:：]?\s*",
+                "",
+                str(text_node),
+                count=1,
+            )
+            if cleaned_text != str(text_node):
+                text_node.replace_with(cleaned_text)
+        return _safe_fragment(answer_body)
+
+    answer_node = right_answer.select_one(".objAnswer_right")
+    if answer_node is None:
+        return ""
+    answer_content = answer_node.select_one(".disablePosition") or answer_node
+    return _safe_fragment(answer_content)
+
+
+def _explanation_fragment(question_node):
+    right_answer = question_node.select_one(".topicRightAnswer")
+    analysis = (
+        right_answer.select_one(".answerAnalysis")
+        if right_answer is not None
+        else question_node.select_one(".answerAnalysis")
+    )
+    if analysis is None:
+        return ""
+    explanation = analysis.select_one(
+        ".AnalysisCon, .objAnswer_analysis"
+    )
+    if explanation is not None:
+        return _safe_fragment(explanation)
+
+    analysis_body = deepcopy(analysis)
+    for label in analysis_body.select(".analysisTit"):
+        label.decompose()
+    return _safe_fragment(analysis_body)
+
+
 def _chinese_number(number):
     numerals = "零一二三四五六七八九"
     if number <= 0:
@@ -161,11 +295,40 @@ def _chinese_number(number):
     return str(number)
 
 
+def _uniform_question_score(questions):
+    if not questions or any(question.score is None for question in questions):
+        return None
+    score = questions[0].score
+    if all(abs(question.score - score) <= 1e-6 for question in questions):
+        return score
+    return None
+
+
 def _group_title(group_number, question_type, questions, total_score):
     score_text = f"{total_score:.1f}" if total_score is not None else "未知"
+    question_score = _uniform_question_score(questions)
+    if question_score is None:
+        score_details = f"{score_text}分"
+    else:
+        score_details = f"每题{question_score:g}分，共{score_text}分"
     return (
         f"{_chinese_number(group_number)}.{question_type}"
-        f"（共{len(questions)}题，{score_text}分）"
+        f"（共{len(questions)}题，{score_details}）"
+    )
+
+
+def _add_per_question_score(title, questions):
+    question_score = _uniform_question_score(questions)
+    if question_score is None or "每题" in title:
+        return title
+    pattern = re.compile(r"(共\s*\d+\s*题)[，,]\s*([\d.]+)\s*分")
+    return pattern.sub(
+        lambda match: (
+            f"{match.group(1)}，每题{question_score:g}分，"
+            f"共{match.group(2)}分"
+        ),
+        title,
+        count=1,
     )
 
 
@@ -206,26 +369,29 @@ def parse_exam_mark_paper(html):
         )
         if answer_node is None:
             answer_node = question_node.select_one(".topicStudentAnswer")
-        reference_node = question_node.select_one(".answerAnalysis")
-        if reference_node is None:
-            reference_node = question_node.select_one(".topicRightAnswer")
         question_id = ""
         if stem_node is not None:
             question_id = str(stem_node.get("id") or "").removeprefix(
                 "questionStem_"
             )
+        question_number = str(question_node.get("index") or index)
         earned_score, score_confirmed = _earned_score(question_node)
+        answer_attachments = _student_answer_attachments(answer_node)
 
         grouped_questions[group_key].append(ExamQuestionContent(
-            number=str(question_node.get("index") or index),
+            number=question_number,
             question_type=question_type,
             score=_question_score(question_node),
             earned_score=earned_score,
             score_confirmed=score_confirmed,
             question_id=question_id,
-            stem_html=_stem_fragment(stem_node, choices_node),
+            stem_html=_stem_fragment(
+                stem_node, choices_node, question_number
+            ),
             student_answer_html=_student_answer_fragment(answer_node),
-            reference_answer_html=_safe_fragment(reference_node),
+            correct_answer_html=_correct_answer_fragment(question_node),
+            explanation_html=_explanation_fragment(question_node),
+            attachments=answer_attachments,
         ))
 
     groups = []
@@ -237,9 +403,13 @@ def parse_exam_mark_paper(html):
             if question.score is not None
         ]
         total_score = sum(known_scores) if known_scores else None
-        title = group_headers[group_key] or _group_title(
-            group_number, group_key[1], questions, total_score
-        )
+        title = group_headers[group_key]
+        if title:
+            title = _add_per_question_score(title, questions)
+        else:
+            title = _group_title(
+                group_number, group_key[1], questions, total_score
+            )
         groups.append(ExamQuestionGroup(
             title=title,
             question_type=group_key[1],

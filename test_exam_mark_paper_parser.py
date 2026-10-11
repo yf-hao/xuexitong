@@ -1,9 +1,51 @@
+import base64
+import json
 import unittest
+from urllib.parse import quote
 
 from core.utils.exam_mark_paper_parser import parse_exam_mark_paper
 
 
 class ExamMarkPaperParserTests(unittest.TestCase):
+    def test_grading_status_distinguishes_objective_and_subjective_scores(self):
+        html = """
+        <div>
+          <div class="questionWrap" name="单选题">
+            <input id="fullScore1" value="2">
+            <input name="score1" value="2" readonly>
+          </div>
+          <div class="questionWrap" name="单选题">
+            <input id="fullScore2" value="2">
+            <input name="score2" value="0" readonly>
+          </div>
+          <div class="questionWrap" name="多选题">
+            <input id="fullScore3" value="2">
+            <input name="score3" value="1" readonly>
+          </div>
+          <div class="questionWrap" name="简答题">
+            <input id="fullScore4" value="2">
+            <input name="score4" value="1" readonly>
+          </div>
+          <div class="questionWrap" name="单选题">
+            <input id="fullScore5" value="2">
+            <input name="score5" value="0">
+          </div>
+        </div>
+        """
+
+        questions = parse_exam_mark_paper(html).questions
+
+        statuses_by_number = {
+          question.number: question.grading_status for question in questions
+        }
+        self.assertEqual(statuses_by_number, {
+          "1": "correct",
+          "2": "incorrect",
+          "3": "partial",
+          "4": "graded",
+          "5": "pending",
+        })
+
     def test_objective_student_answer_excludes_source_labels_and_score_controls(self):
         html = """
         <div class="questionWrap" name="单选题">
@@ -30,7 +72,7 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         ):
             self.assertNotIn(redundant_text, question.student_answer_html)
 
-    def test_extracts_objective_choices_student_and_reference_answers(self):
+    def test_extracts_objective_choices_correct_answer_and_explanation(self):
         html = """
         <div class="ans-cc">
           <div class="left-typt-tit">一.单选题（共1题，2.5分）</div>
@@ -39,12 +81,19 @@ class ExamMarkPaperParserTests(unittest.TestCase):
             <div class="topicArea">
               <h3 class="mark_name">
                 <span class="colorShallow">1. (单选题, 2.5分)</span>
-                <div class="hiddenTitle textWrap">题目正文</div>
+                <div class="hiddenTitle textWrap">1. 题目正文</div>
               </h3>
               <ul class="mark_letter"><li>选项甲</li><li>选项乙</li></ul>
               <div class="mark_answer topicStudentAnswer"><div>学生选择</div></div>
               <div class="mark_answer topicRightAnswer">
-                <div class="answerAnalysis">参考答案</div>
+                <div class="mark_key">
+                  <span class="studenticon"><img src="/avatar.png"></span>
+                  <span class="colorGreen"><i class="fontWeight">正确答案：</i>C</span>
+                </div>
+                <div class="answerAnalysis">
+                  <span class="analysisTit"><b>答案解析</b></span>
+                  <div class="AnalysisCon">选项 C 符合题意。</div>
+                </div>
               </div>
             </div>
           </div>
@@ -56,10 +105,16 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         self.assertIn("题目正文", question.stem_html)
         self.assertIn("选项甲", question.stem_html)
         self.assertIn("选项乙", question.stem_html)
+        self.assertIn('<div class="choices">', question.stem_html)
+        self.assertIn("<div>选项甲</div>", question.stem_html)
+        self.assertNotIn("<li>", question.stem_html)
         self.assertNotIn("1. (单选题, 2.5分)", question.stem_html)
         self.assertTrue(question.stem_html.startswith("题目正文"))
         self.assertIn("学生选择", question.student_answer_html)
-        self.assertIn("参考答案", question.reference_answer_html)
+        self.assertIn("C", question.correct_answer_html)
+        self.assertNotIn("正确答案", question.correct_answer_html)
+        self.assertNotIn("avatar.png", question.correct_answer_html)
+        self.assertIn("选项 C 符合题意", question.explanation_html)
 
     def test_groups_questions_by_type_and_sums_maximum_scores(self):
         html = """
@@ -88,7 +143,9 @@ class ExamMarkPaperParserTests(unittest.TestCase):
 
         self.assertEqual(len(content.groups), 1)
         group = content.groups[0]
-        self.assertEqual(group.title, "一.单选题（共2题，5.0分）")
+        self.assertEqual(
+          group.title, "一.单选题（共2题，每题2.5分，共5.0分）"
+        )
         self.assertEqual(group.question_type, "单选题")
         self.assertEqual(len(group.questions), 2)
         self.assertEqual(group.total_score, 5.0)
@@ -101,6 +158,25 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         self.assertNotIn("1. (单选题, 2.5分)", group.questions[0].stem_html)
         self.assertIn("第一题", group.questions[0].stem_html)
 
+    def test_group_title_omits_per_question_score_when_scores_differ(self):
+        html = """
+        <div class="ans-cc">
+          <div class="left-typt-tit">一.单选题（共2题，5.0分）</div>
+          <div class="questionWrap" index="1" name="单选题">
+            <input id="fullScore1" value="2">
+            <h3 class="mark_name"><div>第一题</div></h3>
+          </div>
+          <div class="questionWrap" index="2" name="单选题">
+            <input id="fullScore2" value="3">
+            <h3 class="mark_name"><div>第二题</div></h3>
+          </div>
+        </div>
+        """
+
+        group = parse_exam_mark_paper(html).groups[0]
+
+        self.assertEqual(group.title, "一.单选题（共2题，5.0分）")
+
     def test_extracts_question_and_answer_sections(self):
         html = """
         <div class="questionWrap" index="4" name="简答题">
@@ -108,7 +184,7 @@ class ExamMarkPaperParserTests(unittest.TestCase):
           <div class="stuAnswerWords">
             <div class="SubjectStuAnswer"><p>学生答案</p></div>
           </div>
-          <div class="answerAnalysis"><p>参考答案</p></div>
+          <div class="answerAnalysis"><p>解析内容</p></div>
         </div>
         """
 
@@ -121,7 +197,47 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         self.assertEqual(question.question_id, "52")
         self.assertIn("题干", question.stem_html)
         self.assertIn("学生答案", question.student_answer_html)
-        self.assertIn("参考答案", question.reference_answer_html)
+        self.assertEqual(question.correct_answer_html, "")
+        self.assertIn("解析内容", question.explanation_html)
+
+    def test_extracts_student_answer_attachments_from_cloud_iframes(self):
+        metadata = quote(
+            json.dumps({
+                "objectid": "cloud-object-1",
+                "name": "任务一提示词.md",
+                "type": "md",
+                "size": "1.75K",
+            }, ensure_ascii=False),
+            safe="",
+        )
+        encoded_metadata = base64.b64encode(
+            metadata.encode("utf-8")
+        ).decode("ascii")
+        html = f"""
+        <div class="questionWrap" index="1" name="简答题">
+          <h3 class="mark_name" id="questionStem_q1"><div>题目</div></h3>
+          <div class="stuAnswerWords">
+            <div class="SubjectStuAnswer">
+              <div class="editor-iframe">
+                <iframe class="attach-iframe" module="insertAttach"
+                  objectid="cloud-object-1" filename="任务一提示词.md"
+                  filetype="md" filesize="1.75K"
+                  name="{encoded_metadata}"></iframe>
+              </div>
+            </div>
+          </div>
+        </div>
+        """
+
+        question = parse_exam_mark_paper(html).questions[0]
+
+        self.assertEqual(len(question.attachments), 1)
+        attachment = question.attachments[0]
+        self.assertEqual(attachment.object_id, "cloud-object-1")
+        self.assertEqual(attachment.filename, "任务一提示词.md")
+        self.assertEqual(attachment.file_type, "md")
+        self.assertEqual(attachment.file_size, "1.75K")
+        self.assertNotIn("iframe", question.student_answer_html)
 
     def test_removes_active_content_controls_and_external_urls(self):
         html = """
