@@ -207,6 +207,7 @@ class LoginWindow(QDialog):
         self.qr_refresh_btn.setFlat(True)
         self.qr_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.qr_refresh_btn.clicked.connect(self._start_qrcode_login)
+        self.qr_refresh_btn.hide()
         qrcode_layout.addWidget(self.qr_refresh_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         self.qrcode_panel.hide()
         content_layout.addWidget(self.qrcode_panel)
