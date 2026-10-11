@@ -10,6 +10,8 @@ from PyQt6.QtWidgets import (
 from core.apis.exam_api import (
     ExamReviewContext, fetch_exam_mark_paper, fetch_exam_review_page,
 )
+from core.utils.exam_mark_paper_parser import parse_exam_mark_paper
+from ui.dialogs.exam_answer_dialog import ExamAnswerDialog
 from ui.dialogs.exam_ip_analysis_dialog import ExamIpAnalysisDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
@@ -46,7 +48,7 @@ class ExamReviewLoadWorker(QThread):
 
 
 class MarkPaperWorker(QThread):
-    loaded = pyqtSignal(str)
+    loaded = pyqtSignal(str, object)
     failed = pyqtSignal(str, str)
 
     def __init__(self, session, context, record_id, parent=None):
@@ -60,7 +62,8 @@ class MarkPaperWorker(QThread):
             html = fetch_exam_mark_paper(
                 self.session, self.context, self.record_id
             )
-            self.loaded.emit(self.record_id)
+            content = parse_exam_mark_paper(html)
+            self.loaded.emit(self.record_id, content)
         except Exception as exc:
             self.failed.emit(self.record_id, str(exc))
 
@@ -639,8 +642,8 @@ class ExamReviewView(QWidget):
         )
         self._markpaper_workers.append(worker)
         worker.loaded.connect(
-            lambda answer_id, generation=request_id: self._on_mark_paper_loaded(
-                generation, answer_id
+            lambda answer_id, content, generation=request_id: self._on_mark_paper_loaded(
+                generation, answer_id, content
             )
         )
         worker.failed.connect(
@@ -661,16 +664,37 @@ class ExamReviewView(QWidget):
                 return button
         return None
 
-    def _on_mark_paper_loaded(self, request_id, record_id):
+    def _on_mark_paper_loaded(self, request_id, record_id, content):
         button = self._find_mark_paper_button(record_id)
         if button is not None:
             button.setEnabled(True)
-        if request_id != self._request_id:
+        if request_id != self._request_id or self.mode != "person":
             return
+        row = self._find_mark_paper_row(record_id)
+        student_name = ""
+        student_id = ""
+        if row is not None:
+            name_item = self.records_table.item(row, 0)
+            id_item = self.records_table.item(row, 1)
+            student_name = name_item.text() if name_item is not None else ""
+            student_id = id_item.text() if id_item is not None else ""
         self.status_label.show()
-        self.status_label.setText(
-            "已收到该答卷的批阅页面 HTML（当前版本暂不解析或展示）"
+        self.status_label.setText(f"已加载 {student_name or student_id} 的答卷（只读）")
+        dialog = ExamAnswerDialog(
+            self.context.exam_title,
+            student_name,
+            student_id,
+            content,
+            self,
         )
+        dialog.exec()
+
+    def _find_mark_paper_row(self, record_id):
+        for row in range(self.records_table.rowCount()):
+            item = self.records_table.item(row, 0)
+            if item is not None and str(item.data(Qt.ItemDataRole.UserRole)) == str(record_id):
+                return row
+        return None
 
     def _on_mark_paper_failed(self, request_id, record_id, message):
         button = self._find_mark_paper_button(record_id)
