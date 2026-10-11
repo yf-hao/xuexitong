@@ -215,6 +215,7 @@ class LoginWindow(QDialog):
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
         self.status_label.setFixedHeight(20)
+        self.status_label.hide()
         content_layout.addWidget(self.status_label)
         
         self.login_btn = QPushButton("立即登录")
@@ -326,7 +327,7 @@ class LoginWindow(QDialog):
         self.qrcode_panel.hide()
         self.password_panel.show()
         self.login_btn.show()
-        self.status_label.show()
+        self.status_label.setVisible(bool(self.status_label.text()))
         self.mode_switch_btn.setText("扫码登录")
         self.mode_switch_btn.clicked.disconnect()
         self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
@@ -396,6 +397,7 @@ class LoginWindow(QDialog):
             return
             
         self._set_login_controls_enabled(False)
+        self.status_label.show()
         self.status_label.setText("正在连接学习通，请稍候...")
         self._password_login_success = False
 
@@ -409,6 +411,7 @@ class LoginWindow(QDialog):
             self._password_login_success = True
             self.status_label.setText("登录成功，正在进入系统...")
         else:
+            self.status_label.show()
             self.status_label.setText(error or "身份验证失败，请重试")
             self._set_login_controls_enabled(True)
 
