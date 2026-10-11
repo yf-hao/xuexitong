@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
     QCheckBox, QWidget, QSizePolicy,
 )
-from PyQt6.QtCore import QThread, Qt, QSettings, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QThread, Qt, QSettings, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from core.config import APP_TITLE
 from ui.theme import (
@@ -189,12 +189,17 @@ class LoginWindow(QDialog):
         self.qrcode_panel = QWidget()
         qrcode_layout = QVBoxLayout(self.qrcode_panel)
         qrcode_layout.setContentsMargins(0, 0, 0, 0)
+        qrcode_layout.setSpacing(10)
+        self.qrcode_panel.setMinimumHeight(286)
         self.qr_label = QLabel("正在获取二维码...")
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.qr_label.setMinimumSize(220, 220)
-        qrcode_layout.addWidget(self.qr_label)
+        self.qr_label.setFixedSize(220, 220)
+        qrcode_layout.addWidget(
+            self.qr_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
         self.qr_status_label = QLabel("请使用学习通 App 扫码登录")
         self.qr_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_status_label.setMinimumHeight(20)
         qrcode_layout.addWidget(self.qr_status_label)
         self.qr_refresh_btn = QPushButton("刷新二维码")
         self.qr_refresh_btn.setFlat(True)
@@ -248,8 +253,7 @@ class LoginWindow(QDialog):
         layout.addWidget(self.mode_switch_btn, alignment=Qt.AlignmentFlag.AlignRight)
         
         self.setLayout(layout)
-        # 用 adjustSize 让布局根据真实字体/DPI 计算需要的高度，
-        # 再锁成固定大小——避免 Windows 下中文字体偏高导致按钮被截断。
+        # 根据内容计算初始尺寸并锁定，模式切换时会重新计算。
         self.adjustSize()
         self.setFixedSize(self.size())
         theme_manager().theme_changed.connect(self._apply_theme)
@@ -319,7 +323,7 @@ class LoginWindow(QDialog):
         self.mode_switch_btn.clicked.disconnect()
         self.mode_switch_btn.clicked.connect(self._show_password_login)
         self.qrcode_panel.show()
-        self.adjustSize()
+        self._adjust_to_content()
         self._start_qrcode_login()
 
     def _show_password_login(self):
@@ -332,7 +336,16 @@ class LoginWindow(QDialog):
         self.mode_switch_btn.clicked.disconnect()
         self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
         self.status_label.clear()
-        self.adjustSize()
+        self._adjust_to_content()
+
+    def _adjust_to_content(self):
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        self.layout().activate()
+        size = self.sizeHint()
+        minimum_height = 450 if not self.qrcode_panel.isHidden() else 377
+        self.resize(max(380, size.width()), max(minimum_height, size.height()))
+        self.setFixedSize(self.size())
 
     def _start_qrcode_login(self):
         self._stop_qrcode_worker()
@@ -372,17 +385,21 @@ class LoginWindow(QDialog):
             self.qr_refresh_btn.setEnabled(True)
 
     def _on_qrcode_worker_finished(self):
-        worker = self._qr_worker
-        self._qr_worker = None
+        worker = self.sender()
+        is_current_worker = worker is self._qr_worker
+        if is_current_worker:
+            self._qr_worker = None
         if worker is not None:
             worker.deleteLater()
-        if self._qrcode_login_success:
+        if is_current_worker and self._qrcode_login_success:
             self.accept()
 
     def _stop_qrcode_worker(self):
         if self._qr_worker is not None and self._qr_worker.isRunning():
-            self._qr_worker.stop()
-            self._qr_worker.wait(5000)
+            worker = self._qr_worker
+            worker.stop()
+            worker.wait(5000)
+            QCoreApplication.processEvents()
         self._qrcode_login_success = False
 
     def handle_login(self):
