@@ -2,7 +2,7 @@ import threading
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
-    QCheckBox, QWidget,
+    QCheckBox, QWidget, QSizePolicy,
 )
 from PyQt6.QtCore import QThread, Qt, QSettings, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
@@ -149,6 +149,12 @@ class LoginWindow(QDialog):
         theme_row.addStretch()
         theme_row.addWidget(self.theme_toggle_btn)
         layout.addLayout(theme_row)
+        layout.addStretch()
+
+        content_panel = QWidget()
+        content_layout = QVBoxLayout(content_panel)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
 
         self.password_panel = QWidget()
         password_layout = QVBoxLayout(self.password_panel)
@@ -170,7 +176,7 @@ class LoginWindow(QDialog):
         self.remember_cb = QCheckBox("记住手机号和密码")
         self.remember_cb.setCursor(Qt.CursorShape.PointingHandCursor)
         password_layout.addWidget(self.remember_cb)
-        layout.addWidget(self.password_panel)
+        content_layout.addWidget(self.password_panel)
 
         self.qrcode_panel = QWidget()
         qrcode_layout = QVBoxLayout(self.qrcode_panel)
@@ -188,7 +194,7 @@ class LoginWindow(QDialog):
         self.qr_refresh_btn.clicked.connect(self._start_qrcode_login)
         qrcode_layout.addWidget(self.qr_refresh_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         self.qrcode_panel.hide()
-        layout.addWidget(self.qrcode_panel)
+        content_layout.addWidget(self.qrcode_panel)
         
         # Load saved settings
         self.settings = QSettings("HaoSoft", "XuexitongManager")
@@ -197,7 +203,11 @@ class LoginWindow(QDialog):
         self.status_label = QLabel("")
         apply_theme_stylesheet(self.status_label, "color: #ff5252; font-size: 12px;")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.status_label)
+        self.status_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.status_label.setFixedHeight(20)
+        content_layout.addWidget(self.status_label)
         
         self.login_btn = QPushButton("立即登录")
         self.login_btn.setObjectName("login_btn")
@@ -223,7 +233,9 @@ class LoginWindow(QDialog):
             }}
         """)
         self.login_btn.clicked.connect(self.handle_login)
-        layout.addWidget(self.login_btn)
+        content_layout.addWidget(self.login_btn)
+        layout.addWidget(content_panel)
+        layout.addStretch()
         layout.addWidget(self.mode_switch_btn, alignment=Qt.AlignmentFlag.AlignRight)
         
         self.setLayout(layout)
