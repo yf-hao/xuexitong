@@ -1,8 +1,13 @@
 from dataclasses import dataclass
+import hashlib
+from html import unescape
 import os
 from pathlib import Path
+import re
 import tempfile
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
+
+from core.config import DATA_DIR
 
 
 EXAM_REVIEW_LIST_URL = (
@@ -20,6 +25,69 @@ EXAM_ATTACHMENT_STATUS_URL = (
 EXAM_ATTACHMENT_IFRAME_URL = (
     "https://mooc2-gray.chaoxing.com/ananas/common-modules/attachment/insertCloud.html"
 )
+
+
+def _attachment_response_message(response):
+    try:
+        payload = response.json()
+    except (AttributeError, ValueError):
+        payload = None
+
+    message = ""
+    if isinstance(payload, dict):
+        for key in ("msg", "message", "error", "errorMsg"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                message = value
+                break
+
+    if not message:
+        body = getattr(response, "text", "")
+        if isinstance(body, str):
+            body = re.sub(
+                r"(?is)<(script|style)\b[^>]*>.*?</\1>", " ", body
+            )
+            message = unescape(re.sub(r"<[^>]+>", " ", body))
+
+    message = re.sub(r"\s+", " ", message).strip()
+    message = re.sub(
+        r"(?i)([?&](?:token|enc|sign|secret|auth|ticket|access_token|key)=)"
+        r"[^&#\s\"'<>]+",
+        r"\1[已隐藏]",
+        message,
+    )
+    return message[:240]
+
+
+def _attachment_status_forbidden_error(response):
+    response_url = str(getattr(response, "url", "") or "")
+    response_host = (urlsplit(response_url).hostname or "").lower()
+    message = _attachment_response_message(response)
+    if "passport2.chaoxing.com" in response_host:
+        return RuntimeError("附件状态请求跳转到了登录服务，请重新登录后重试")
+    if message and re.search(r"未登录|请先登录|登录已失效|login required", message, re.I):
+        return RuntimeError(f"学习通登录状态可能已失效：{message}")
+    if message and re.search(r"无权|权限不足|不允许下载|禁止下载", message):
+        return RuntimeError(f"当前账号可能没有该附件的下载权限：{message}")
+    if message:
+        return RuntimeError(f"附件状态接口返回 HTTP 403，服务器提示：{message}")
+    return RuntimeError(
+        "附件状态接口返回 HTTP 403。登录会话可能已失效，也可能是当前账号无权下载该附件；"
+        "请重新登录后重试。"
+    )
+
+
+def exam_attachment_cache_path(object_id: str, filename: str) -> str:
+    if not object_id or not filename:
+        raise ValueError("附件 ID 或文件名缺失")
+    safe_filename = str(filename).replace("\\", "/").rsplit("/", 1)[-1]
+    suffix = Path(safe_filename).suffix.lower()
+    if len(suffix) > 16:
+        suffix = ""
+    cache_dir = Path(DATA_DIR) / "exam_attachment_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_key = hashlib.sha256(str(object_id).encode("utf-8")).hexdigest()
+    return str(cache_dir / f"{cache_key}{suffix}")
 
 
 @dataclass(frozen=True)
@@ -285,13 +353,18 @@ def download_exam_attachment(session, object_id: str, save_path: str) -> str:
         headers={
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Referer": EXAM_ATTACHMENT_IFRAME_URL,
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/154.0.0.0 Safari/537.36"
+            ),
             "X-Requested-With": "XMLHttpRequest",
         },
         timeout=20,
     )
     try:
         if status_response.status_code == 403:
-            raise RuntimeError("附件状态接口返回 HTTP 403，请确认登录状态和下载权限")
+            raise _attachment_status_forbidden_error(status_response)
         status_response.raise_for_status()
         status_url = str(getattr(status_response, "url", "") or "").lower()
         if "passport2.chaoxing.com" in status_url:
@@ -305,6 +378,9 @@ def download_exam_attachment(session, object_id: str, save_path: str) -> str:
 
     download_url = payload.get("download") if isinstance(payload, dict) else None
     if not isinstance(download_url, str) or not download_url.strip():
+        message = _attachment_response_message(status_response)
+        if message:
+            raise RuntimeError(f"附件状态接口未返回下载地址：{message}")
         raise RuntimeError("附件状态接口没有返回下载地址")
     download_url = urljoin(EXAM_ATTACHMENT_STATUS_URL, download_url.strip())
     parsed_url = urlsplit(download_url)
@@ -314,6 +390,7 @@ def download_exam_attachment(session, object_id: str, save_path: str) -> str:
         download_url = urlunsplit(parsed_url._replace(scheme="https"))
 
     destination = Path(save_path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = None
     download_response = None
     try:

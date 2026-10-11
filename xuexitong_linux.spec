@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
+
 block_cipher = None
 
 a = Analysis(
@@ -33,7 +35,7 @@ a = Analysis(
         'qrcode.image.pil',
         'qrcode.image.svg', 'websocket',
         'core.rendering.katex_snapshot',
-    ],
+    ] + collect_submodules('pygments.lexers') + collect_submodules('pygments.styles'),
     excludes=[
         'tkinter',
         'pandas',

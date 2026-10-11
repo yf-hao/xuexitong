@@ -2,6 +2,7 @@
 
 from PyQt6.QtCore import QLibraryInfo
 import os
+from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
@@ -36,7 +37,7 @@ a = Analysis(
         'Crypto.Cipher.AES',
         'cv2',
         'core.excel_parser',
-    ],
+    ] + collect_submodules('pygments.lexers') + collect_submodules('pygments.styles'),
     excludes=[
         'pandas',
         'scipy',

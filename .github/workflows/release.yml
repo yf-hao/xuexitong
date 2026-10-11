@@ -110,6 +110,14 @@ jobs:
           # If opencv or numpy are really needed but not in requirements.txt, keep them:
           # pip install opencv-python numpy
 
+      - name: Attachment preview smoke tests
+        run: |
+          python -m unittest \
+            test_attachment_preview \
+            test_exam_attachment_download \
+            test_exam_mark_paper_parser
+        shell: bash
+
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
         run: |

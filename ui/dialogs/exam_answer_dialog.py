@@ -5,16 +5,23 @@ from html import escape
 
 from bs4 import BeautifulSoup
 from PyQt6.QtCore import QThread, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QDialog, QDoubleSpinBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QInputDialog, QMessageBox, QScrollArea, QTextBrowser, QVBoxLayout,
+    QInputDialog, QMenu, QMessageBox, QScrollArea, QTextBrowser, QVBoxLayout,
     QWidget,
 )
 
-from core.apis.exam_api import download_exam_attachment
+from core.apis.exam_api import (
+    download_exam_attachment, exam_attachment_cache_path,
+)
+from core.utils.attachment_preview import (
+    UnsupportedAttachmentPreviewError, render_attachment_preview,
+)
 from core.utils.exam_mark_paper_parser import ExamMarkPaperContent
 from core.utils.exam_score_drafts import ExamScoreDraftStore
+from ui.dialogs.attachment_preview_dialog import AttachmentPreviewDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
 )
@@ -31,22 +38,49 @@ class _SelectAllOnFocusLineEdit(QLineEdit):
 
 
 class _ExamAttachmentDownloadWorker(QThread):
-    completed = pyqtSignal(str, bool, str)
+    completed = pyqtSignal(str, bool, object)
 
-    def __init__(self, session, attachment, save_path, parent=None):
+    def __init__(self, session, attachment, save_path, action, parent=None):
         super().__init__(parent)
         self.session = session
         self.attachment = attachment
         self.save_path = save_path
+        self.action = action
 
     def run(self):
         try:
+            if self.action == "open":
+                if (
+                    not os.path.isfile(self.save_path)
+                    or os.path.getsize(self.save_path) == 0
+                ):
+                    download_exam_attachment(
+                        self.session,
+                        self.attachment.object_id,
+                        self.save_path,
+                    )
+                try:
+                    preview = render_attachment_preview(self.save_path)
+                except UnsupportedAttachmentPreviewError:
+                    preview = None
+                result = {
+                    "action": self.action,
+                    "path": self.save_path,
+                    "preview": preview,
+                }
+                self.completed.emit(self.attachment.object_id, True, result)
+                return
+
             result = download_exam_attachment(
                 self.session,
                 self.attachment.object_id,
                 self.save_path,
             )
-            self.completed.emit(self.attachment.object_id, True, result)
+            self.completed.emit(
+                self.attachment.object_id,
+                True,
+                {"action": self.action, "path": result},
+            )
         except Exception as exc:
             self.completed.emit(self.attachment.object_id, False, str(exc))
 
@@ -105,6 +139,12 @@ class ExamAnswerDialog(QDialog):
         self.paper_browser.setOpenLinks(False)
         self.paper_browser.setOpenExternalLinks(False)
         self.paper_browser.anchorClicked.connect(self._on_paper_link_clicked)
+        self.paper_browser.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.paper_browser.customContextMenuRequested.connect(
+            self._show_attachment_context_menu
+        )
         self.paper_browser.setHtml(self._paper_html(content))
         theme_manager().theme_changed.connect(self._refresh_paper_theme)
 
@@ -286,7 +326,7 @@ class ExamAnswerDialog(QDialog):
     def _on_paper_link_clicked(self, url):
         if url.scheme() == "exam-attachment":
             object_id = url.path().lstrip("/") or url.host()
-            self._download_answer_attachment(object_id)
+            self._open_answer_attachment(object_id)
             return
         if url.scheme() != "score-draft":
             return
@@ -334,27 +374,111 @@ class ExamAnswerDialog(QDialog):
         if not save_path:
             return
 
+        self._start_attachment_worker(
+            attachment, save_path, "download"
+        )
+
+    def _open_answer_attachment(self, object_id):
+        attachment = self._answer_attachments.get(str(object_id))
+        if attachment is None:
+            return
+        if self._session is None:
+            QMessageBox.warning(self, "打开失败", "当前没有可用的学习通登录会话")
+            return
+        cache_path = exam_attachment_cache_path(
+            attachment.object_id, attachment.filename
+        )
+        self._start_attachment_worker(attachment, cache_path, "open")
+
+    def _start_attachment_worker(self, attachment, save_path, action):
+        object_id = str(attachment.object_id)
+        if object_id in self._attachment_workers:
+            return
         worker = _ExamAttachmentDownloadWorker(
             self._session,
             attachment,
             save_path,
+            action,
             QApplication.instance(),
         )
         worker.completed.connect(self._on_attachment_download_completed)
         worker.finished.connect(worker.deleteLater)
-        self._attachment_workers[str(object_id)] = worker
-        self.read_only_note.setText(f"正在下载附件：{filename}")
+        self._attachment_workers[object_id] = worker
+        action_text = "打开" if action == "open" else "下载"
+        self.read_only_note.setText(
+            f"正在{action_text}附件：{attachment.filename}"
+        )
         worker.start()
+
+    def _show_attachment_context_menu(self, position):
+        href = self.paper_browser.anchorAt(position)
+        url = QUrl(href)
+        if url.scheme() != "exam-attachment":
+            return
+        object_id = url.path().lstrip("/") or url.host()
+        if object_id not in self._answer_attachments:
+            return
+
+        menu = QMenu(self)
+        apply_theme_stylesheet(menu, lambda palette: f"""
+            QMenu {{
+                background-color: {palette.panel_alt_bg};
+                color: {palette.text};
+                border: 1px solid {palette.border_strong};
+                padding: 6px 4px;
+            }}
+            QMenu::item {{
+                min-width: 132px;
+                min-height: 24px;
+                padding: 10px 28px;
+                margin: 3px 4px;
+                border: 1px solid transparent;
+                border-radius: 4px;
+            }}
+            QMenu::item:hover,
+            QMenu::item:selected,
+            QMenu::item:focus {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border-color: {palette.accent_focus};
+            }}
+        """)
+        download_action = menu.addAction("下载")
+        open_action = menu.addAction("打开")
+        selected_action = menu.exec(
+            self.paper_browser.viewport().mapToGlobal(position)
+        )
+        if selected_action == download_action:
+            self._download_answer_attachment(object_id)
+        elif selected_action == open_action:
+            self._open_answer_attachment(object_id)
 
     def _on_attachment_download_completed(self, object_id, succeeded, detail):
         self._attachment_workers.pop(str(object_id), None)
-        if succeeded:
-            self.read_only_note.setText(
-                f"附件已下载：{os.path.basename(detail)}"
-            )
-        else:
+        if not succeeded:
             self.read_only_note.setText("附件下载失败")
             QMessageBox.warning(self, "附件下载失败", detail)
+            return
+
+        action = detail.get("action")
+        path = detail.get("path", "")
+        if action == "open":
+            preview = detail.get("preview")
+            if preview is not None:
+                AttachmentPreviewDialog(preview, self).exec()
+            elif not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                QMessageBox.warning(
+                    self,
+                    "打开失败",
+                    f"当前系统无法打开此附件：{path}",
+                )
+            self.read_only_note.setText(
+                f"附件已打开：{os.path.basename(path)}"
+            )
+        else:
+            self.read_only_note.setText(
+                f"附件已下载：{os.path.basename(path)}"
+            )
 
     def _save_score_draft(self, key, question, score):
         try:
