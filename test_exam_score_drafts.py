@@ -2,10 +2,48 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.utils.exam_score_drafts import ExamScoreDraftStore
+from core.utils.exam_score_drafts import (
+    ExamScoreDraftStore,
+    distribute_group_score,
+)
+
+
+class ExamScoreDistributionTests(unittest.TestCase):
+    def test_distributes_integer_total_evenly(self):
+        for _ in range(8):
+            scores = distribute_group_score(10, [33, 33, 33])
+
+            self.assertEqual(sorted(scores), [3, 3, 4])
+            self.assertEqual(sum(scores), 10)
+
+    def test_respects_question_caps_and_decimal_maximums(self):
+        capped_scores = distribute_group_score(10, [2, 33, 33])
+        decimal_scores = distribute_group_score(5, [2.5, 2.5])
+
+        self.assertEqual(sorted(capped_scores), [2, 4, 4])
+        self.assertEqual(sorted(decimal_scores), [2.5, 2.5])
+
+    def test_rejects_total_above_available_maximum(self):
+        with self.assertRaisesRegex(ValueError, "超过本题型满分"):
+            distribute_group_score(11, [3, 3, 4])
 
 
 class ExamScoreDraftStoreTests(unittest.TestCase):
+    def test_saves_multiple_question_scores_as_one_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExamScoreDraftStore(Path(directory) / "drafts.json")
+            store.save_scores([
+                ("question-1", 3, {"question_number": "1"}),
+                ("question-2", 3, {"question_number": "2"}),
+                ("question-3", 4, {"question_number": "3"}),
+            ])
+
+            reloaded = ExamScoreDraftStore(Path(directory) / "drafts.json")
+
+            self.assertEqual(reloaded.get_score("question-1"), 3.0)
+            self.assertEqual(reloaded.get_score("question-2"), 3.0)
+            self.assertEqual(reloaded.get_score("question-3"), 4.0)
+
     def test_saves_and_reloads_scores_by_exam_attempt(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ExamScoreDraftStore(Path(directory) / "drafts.json")

@@ -16,15 +16,21 @@ from PyQt6.QtWidgets import (
 from core.apis.exam_api import (
     download_exam_attachment, exam_attachment_cache_path,
 )
+from core.logger import get_logger
+from core.ui_diagnostics import log_dialog_state, log_exception_frames
 from core.utils.attachment_preview import (
     UnsupportedAttachmentPreviewError, render_attachment_preview,
 )
 from core.utils.exam_mark_paper_parser import ExamMarkPaperContent
-from core.utils.exam_score_drafts import ExamScoreDraftStore
+from core.utils.exam_score_drafts import (
+    ExamScoreDraftStore, distribute_group_score,
+)
 from ui.dialogs.attachment_preview_dialog import AttachmentPreviewDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
 )
+
+logger = get_logger()
 
 
 class _SelectAllOnFocusLineEdit(QLineEdit):
@@ -35,6 +41,17 @@ class _SelectAllOnFocusLineEdit(QLineEdit):
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
         self.selectAll()
+
+
+class _GroupTotalScoreSpinBox(QDoubleSpinBox):
+    cancelled = pyqtSignal()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancelled.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _ExamAttachmentDownloadWorker(QThread):
@@ -49,20 +66,33 @@ class _ExamAttachmentDownloadWorker(QThread):
 
     def run(self):
         try:
+            cache_hit = (
+                os.path.isfile(self.save_path)
+                and os.path.getsize(self.save_path) > 0
+            )
+            logger.info(
+                "UI_DIAG attachment_worker_started action=%s cache_hit=%s",
+                self.action,
+                cache_hit,
+            )
             if self.action == "open":
-                if (
-                    not os.path.isfile(self.save_path)
-                    or os.path.getsize(self.save_path) == 0
-                ):
+                if not cache_hit:
+                    logger.info("UI_DIAG attachment_download_started")
                     download_exam_attachment(
                         self.session,
                         self.attachment.object_id,
                         self.save_path,
                     )
+                    logger.info("UI_DIAG attachment_download_completed")
+                logger.info("UI_DIAG attachment_render_started")
                 try:
                     preview = render_attachment_preview(self.save_path)
                 except UnsupportedAttachmentPreviewError:
                     preview = None
+                logger.info(
+                    "UI_DIAG attachment_render_completed supported=%s",
+                    preview is not None,
+                )
                 result = {
                     "action": self.action,
                     "path": self.save_path,
@@ -82,6 +112,7 @@ class _ExamAttachmentDownloadWorker(QThread):
                 {"action": self.action, "path": result},
             )
         except Exception as exc:
+            log_exception_frames("attachment_worker_failed", exc)
             self.completed.emit(self.attachment.object_id, False, str(exc))
 
 
@@ -216,6 +247,23 @@ class ExamAnswerDialog(QDialog):
                 font-weight: bold;
                 padding-top: 5px;
             }}
+            QPushButton#question_navigation_total_score {{
+                background-color: {palette.panel_alt_bg};
+                border: 1px solid {palette.border};
+                border-radius: 3px;
+                color: {palette.accent_focus};
+                font-size: 11px;
+                font-weight: bold;
+                padding: 2px 6px;
+            }}
+            QPushButton#question_navigation_total_score:enabled:hover,
+            QPushButton#question_navigation_total_score:focus {{
+                background-color: {palette.hover_bg};
+                border-color: {palette.accent};
+            }}
+            QPushButton#question_navigation_total_score:disabled {{
+                color: {palette.text_muted};
+            }}
             QLabel#question_navigation_summary {{
                 color: {palette.text_muted};
                 font-size: 11px;
@@ -260,7 +308,18 @@ class ExamAnswerDialog(QDialog):
                 font-size: 10px;
                 padding: 1px 2px;
             }}
+            QDoubleSpinBox#question_navigation_total_score_input {{
+                background-color: {palette.panel_bg};
+                border: 1px solid {palette.border};
+                border-radius: 3px;
+                color: {palette.text};
+                font-size: 11px;
+                padding: 2px 6px;
+            }}
             QDoubleSpinBox#question_navigation_score_input:focus {{
+                border-color: {palette.accent};
+            }}
+            QDoubleSpinBox#question_navigation_total_score_input:focus {{
                 border-color: {palette.accent};
             }}
             QLabel#question_navigation_badge {{
@@ -394,6 +453,7 @@ class ExamAnswerDialog(QDialog):
         object_id = str(attachment.object_id)
         if object_id in self._attachment_workers:
             return
+        logger.info("UI_DIAG attachment_action_started action=%s", action)
         worker = _ExamAttachmentDownloadWorker(
             self._session,
             attachment,
@@ -455,6 +515,10 @@ class ExamAnswerDialog(QDialog):
 
     def _on_attachment_download_completed(self, object_id, succeeded, detail):
         self._attachment_workers.pop(str(object_id), None)
+        logger.info(
+            "UI_DIAG attachment_action_completed succeeded=%s",
+            succeeded,
+        )
         if not succeeded:
             self.read_only_note.setText("附件下载失败")
             QMessageBox.warning(self, "附件下载失败", detail)
@@ -465,7 +529,12 @@ class ExamAnswerDialog(QDialog):
         if action == "open":
             preview = detail.get("preview")
             if preview is not None:
-                AttachmentPreviewDialog(preview, self).exec()
+                preview_dialog = AttachmentPreviewDialog(preview, self)
+                logger.info("UI_DIAG preview_dialog_exec_enter")
+                log_dialog_state("preview_dialog_exec_enter", preview_dialog)
+                preview_dialog.exec()
+                logger.info("UI_DIAG preview_dialog_exec_returned")
+                log_dialog_state("preview_dialog_exec_returned", self)
             elif not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
                 QMessageBox.warning(
                     self,
@@ -497,9 +566,86 @@ class ExamAnswerDialog(QDialog):
             return False
         self._draft_scores[key] = score
         self.read_only_note.setText("分数已保存到本地草稿，不会提交成绩")
+        self._refresh_group_score_buttons()
         self._refresh_navigation_summaries()
         self._refresh_paper_theme(None)
         return True
+
+    def _begin_group_score_edit(self, group, editor, badge):
+        current_score = self._group_earned_score(group)
+        editor.setValue(float(current_score or 0))
+        badge.hide()
+        editor.show()
+        editor.setFocus(Qt.FocusReason.OtherFocusReason)
+        editor.lineEdit().selectAll()
+
+    @staticmethod
+    def _cancel_group_score_edit(editor, badge):
+        editor.hide()
+        badge.show()
+
+    def _apply_group_score_edit(self, group, editor, badge):
+        if editor.isHidden():
+            return
+        if not all(self._can_edit_score(question) for question in group.questions):
+            self._cancel_group_score_edit(editor, badge)
+            QMessageBox.warning(
+                self,
+                "无法批量赋分",
+                "该题型中有试题已确认评分或不能修改，请逐题检查。",
+            )
+            return
+
+        try:
+            scores = distribute_group_score(
+                editor.value(), [question.score for question in group.questions]
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "总分无效", str(exc))
+            editor.setFocus(Qt.FocusReason.OtherFocusReason)
+            editor.lineEdit().selectAll()
+            return
+
+        entries = []
+        keyed_scores = []
+        for question, score in zip(group.questions, scores):
+            key = self._score_draft_key(question)
+            metadata = {
+                "exam_id": self._exam_id,
+                "answer_id": self._answer_id,
+                "student_id": self._student_id,
+                "question_id": question.question_id,
+                "question_number": question.number,
+                "question_type": question.question_type,
+            }
+            entries.append((key, score, metadata))
+            keyed_scores.append((key, question, score))
+
+        try:
+            self._score_draft_store.save_scores(entries)
+        except (OSError, ValueError) as exc:
+            self._cancel_group_score_edit(editor, badge)
+            QMessageBox.warning(
+                self, "保存失败", f"分数未能保存到本地：{exc}"
+            )
+            return
+
+        editor.hide()
+        badge.show()
+        for key, question, score in keyed_scores:
+            self._draft_scores[key] = score
+            score_input = self.question_navigation_score_inputs.get(key)
+            if score_input is not None:
+                score_input.blockSignals(True)
+                score_input.setValue(score)
+                score_input.blockSignals(False)
+
+        self.read_only_note.setText(
+            "已将总分随机均分到本题型各题，并保存到本地草稿；不会提交成绩"
+        )
+        self._refresh_group_score_buttons()
+        self._refresh_navigation_summaries()
+        self._refresh_paper_theme(None)
 
     @staticmethod
     def _format_score(score):
@@ -510,6 +656,26 @@ class ExamAnswerDialog(QDialog):
             ):
                 return str(nearest_integer)
         return format(score, ".15g")
+
+    def _group_earned_score(self, group):
+        scores = []
+        for question in group.questions:
+            key = self._score_draft_key(question)
+            score = self._draft_scores.get(key, question.earned_score)
+            if score is None:
+                return None
+            scores.append(float(score))
+        return math.fsum(scores) if scores else None
+
+    def _refresh_group_score_buttons(self):
+        for button, group in self._navigation_group_totals:
+            earned_score = self._group_earned_score(group)
+            text = (
+                f"得分 {self._format_score(earned_score)}"
+                if earned_score is not None
+                else "得分未知"
+            )
+            button.setText(text)
 
     def _group_score_summary(self, group):
         score_groups = []
@@ -612,9 +778,83 @@ class ExamAnswerDialog(QDialog):
         }
 
         for group_index, group in enumerate(content.groups, 1):
+            group_header = QWidget()
+            group_header_layout = QHBoxLayout(group_header)
+            group_header_layout.setContentsMargins(0, 0, 0, 0)
+            group_header_layout.setSpacing(6)
+
             group_heading = QLabel(group.title.split("（", 1)[0])
             group_heading.setObjectName("question_navigation_group")
-            panel_layout.addWidget(group_heading)
+            group_header_layout.addWidget(group_heading, 1)
+
+            scores_complete = bool(group.questions) and all(
+                question.score is not None for question in group.questions
+            )
+            current_group_score = self._group_earned_score(group)
+            total_score_text = (
+                f"得分 {self._format_score(current_group_score)}"
+                if current_group_score is not None
+                else "得分未知"
+            )
+            bulk_score_enabled = (
+                scores_complete
+                and group.total_score is not None
+                and group.total_score >= 0
+                and all(
+                    self._can_edit_score(question)
+                    for question in group.questions
+                )
+            )
+            group_total_score = QPushButton(total_score_text)
+            group_total_score.setObjectName("question_navigation_total_score")
+            group_total_score.setFixedWidth(100)
+            group_total_score.setEnabled(bulk_score_enabled)
+            group_total_score.setToolTip(
+                "点击输入本题型得分，按各题满分随机均分；只保存到本地草稿"
+                if bulk_score_enabled
+                else "评分已确认或分值未完整识别，无法批量赋分"
+            )
+            group_header_layout.addWidget(group_total_score)
+            if not hasattr(self, "_navigation_group_totals"):
+                self._navigation_group_totals = []
+            self._navigation_group_totals.append((group_total_score, group))
+
+            group_score_input = _GroupTotalScoreSpinBox()
+            group_score_input.setLineEdit(_SelectAllOnFocusLineEdit())
+            group_score_input.setObjectName(
+                "question_navigation_total_score_input"
+            )
+            group_score_input.setFixedWidth(100)
+            group_score_input.setButtonSymbols(
+                QAbstractSpinBox.ButtonSymbols.NoButtons
+            )
+            group_score_input.setDecimals(2)
+            group_score_input.setKeyboardTracking(False)
+            group_score_input.setRange(
+                0, max(0.0, float(group.total_score or 0))
+            )
+            group_score_input.setToolTip(
+                "输入本题型要分配的总得分，回车保存；Esc 取消"
+            )
+            group_score_input.hide()
+            group_header_layout.addWidget(group_score_input)
+            group_total_score.clicked.connect(
+                lambda checked=False, target=group, editor=group_score_input,
+                badge=group_total_score: self._begin_group_score_edit(
+                    target, editor, badge
+                )
+            )
+            group_score_input.editingFinished.connect(
+                lambda target=group, editor=group_score_input,
+                badge=group_total_score: self._apply_group_score_edit(
+                    target, editor, badge
+                )
+            )
+            group_score_input.cancelled.connect(
+                lambda editor=group_score_input, badge=group_total_score:
+                self._cancel_group_score_edit(editor, badge)
+            )
+            panel_layout.addWidget(group_header)
 
             summary_label = QLabel(self._group_score_summary(group))
             summary_label.setObjectName("question_navigation_summary")

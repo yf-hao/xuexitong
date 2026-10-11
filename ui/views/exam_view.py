@@ -205,6 +205,11 @@ class ExamView(QWidget):
             QTableWidget::item:alternate {{
                 background-color: {palette.panel_alt_bg};
             }}
+            QTableWidget::item:selected,
+            QTableWidget::item:alternate:selected {{
+                background-color: {palette.accent};
+                color: #ffffff;
+            }}
             QPushButton {{
                 background-color: {palette.accent};
                 color: #ffffff;
