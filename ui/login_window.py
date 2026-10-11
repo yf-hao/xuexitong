@@ -70,7 +70,7 @@ class LoginWindow(QDialog):
         self._password_login_success = False
         self._qrcode_login_success = False
         self.setWindowTitle(APP_TITLE)
-        self.setMinimumSize(380, 420)
+        self.setMinimumSize(380, 360)
         
         apply_theme_stylesheet(self, """
             QDialog {
@@ -86,7 +86,7 @@ class LoginWindow(QDialog):
                 color: #ffffff;
                 border: 1px solid #444444;
                 border-radius: 6px;
-                padding: 12px;
+                padding: 10px;
                 font-size: 14px;
             }
             QLineEdit:focus {
@@ -135,8 +135,8 @@ class LoginWindow(QDialog):
         """)
         
         layout = QVBoxLayout()
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(8) # 缩小间距，使标签和输入框成对出现
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(6)
 
         self.theme_toggle_btn = QPushButton("☀️")
         self.theme_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -145,11 +145,10 @@ class LoginWindow(QDialog):
         self.mode_switch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mode_switch_btn.setFlat(True)
         self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
-        control_row = QHBoxLayout()
-        control_row.addWidget(self.mode_switch_btn)
-        control_row.addStretch()
-        control_row.addWidget(self.theme_toggle_btn)
-        layout.addLayout(control_row)
+        theme_row = QHBoxLayout()
+        theme_row.addStretch()
+        theme_row.addWidget(self.theme_toggle_btn)
+        layout.addLayout(theme_row)
 
         self.password_panel = QWidget()
         password_layout = QVBoxLayout(self.password_panel)
@@ -225,6 +224,7 @@ class LoginWindow(QDialog):
         """)
         self.login_btn.clicked.connect(self.handle_login)
         layout.addWidget(self.login_btn)
+        layout.addWidget(self.mode_switch_btn, alignment=Qt.AlignmentFlag.AlignRight)
         
         self.setLayout(layout)
         # 用 adjustSize 让布局根据真实字体/DPI 计算需要的高度，
@@ -293,6 +293,7 @@ class LoginWindow(QDialog):
             return
         self.password_panel.hide()
         self.login_btn.hide()
+        self.status_label.hide()
         self.mode_switch_btn.setText("账号密码登录")
         self.mode_switch_btn.clicked.disconnect()
         self.mode_switch_btn.clicked.connect(self._show_password_login)
@@ -305,6 +306,7 @@ class LoginWindow(QDialog):
         self.qrcode_panel.hide()
         self.password_panel.show()
         self.login_btn.show()
+        self.status_label.show()
         self.mode_switch_btn.setText("扫码登录")
         self.mode_switch_btn.clicked.disconnect()
         self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
