@@ -1,15 +1,18 @@
 import base64
 import math
+import os
 from html import escape
 
 from bs4 import BeautifulSoup
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import QThread, Qt, QUrl, pyqtSignal
 from PyQt6.QtWidgets import (
-    QAbstractSpinBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QInputDialog, QMessageBox,
-    QScrollArea, QTextBrowser, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QApplication, QDialog, QDoubleSpinBox, QFileDialog,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QInputDialog, QMessageBox, QScrollArea, QTextBrowser, QVBoxLayout,
+    QWidget,
 )
 
+from core.apis.exam_api import download_exam_attachment
 from core.utils.exam_mark_paper_parser import ExamMarkPaperContent
 from core.utils.exam_score_drafts import ExamScoreDraftStore
 from ui.theme import (
@@ -27,6 +30,27 @@ class _SelectAllOnFocusLineEdit(QLineEdit):
         self.selectAll()
 
 
+class _ExamAttachmentDownloadWorker(QThread):
+    completed = pyqtSignal(str, bool, str)
+
+    def __init__(self, session, attachment, save_path, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.attachment = attachment
+        self.save_path = save_path
+
+    def run(self):
+        try:
+            result = download_exam_attachment(
+                self.session,
+                self.attachment.object_id,
+                self.save_path,
+            )
+            self.completed.emit(self.attachment.object_id, True, result)
+        except Exception as exc:
+            self.completed.emit(self.attachment.object_id, False, str(exc))
+
+
 class ExamAnswerDialog(QDialog):
     def __init__(
         self,
@@ -37,6 +61,7 @@ class ExamAnswerDialog(QDialog):
         parent=None,
         exam_id: str = "",
         answer_id: str = "",
+        session=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"答卷查看 - {student_name or student_id}")
@@ -46,6 +71,13 @@ class ExamAnswerDialog(QDialog):
         self._exam_id = str(exam_id or exam_title or "")
         self._answer_id = str(answer_id or student_id or "")
         self._student_id = str(student_id or student_name or "")
+        self._session = session
+        self._answer_attachments = {
+            attachment.object_id: attachment
+            for question in content.questions
+            for attachment in question.attachments
+        }
+        self._attachment_workers = {}
         self._score_draft_store = ExamScoreDraftStore()
         self._score_draft_questions = {}
         self._draft_scores = {}
@@ -252,6 +284,10 @@ class ExamAnswerDialog(QDialog):
                 self._draft_scores[key] = float(saved_score)
 
     def _on_paper_link_clicked(self, url):
+        if url.scheme() == "exam-attachment":
+            object_id = url.path().lstrip("/") or url.host()
+            self._download_answer_attachment(object_id)
+            return
         if url.scheme() != "score-draft":
             return
         key = url.path().lstrip("/")
@@ -272,6 +308,53 @@ class ExamAnswerDialog(QDialog):
         if not accepted:
             return
         self._save_score_draft(key, question, score)
+
+    def _download_answer_attachment(self, object_id):
+        attachment = self._answer_attachments.get(str(object_id))
+        if attachment is None:
+            return
+        if self._session is None:
+            QMessageBox.warning(self, "下载失败", "当前没有可用的学习通登录会话")
+            return
+        if object_id in self._attachment_workers:
+            return
+
+        filename = os.path.basename(attachment.filename.replace("\\", "/"))
+        if not filename:
+            filename = str(object_id)
+        default_path = os.path.join(
+            os.path.expanduser("~/Downloads"), filename
+        )
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "下载学生答案附件",
+            default_path,
+            "所有文件 (*)",
+        )
+        if not save_path:
+            return
+
+        worker = _ExamAttachmentDownloadWorker(
+            self._session,
+            attachment,
+            save_path,
+            QApplication.instance(),
+        )
+        worker.completed.connect(self._on_attachment_download_completed)
+        worker.finished.connect(worker.deleteLater)
+        self._attachment_workers[str(object_id)] = worker
+        self.read_only_note.setText(f"正在下载附件：{filename}")
+        worker.start()
+
+    def _on_attachment_download_completed(self, object_id, succeeded, detail):
+        self._attachment_workers.pop(str(object_id), None)
+        if succeeded:
+            self.read_only_note.setText(
+                f"附件已下载：{os.path.basename(detail)}"
+            )
+        else:
+            self.read_only_note.setText("附件下载失败")
+            QMessageBox.warning(self, "附件下载失败", detail)
 
     def _save_score_draft(self, key, question, score):
         try:
@@ -634,8 +717,21 @@ class ExamAnswerDialog(QDialog):
                         f'<span class="score-value {value_class}">'
                         f'{score_text}</span>'
                     )
+                answer_has_text = bool(
+                    BeautifulSoup(
+                        question.student_answer_html or "",
+                        "html.parser",
+                    ).get_text(strip=True)
+                )
+                empty_answer = (
+                    "答案以附件提交" if question.attachments else "暂无作答"
+                )
                 student_answer = (
-                    question.student_answer_html or "暂无作答"
+                    question.student_answer_html
+                    if answer_has_text else empty_answer
+                )
+                attachment_only_answer = (
+                    bool(question.attachments) and not answer_has_text
                 )
                 if student_answer_class:
                     student_answer = (
@@ -664,6 +760,11 @@ class ExamAnswerDialog(QDialog):
                         '<td class="answer-content"><b>学生答案：</b>&nbsp;'
                         f'{student_answer}</td>'
                     )
+                elif attachment_only_answer:
+                    body.append(
+                        '<td class="answer-content"><b>学生答案：</b>&nbsp;'
+                        f'{student_answer}</td>'
+                    )
                 else:
                     body.append(
                         '<td class="answer-content"><b>学生答案：</b></td>'
@@ -676,11 +777,34 @@ class ExamAnswerDialog(QDialog):
                     f'{score_indicator}'
                     '</td></tr>'
                 )
-                if not is_objective:
+                if not is_objective and not attachment_only_answer:
                     body.append(
                         '<tr><td class="subjective-answer" colspan="3">'
                         f'{student_answer}</td></tr>'
                     )
+                if question.attachments:
+                    body.append(
+                        '<tr><td class="answer-icon-cell" width="32"></td>'
+                        '<td class="answer-content answer-attachments" colspan="2">'
+                    )
+                    for attachment in question.attachments:
+                        attachment_href = escape(
+                            attachment.object_id, quote=True
+                        )
+                        body.append(
+                            '<div class="answer-attachment-item">'
+                            f'<a class="answer-attachment" '
+                            f'href="exam-attachment:{attachment_href}" '
+                            f'title="点击下载 {escape(attachment.filename, quote=True)}">'
+                            f'{escape(attachment.filename)}</a>'
+                        )
+                        if attachment.file_size:
+                            body.append(
+                                f' <span class="answer-attachment-size">'
+                                f'{escape(attachment.file_size)}</span>'
+                            )
+                        body.append('</div>')
+                    body.append('</td></tr>')
                 if question.correct_answer_html:
                     body.append(
                         '<tr>'
@@ -778,6 +902,24 @@ class ExamAnswerDialog(QDialog):
             .subjective-answer {{
                 padding: 4px 8px 4px 40px;
                 vertical-align: top;
+            }}
+            .answer-attachments {{
+                padding: 2px 8px 4px 40px !important;
+                vertical-align: top !important;
+            }}
+            .answer-attachment-item {{
+                line-height: 1.5;
+            }}
+            .answer-attachment {{
+                color: {palette.accent};
+                text-decoration: none;
+            }}
+            .answer-attachment:hover {{
+                text-decoration: underline;
+            }}
+            .answer-attachment-size {{
+                color: {palette.text_muted};
+                font-size: 11pt;
             }}
             .student-answer-correct {{ color: {palette.success}; }}
             .student-answer-incorrect {{ color: {palette.danger}; }}

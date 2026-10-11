@@ -1,4 +1,8 @@
 from dataclasses import dataclass
+import os
+from pathlib import Path
+import tempfile
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 
 EXAM_REVIEW_LIST_URL = (
@@ -9,6 +13,12 @@ EXAM_RECEIVE_IP_URL = (
 )
 EXAM_MARK_PAPER_URL = (
     "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/markpaper"
+)
+EXAM_ATTACHMENT_STATUS_URL = (
+    "https://mooc2-gray.chaoxing.com/ananas/status"
+)
+EXAM_ATTACHMENT_IFRAME_URL = (
+    "https://mooc2-gray.chaoxing.com/ananas/common-modules/attachment/insertCloud.html"
 )
 
 
@@ -262,3 +272,80 @@ def fetch_exam_mark_paper(session, context: ExamReviewContext, record_id: str):
     if "passport2.chaoxing.com" in response_url:
         raise RuntimeError("登录状态已失效，请重新登录")
     return response.text
+
+
+def download_exam_attachment(session, object_id: str, save_path: str) -> str:
+    if not object_id:
+        raise ValueError("附件 ID 缺失")
+    if not save_path:
+        raise ValueError("附件保存路径缺失")
+
+    status_response = session.get(
+        f"{EXAM_ATTACHMENT_STATUS_URL}/{quote(str(object_id), safe='')}",
+        headers={
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": EXAM_ATTACHMENT_IFRAME_URL,
+            "X-Requested-With": "XMLHttpRequest",
+        },
+        timeout=20,
+    )
+    try:
+        if status_response.status_code == 403:
+            raise RuntimeError("附件状态接口返回 HTTP 403，请确认登录状态和下载权限")
+        status_response.raise_for_status()
+        status_url = str(getattr(status_response, "url", "") or "").lower()
+        if "passport2.chaoxing.com" in status_url:
+            raise RuntimeError("登录状态已失效，请重新登录")
+        try:
+            payload = status_response.json()
+        except ValueError as exc:
+            raise RuntimeError("附件状态接口返回了无效响应") from exc
+    finally:
+        status_response.close()
+
+    download_url = payload.get("download") if isinstance(payload, dict) else None
+    if not isinstance(download_url, str) or not download_url.strip():
+        raise RuntimeError("附件状态接口没有返回下载地址")
+    download_url = urljoin(EXAM_ATTACHMENT_STATUS_URL, download_url.strip())
+    parsed_url = urlsplit(download_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise RuntimeError("附件下载地址无效")
+    if parsed_url.scheme == "http":
+        download_url = urlunsplit(parsed_url._replace(scheme="https"))
+
+    destination = Path(save_path).expanduser()
+    temporary_path = None
+    download_response = None
+    try:
+        download_response = session.get(
+            download_url,
+            headers={"Referer": EXAM_ATTACHMENT_IFRAME_URL},
+            stream=True,
+            timeout=(20, 120),
+        )
+        if download_response.status_code == 403:
+            raise RuntimeError("附件下载返回 HTTP 403，请确认登录状态和下载权限")
+        download_response.raise_for_status()
+        response_url = str(getattr(download_response, "url", "") or "").lower()
+        if "passport2.chaoxing.com" in response_url:
+            raise RuntimeError("登录状态已失效，请重新登录")
+
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=str(destination.parent),
+            prefix=f".{destination.name}.",
+            suffix=".part",
+            delete=False,
+        ) as output:
+            temporary_path = output.name
+            for chunk in download_response.iter_content(chunk_size=65536):
+                if chunk:
+                    output.write(chunk)
+        os.replace(temporary_path, destination)
+        temporary_path = None
+        return str(destination)
+    finally:
+        if download_response is not None:
+            download_response.close()
+        if temporary_path and os.path.exists(temporary_path):
+            os.remove(temporary_path)
