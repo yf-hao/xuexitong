@@ -81,6 +81,10 @@ class LoginWindow(QDialog):
                 font-size: 13px;
                 background: transparent;
             }
+            QLabel#form_label {
+                font-size: 14px;
+                font-weight: 500;
+            }
             QLineEdit {
                 background-color: #333333;
                 color: #ffffff;
@@ -161,12 +165,14 @@ class LoginWindow(QDialog):
         password_layout.setContentsMargins(0, 0, 0, 0)
         
         phone_label = QLabel("手机号：")
+        phone_label.setObjectName("form_label")
         password_layout.addWidget(phone_label)
         self.phone_input = QLineEdit()
         self.phone_input.setPlaceholderText("请输入手机号")
         password_layout.addWidget(self.phone_input)
         
         password_label = QLabel("密码：")
+        password_label.setObjectName("form_label")
         password_layout.addWidget(password_label)
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("请输入密码")
