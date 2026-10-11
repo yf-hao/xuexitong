@@ -715,9 +715,10 @@ class ExamReviewView(QWidget):
             lambda _result, answer_dialog=dialog:
             self._release_answer_dialog(answer_dialog)
         )
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
         logger.info("UI_DIAG answer_dialog_open")
         log_dialog_state("answer_dialog_open", dialog)
-        dialog.open()
+        dialog.show()
 
     def _release_answer_dialog(self, dialog):
         logger.info("UI_DIAG answer_dialog_finished")
