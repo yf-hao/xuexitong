@@ -163,6 +163,7 @@ class LoginWindow(QDialog):
         self.password_panel = QWidget()
         password_layout = QVBoxLayout(self.password_panel)
         password_layout.setContentsMargins(0, 0, 0, 0)
+        password_layout.setSpacing(8)
         
         phone_label = QLabel("手机号：")
         phone_label.setObjectName("form_label")
@@ -179,6 +180,7 @@ class LoginWindow(QDialog):
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         password_layout.addWidget(self.password_input)
 
+        password_layout.addSpacing(4)
         self.remember_cb = QCheckBox("记住手机号和密码")
         self.remember_cb.setCursor(Qt.CursorShape.PointingHandCursor)
         password_layout.addWidget(self.remember_cb)
