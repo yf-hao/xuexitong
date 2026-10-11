@@ -105,8 +105,6 @@ class ChaoxingQRCodeLogin:
     login_page_url = "https://passport2.chaoxing.com/login"
     qr_image_url = "https://passport2.chaoxing.com/createqr"
     status_url = "https://passport2.chaoxing.com/getauthstatus/v2"
-    refresh_url = "https://passport2.chaoxing.com/refreshQRCode"
-
     def __init__(self, fid: str = DEFAULT_FID, refer: str = ""):
         self.fid = fid
         self.refer = refer
@@ -116,6 +114,9 @@ class ChaoxingQRCodeLogin:
         self.enc = ""
 
     def prepare(self) -> None:
+        self.session.close()
+        self.session = requests.Session()
+        self.session.trust_env = False
         response = self.session.get(
             self.login_page_url,
             params={
@@ -123,8 +124,13 @@ class ChaoxingQRCodeLogin:
                 "fid": self.fid,
                 "newversion": "true",
                 "refer": self.refer,
+                "_": str(time.time_ns()),
             },
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "User-Agent": "Mozilla/5.0",
+            },
             timeout=15,
         )
         response.raise_for_status()
@@ -135,8 +141,12 @@ class ChaoxingQRCodeLogin:
             raise RuntimeError("二维码参数尚未初始化")
         response = self.session.get(
             self.qr_image_url,
-            params={"uuid": self.uuid, "fid": self.fid},
-            headers={"User-Agent": "Mozilla/5.0"},
+            params={"uuid": self.uuid, "fid": self.fid, "_": str(time.time_ns())},
+            headers={
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "User-Agent": "Mozilla/5.0",
+            },
             timeout=15,
         )
         response.raise_for_status()
@@ -163,20 +173,6 @@ class ChaoxingQRCodeLogin:
         if not isinstance(payload, dict):
             raise RuntimeError("二维码登录接口返回格式异常")
         return payload
-
-    def refresh(self) -> bytes:
-        response = self.session.post(
-            self.refresh_url,
-            headers={"X-Requested-With": "XMLHttpRequest", "User-Agent": "Mozilla/5.0"},
-            timeout=15,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict) or not payload.get("uuid") or not payload.get("enc"):
-            raise RuntimeError("刷新二维码接口返回格式异常")
-        self.uuid = payload["uuid"]
-        self.enc = payload["enc"]
-        return self.get_qr_image()
 
     def wait_for_login(
         self, status_callback=None, qr_callback=None, stop_event=None
