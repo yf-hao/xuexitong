@@ -67,6 +67,8 @@ class LoginWindow(QDialog):
         self.crawler = crawler
         self._login_worker = None
         self._qr_worker = None
+        self._password_login_success = False
+        self._qrcode_login_success = False
         self.setWindowTitle(APP_TITLE)
         self.setMinimumSize(380, 420)
         
@@ -340,8 +342,9 @@ class LoginWindow(QDialog):
         self.qr_refresh_btn.setEnabled(False)
 
     def _on_qrcode_completed(self, success, error):
+        self._qrcode_login_success = success
         if success:
-            self.accept()
+            self.qr_status_label.setText("登录成功，正在进入系统...")
         elif self._qr_worker is not None and not self._qr_worker.stop_event.is_set():
             self.qr_status_label.setText(error or "二维码登录失败，请刷新重试")
             self.qr_refresh_btn.setEnabled(True)
@@ -351,10 +354,14 @@ class LoginWindow(QDialog):
         self._qr_worker = None
         if worker is not None:
             worker.deleteLater()
+        if self._qrcode_login_success:
+            self.accept()
 
     def _stop_qrcode_worker(self):
         if self._qr_worker is not None and self._qr_worker.isRunning():
             self._qr_worker.stop()
+            self._qr_worker.wait(5000)
+        self._qrcode_login_success = False
 
     def handle_login(self):
         if self._login_worker is not None and self._login_worker.isRunning():
@@ -369,6 +376,7 @@ class LoginWindow(QDialog):
             
         self._set_login_controls_enabled(False)
         self.status_label.setText("正在连接学习通，请稍候...")
+        self._password_login_success = False
 
         self._login_worker = LoginWorker(self.crawler, phone, password, self)
         self._login_worker.completed.connect(self._on_login_completed)
@@ -377,8 +385,8 @@ class LoginWindow(QDialog):
 
     def _on_login_completed(self, success, error):
         if success:
-            self.save_settings()
-            self.accept()
+            self._password_login_success = True
+            self.status_label.setText("登录成功，正在进入系统...")
         else:
             self.status_label.setText(error or "身份验证失败，请重试")
             self._set_login_controls_enabled(True)
@@ -388,6 +396,9 @@ class LoginWindow(QDialog):
         self._login_worker = None
         if worker is not None:
             worker.deleteLater()
+        if self._password_login_success:
+            self.save_settings()
+            self.accept()
 
     def _set_login_controls_enabled(self, enabled):
         self.phone_input.setEnabled(enabled)

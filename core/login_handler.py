@@ -188,7 +188,11 @@ class ChaoxingQRCodeLogin:
         for _ in range(50):
             if stop_event is not None and stop_event.is_set():
                 raise RuntimeError("二维码登录已取消")
-            time.sleep(3)
+            if stop_event is not None:
+                if stop_event.wait(3):
+                    raise RuntimeError("二维码登录已取消")
+            else:
+                time.sleep(3)
             if stop_event is not None and stop_event.is_set():
                 raise RuntimeError("二维码登录已取消")
             payload = self.poll_status()
