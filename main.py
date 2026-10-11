@@ -1,7 +1,6 @@
 import sys
 import threading
 from core.logger import get_logger
-from core.ui_diagnostics import install_ui_diagnostics
 
 # 1. 启动日志，仅记录 ERROR 级别
 def _setup_early_logging():
@@ -45,7 +44,6 @@ class AppController:
         from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
         
         app = QApplication(sys.argv)
-        install_ui_diagnostics(app)
         app.setQuitOnLastWindowClosed(False)  # 防止登录窗口关闭时程序意外退出
         app.setStyle("Fusion")
         apply_application_theme(app, theme_manager().mode)

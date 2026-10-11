@@ -10,17 +10,12 @@ from PyQt6.QtWidgets import (
 from core.apis.exam_api import (
     ExamReviewContext, fetch_exam_mark_paper, fetch_exam_review_page,
 )
-from core.logger import get_logger
-from core.ui_diagnostics import log_dialog_state, log_exception_frames
 from core.utils.exam_mark_paper_parser import parse_exam_mark_paper
 from ui.dialogs.exam_answer_dialog import ExamAnswerDialog
 from ui.dialogs.exam_ip_analysis_dialog import ExamIpAnalysisDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
 )
-
-logger = get_logger()
-
 
 class ExamReviewLoadWorker(QThread):
     loaded = pyqtSignal(int, object)
@@ -62,21 +57,13 @@ class MarkPaperWorker(QThread):
         self.record_id = str(record_id)
 
     def run(self):
-        logger.info("UI_DIAG markpaper_worker_started")
         try:
             html = fetch_exam_mark_paper(
                 self.session, self.context, self.record_id
             )
-            logger.info("UI_DIAG markpaper_html_received")
             content = parse_exam_mark_paper(html)
-            logger.info(
-                "UI_DIAG markpaper_parsed groups=%s questions=%s",
-                len(content.groups),
-                len(content.questions),
-            )
             self.loaded.emit(self.record_id, content)
         except Exception as exc:
-            log_exception_frames("markpaper_worker_failed", exc)
             self.failed.emit(self.record_id, str(exc))
 
 
@@ -652,8 +639,6 @@ class ExamReviewView(QWidget):
             return
 
         button.setEnabled(False)
-        logger.info("UI_DIAG markpaper_open_requested")
-        log_dialog_state("markpaper_request", self.window())
         self.status_label.show()
         self.status_label.setText("正在请求该学生的批阅页面...")
         request_id = self._request_id
@@ -716,13 +701,9 @@ class ExamReviewView(QWidget):
             self._release_answer_dialog(answer_dialog)
         )
         dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
-        logger.info("UI_DIAG answer_dialog_open")
-        log_dialog_state("answer_dialog_open", dialog)
         dialog.show()
 
     def _release_answer_dialog(self, dialog):
-        logger.info("UI_DIAG answer_dialog_finished")
-        log_dialog_state("answer_dialog_finished", self.window())
         if self._active_answer_dialog is dialog:
             self._active_answer_dialog = None
         dialog.deleteLater()
@@ -735,7 +716,6 @@ class ExamReviewView(QWidget):
         return None
 
     def _on_mark_paper_failed(self, request_id, record_id, message):
-        logger.error("UI_DIAG markpaper_request_failed")
         button = self._find_mark_paper_button(record_id)
         if button is not None:
             button.setEnabled(True)

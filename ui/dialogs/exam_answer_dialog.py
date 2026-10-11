@@ -16,8 +16,6 @@ from PyQt6.QtWidgets import (
 from core.apis.exam_api import (
     download_exam_attachment, exam_attachment_cache_path,
 )
-from core.logger import get_logger
-from core.ui_diagnostics import log_dialog_state, log_exception_frames
 from core.utils.attachment_preview import (
     UnsupportedAttachmentPreviewError, render_attachment_preview,
 )
@@ -29,9 +27,6 @@ from ui.dialogs.attachment_preview_dialog import AttachmentPreviewDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
 )
-
-logger = get_logger()
-
 
 class _SelectAllOnFocusLineEdit(QLineEdit):
     def focusInEvent(self, event):
@@ -66,33 +61,20 @@ class _ExamAttachmentDownloadWorker(QThread):
 
     def run(self):
         try:
-            cache_hit = (
-                os.path.isfile(self.save_path)
-                and os.path.getsize(self.save_path) > 0
-            )
-            logger.info(
-                "UI_DIAG attachment_worker_started action=%s cache_hit=%s",
-                self.action,
-                cache_hit,
-            )
             if self.action == "open":
-                if not cache_hit:
-                    logger.info("UI_DIAG attachment_download_started")
+                if (
+                    not os.path.isfile(self.save_path)
+                    or os.path.getsize(self.save_path) == 0
+                ):
                     download_exam_attachment(
                         self.session,
                         self.attachment.object_id,
                         self.save_path,
                     )
-                    logger.info("UI_DIAG attachment_download_completed")
-                logger.info("UI_DIAG attachment_render_started")
                 try:
                     preview = render_attachment_preview(self.save_path)
                 except UnsupportedAttachmentPreviewError:
                     preview = None
-                logger.info(
-                    "UI_DIAG attachment_render_completed supported=%s",
-                    preview is not None,
-                )
                 result = {
                     "action": self.action,
                     "path": self.save_path,
@@ -112,7 +94,6 @@ class _ExamAttachmentDownloadWorker(QThread):
                 {"action": self.action, "path": result},
             )
         except Exception as exc:
-            log_exception_frames("attachment_worker_failed", exc)
             self.completed.emit(self.attachment.object_id, False, str(exc))
 
 
@@ -453,7 +434,6 @@ class ExamAnswerDialog(QDialog):
         object_id = str(attachment.object_id)
         if object_id in self._attachment_workers:
             return
-        logger.info("UI_DIAG attachment_action_started action=%s", action)
         worker = _ExamAttachmentDownloadWorker(
             self._session,
             attachment,
@@ -515,10 +495,6 @@ class ExamAnswerDialog(QDialog):
 
     def _on_attachment_download_completed(self, object_id, succeeded, detail):
         self._attachment_workers.pop(str(object_id), None)
-        logger.info(
-            "UI_DIAG attachment_action_completed succeeded=%s",
-            succeeded,
-        )
         if not succeeded:
             self.read_only_note.setText("附件下载失败")
             QMessageBox.warning(self, "附件下载失败", detail)
@@ -530,11 +506,7 @@ class ExamAnswerDialog(QDialog):
             preview = detail.get("preview")
             if preview is not None:
                 preview_dialog = AttachmentPreviewDialog(preview, self)
-                logger.info("UI_DIAG preview_dialog_exec_enter")
-                log_dialog_state("preview_dialog_exec_enter", preview_dialog)
                 preview_dialog.exec()
-                logger.info("UI_DIAG preview_dialog_exec_returned")
-                log_dialog_state("preview_dialog_exec_returned", self)
             elif not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
                 QMessageBox.warning(
                     self,
