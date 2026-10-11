@@ -1,12 +1,34 @@
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel, QCheckBox
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import QThread, Qt, QSettings, pyqtSignal
 from core.config import APP_TITLE
 from ui.theme import apply_theme_stylesheet, refresh_theme_styles, theme_manager
+
+
+class LoginWorker(QThread):
+    completed = pyqtSignal(bool, str)
+
+    def __init__(self, crawler, phone, password, parent=None):
+        super().__init__(parent)
+        self.crawler = crawler
+        self.phone = phone
+        self.password = password
+
+    def run(self):
+        try:
+            success = self.crawler.login_by_password(self.phone, self.password)
+            error = "" if success else getattr(
+                self.crawler, "last_login_error", ""
+            )
+            self.completed.emit(success, error)
+        except Exception as exc:
+            self.completed.emit(False, str(exc))
+
 
 class LoginWindow(QDialog):
     def __init__(self, crawler):
         super().__init__()
         self.crawler = crawler
+        self._login_worker = None
         self.setWindowTitle(APP_TITLE)
         self.setMinimumSize(380, 420)
         
@@ -185,6 +207,9 @@ class LoginWindow(QDialog):
         refresh_theme_styles(self, mode)
 
     def handle_login(self):
+        if self._login_worker is not None and self._login_worker.isRunning():
+            return
+
         phone = self.phone_input.text().strip()
         password = self.password_input.text().strip()
         
@@ -192,16 +217,46 @@ class LoginWindow(QDialog):
             self.status_label.setText("请输入完整的信息")
             return
             
-        self.login_btn.setEnabled(False)
-        self.status_label.setText("正在建立安全连接...")
-        
-        if self.crawler.login_by_password(phone, password):
+        self._set_login_controls_enabled(False)
+        self.status_label.setText("正在连接学习通，请稍候...")
+
+        self._login_worker = LoginWorker(self.crawler, phone, password, self)
+        self._login_worker.completed.connect(self._on_login_completed)
+        self._login_worker.finished.connect(self._on_login_worker_finished)
+        self._login_worker.start()
+
+    def _on_login_completed(self, success, error):
+        if success:
             self.save_settings()
             self.accept()
         else:
-            error = getattr(self.crawler, "last_login_error", "")
             self.status_label.setText(error or "身份验证失败，请重试")
-            self.login_btn.setEnabled(True)
+            self._set_login_controls_enabled(True)
+
+    def _on_login_worker_finished(self):
+        worker = self._login_worker
+        self._login_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _set_login_controls_enabled(self, enabled):
+        self.phone_input.setEnabled(enabled)
+        self.password_input.setEnabled(enabled)
+        self.remember_cb.setEnabled(enabled)
+        self.login_btn.setEnabled(enabled)
+
+    def reject(self):
+        if self._login_worker is not None and self._login_worker.isRunning():
+            self.status_label.setText("登录请求仍在进行，请稍候...")
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._login_worker is not None and self._login_worker.isRunning():
+            event.ignore()
+            self.status_label.setText("登录请求仍在进行，请稍候...")
+            return
+        super().closeEvent(event)
 
     def load_settings(self):
         """Load phone and password from QSettings."""
