@@ -62,7 +62,7 @@ class QRCodeLoginWorker(QThread):
 
 
 class LoginWindow(QDialog):
-    WINDOW_SIZE = (380, 450)
+    WINDOW_SIZE = (380, 420)
 
     def __init__(self, crawler):
         super().__init__()
@@ -192,7 +192,7 @@ class LoginWindow(QDialog):
         qrcode_layout = QVBoxLayout(self.qrcode_panel)
         qrcode_layout.setContentsMargins(0, 0, 0, 0)
         qrcode_layout.setSpacing(10)
-        self.qrcode_panel.setMinimumHeight(286)
+        self.qrcode_panel.setMinimumHeight(260)
         self.qr_label = QLabel("正在获取二维码...")
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_label.setFixedSize(220, 220)
