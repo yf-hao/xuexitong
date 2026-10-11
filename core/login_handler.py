@@ -1,5 +1,7 @@
 import requests
 import base64
+import re
+import time
 from Crypto.Cipher import AES
 from core.config import DEFAULT_FID
 
@@ -63,11 +65,12 @@ class ChaoxingLogin:
         """
         POST login request
         """
+        phone_enc = self.encrypt_by_aes_cbc(self.phone, self.transfer_key)
         password_enc = self.encrypt_by_aes_cbc(self.password, self.transfer_key)
         
         data_post = {
             "fid": self.fid,
-            "uname": self.phone,
+            "uname": phone_enc,
             "password": password_enc,
             "refer": "http%3A%2F%2Fi.mooc.chaoxing.com",
             "t": "true",
@@ -75,6 +78,7 @@ class ChaoxingLogin:
             "validate": "",
             "doubleFactorLogin": "0",
             "independentId": "0",
+            "independentNameId": "",
         }
 
         headers_post = {
@@ -93,3 +97,129 @@ class ChaoxingLogin:
             raise Exception(f"POST login failed: {resp.status_code}")
 
         return resp.json(), self.session.cookies.get_dict()
+
+
+class ChaoxingQRCodeLogin:
+    """通过学习通登录页的二维码完成认证。"""
+
+    login_page_url = "https://passport2.chaoxing.com/login"
+    qr_image_url = "https://passport2.chaoxing.com/createqr"
+    status_url = "https://passport2.chaoxing.com/getauthstatus/v2"
+    refresh_url = "https://passport2.chaoxing.com/refreshQRCode"
+
+    def __init__(self, fid: str = DEFAULT_FID, refer: str = ""):
+        self.fid = fid
+        self.refer = refer
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.uuid = ""
+        self.enc = ""
+
+    def prepare(self) -> None:
+        response = self.session.get(
+            self.login_page_url,
+            params={
+                "loginType": "4",
+                "fid": self.fid,
+                "newversion": "true",
+                "refer": self.refer,
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        self._set_qr_tokens(response.text)
+
+    def get_qr_image(self) -> bytes:
+        if not self.uuid:
+            raise RuntimeError("二维码参数尚未初始化")
+        response = self.session.get(
+            self.qr_image_url,
+            params={"uuid": self.uuid, "fid": self.fid},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.content
+
+    def poll_status(self) -> dict:
+        response = self.session.post(
+            self.status_url,
+            data={
+                "enc": self.enc,
+                "uuid": self.uuid,
+                "doubleFactorLogin": "0",
+                "forbidotherlogin": "0",
+            },
+            headers={
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "User-Agent": "Mozilla/5.0",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("二维码登录接口返回格式异常")
+        return payload
+
+    def refresh(self) -> bytes:
+        response = self.session.post(
+            self.refresh_url,
+            headers={"X-Requested-With": "XMLHttpRequest", "User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("uuid") or not payload.get("enc"):
+            raise RuntimeError("刷新二维码接口返回格式异常")
+        self.uuid = payload["uuid"]
+        self.enc = payload["enc"]
+        return self.get_qr_image()
+
+    def wait_for_login(
+        self, status_callback=None, qr_callback=None, stop_event=None
+    ) -> requests.Session:
+        self.prepare()
+        if qr_callback is not None:
+            qr_callback(self.get_qr_image())
+
+        for _ in range(50):
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("二维码登录已取消")
+            time.sleep(3)
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("二维码登录已取消")
+            payload = self.poll_status()
+            if payload.get("status"):
+                return self.session
+
+            status_type = payload.get("type")
+            if status_type == 4:
+                if status_callback is not None:
+                    status_callback("已扫码，请在学习通 App 中确认登录")
+            elif status_type == 6:
+                raise RuntimeError("扫码登录已取消")
+            elif status_type == 7:
+                raise RuntimeError(payload.get("mes") or "二维码登录失败")
+
+        raise TimeoutError("二维码已失效，请刷新后重试")
+
+    def _set_qr_tokens(self, html: str) -> None:
+        self.uuid = self._extract_hidden_value(html, "uuid")
+        self.enc = self._extract_hidden_value(html, "enc")
+        if not self.uuid or not self.enc:
+            raise RuntimeError("登录页未返回有效的二维码参数")
+
+    @staticmethod
+    def _extract_hidden_value(html: str, field_id: str) -> str:
+        pattern = (
+            r"<input\b"
+            rf"(?=[^>]*\bid=[\"']{re.escape(field_id)}[\"'])"
+            r"(?=[^>]*\bvalue=[\"']([^\"']*)[\"'])[^>]*>"
+        )
+        match = re.search(pattern, html, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return ""

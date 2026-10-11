@@ -52,13 +52,15 @@ class ChaoxingSession:
                     else None
                 )
                 raise RuntimeError(str(message or "登录接口未确认认证成功"))
-            self.session = chaoxing.session
-            self._configure_session(self.session)
-            self.logged_in = True
-            
-            # Extract fid from cookies if available to replace the default
-            fid_cookie = self.session.cookies.get("fid")
-            if fid_cookie:
-                self.course_params['fid'] = fid_cookie
+            self.adopt_authenticated_session(chaoxing.session)
 
         return self.logged_in
+
+    def adopt_authenticated_session(self, session):
+        """接管已完成认证的 HTTP 会话。"""
+        self.session = session
+        self._configure_session(self.session)
+        self.logged_in = True
+        fid_cookie = self.session.cookies.get("fid")
+        if fid_cookie:
+            self.course_params["fid"] = fid_cookie

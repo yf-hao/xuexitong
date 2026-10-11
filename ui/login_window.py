@@ -1,7 +1,18 @@
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel, QCheckBox
+import threading
+
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
+    QCheckBox, QWidget,
+)
 from PyQt6.QtCore import QThread, Qt, QSettings, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap
 from core.config import APP_TITLE
-from ui.theme import apply_theme_stylesheet, refresh_theme_styles, theme_manager
+from ui.theme import (
+    apply_theme_stylesheet,
+    get_theme_palette,
+    refresh_theme_styles,
+    theme_manager,
+)
 
 
 class LoginWorker(QThread):
@@ -24,11 +35,38 @@ class LoginWorker(QThread):
             self.completed.emit(False, str(exc))
 
 
+class QRCodeLoginWorker(QThread):
+    qr_ready = pyqtSignal(bytes)
+    status_changed = pyqtSignal(str)
+    completed = pyqtSignal(bool, str)
+
+    def __init__(self, crawler, parent=None):
+        super().__init__(parent)
+        self.crawler = crawler
+        self.stop_event = threading.Event()
+
+    def run(self):
+        try:
+            self.crawler.login_by_qrcode(
+                status_callback=self.status_changed.emit,
+                qr_callback=self.qr_ready.emit,
+                stop_event=self.stop_event,
+            )
+            self.completed.emit(True, "")
+        except Exception as exc:
+            if not self.stop_event.is_set():
+                self.completed.emit(False, str(exc))
+
+    def stop(self):
+        self.stop_event.set()
+
+
 class LoginWindow(QDialog):
     def __init__(self, crawler):
         super().__init__()
         self.crawler = crawler
         self._login_worker = None
+        self._qr_worker = None
         self.setWindowTitle(APP_TITLE)
         self.setMinimumSize(380, 420)
         
@@ -127,28 +165,51 @@ class LoginWindow(QDialog):
         theme_row.addWidget(self.theme_toggle_btn)
         layout.addLayout(theme_row)
         
-        title_label = QLabel("学习通登录")
-        title_label.setObjectName("title_label")
-        apply_theme_stylesheet(title_label, "margin-bottom: 15px;") # 标题离下方远一点
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title_label)
+        self.mode_switch_btn = QPushButton("扫码登录")
+        self.mode_switch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mode_switch_btn.setFlat(True)
+        self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
+        layout.addWidget(self.mode_switch_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        self.password_panel = QWidget()
+        password_layout = QVBoxLayout(self.password_panel)
+        password_layout.setContentsMargins(0, 0, 0, 0)
         
         phone_label = QLabel("手机号：")
-        layout.addWidget(phone_label)
+        password_layout.addWidget(phone_label)
         self.phone_input = QLineEdit()
         self.phone_input.setPlaceholderText("请输入手机号")
-        layout.addWidget(self.phone_input)
+        password_layout.addWidget(self.phone_input)
         
         password_label = QLabel("密码：")
-        layout.addWidget(password_label)
+        password_layout.addWidget(password_label)
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("请输入密码")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        layout.addWidget(self.password_input)
+        password_layout.addWidget(self.password_input)
 
         self.remember_cb = QCheckBox("记住手机号和密码")
         self.remember_cb.setCursor(Qt.CursorShape.PointingHandCursor)
-        layout.addWidget(self.remember_cb)
+        password_layout.addWidget(self.remember_cb)
+        layout.addWidget(self.password_panel)
+
+        self.qrcode_panel = QWidget()
+        qrcode_layout = QVBoxLayout(self.qrcode_panel)
+        qrcode_layout.setContentsMargins(0, 0, 0, 0)
+        self.qr_label = QLabel("正在获取二维码...")
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_label.setMinimumSize(220, 220)
+        qrcode_layout.addWidget(self.qr_label)
+        self.qr_status_label = QLabel("请使用学习通 App 扫码登录")
+        self.qr_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qrcode_layout.addWidget(self.qr_status_label)
+        self.qr_refresh_btn = QPushButton("刷新二维码")
+        self.qr_refresh_btn.setFlat(True)
+        self.qr_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.qr_refresh_btn.clicked.connect(self._start_qrcode_login)
+        qrcode_layout.addWidget(self.qr_refresh_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.qrcode_panel.hide()
+        layout.addWidget(self.qrcode_panel)
         
         # Load saved settings
         self.settings = QSettings("HaoSoft", "XuexitongManager")
@@ -192,6 +253,7 @@ class LoginWindow(QDialog):
         self.setFixedSize(self.size())
         theme_manager().theme_changed.connect(self._apply_theme)
         self._apply_theme(theme_manager().mode)
+        self._apply_mode_button_style()
 
     def _toggle_theme(self):
         mode = theme_manager().mode
@@ -205,6 +267,94 @@ class LoginWindow(QDialog):
             self.theme_toggle_btn.setText("☀️")
             self.theme_toggle_btn.setToolTip("切换到亮色主题")
         refresh_theme_styles(self, mode)
+        self._apply_mode_button_style()
+
+    def _apply_mode_button_style(self):
+        palette = get_theme_palette(theme_manager().mode)
+        for button in (self.mode_switch_btn, self.qr_refresh_btn):
+            apply_theme_stylesheet(button, f"""
+                QPushButton {{
+                    background: transparent;
+                    color: {palette.accent};
+                    border: none;
+                    padding: 2px 0;
+                    font-size: 12px;
+                    font-weight: normal;
+                }}
+                QPushButton:hover {{
+                    color: {palette.accent_hover};
+                    text-decoration: underline;
+                }}
+            """)
+
+    def _show_qrcode_login(self):
+        if self._login_worker is not None and self._login_worker.isRunning():
+            return
+        self.password_panel.hide()
+        self.login_btn.hide()
+        self.mode_switch_btn.setText("账号密码登录")
+        self.mode_switch_btn.clicked.disconnect()
+        self.mode_switch_btn.clicked.connect(self._show_password_login)
+        self.qrcode_panel.show()
+        self.adjustSize()
+        self._start_qrcode_login()
+
+    def _show_password_login(self):
+        self._stop_qrcode_worker()
+        self.qrcode_panel.hide()
+        self.password_panel.show()
+        self.login_btn.show()
+        self.mode_switch_btn.setText("扫码登录")
+        self.mode_switch_btn.clicked.disconnect()
+        self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
+        self.status_label.clear()
+        self.adjustSize()
+
+    def _start_qrcode_login(self):
+        self._stop_qrcode_worker()
+        self.qr_label.setPixmap(QPixmap())
+        self.qr_label.setText("正在获取二维码...")
+        self.qr_status_label.setText("请使用学习通 App 扫码登录")
+        self.qr_refresh_btn.setEnabled(False)
+        self._qr_worker = QRCodeLoginWorker(self.crawler, self)
+        self._qr_worker.qr_ready.connect(self._set_qr_image)
+        self._qr_worker.status_changed.connect(self.qr_status_label.setText)
+        self._qr_worker.completed.connect(self._on_qrcode_completed)
+        self._qr_worker.finished.connect(self._on_qrcode_worker_finished)
+        self._qr_worker.start()
+
+    def _set_qr_image(self, image_data):
+        image = QImage.fromData(image_data)
+        if image.isNull():
+            self.qr_status_label.setText("二维码加载失败，请刷新重试")
+            return
+        pixmap = QPixmap.fromImage(image)
+        self.qr_label.setText("")
+        self.qr_label.setPixmap(
+            pixmap.scaled(
+                220, 220,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self.qr_refresh_btn.setEnabled(False)
+
+    def _on_qrcode_completed(self, success, error):
+        if success:
+            self.accept()
+        elif self._qr_worker is not None and not self._qr_worker.stop_event.is_set():
+            self.qr_status_label.setText(error or "二维码登录失败，请刷新重试")
+            self.qr_refresh_btn.setEnabled(True)
+
+    def _on_qrcode_worker_finished(self):
+        worker = self._qr_worker
+        self._qr_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _stop_qrcode_worker(self):
+        if self._qr_worker is not None and self._qr_worker.isRunning():
+            self._qr_worker.stop()
 
     def handle_login(self):
         if self._login_worker is not None and self._login_worker.isRunning():
@@ -249,6 +399,7 @@ class LoginWindow(QDialog):
         if self._login_worker is not None and self._login_worker.isRunning():
             self.status_label.setText("登录请求仍在进行，请稍候...")
             return
+        self._stop_qrcode_worker()
         super().reject()
 
     def closeEvent(self, event):
@@ -256,6 +407,7 @@ class LoginWindow(QDialog):
             event.ignore()
             self.status_label.setText("登录请求仍在进行，请稍候...")
             return
+        self._stop_qrcode_worker()
         super().closeEvent(event)
 
     def load_settings(self):
