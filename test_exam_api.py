@@ -3,6 +3,7 @@ import unittest
 from core.apis.exam_api import (
     ExamReviewContext,
     fetch_all_submitted_exam_records,
+    fetch_exam_mark_paper,
     fetch_exam_review_page,
 )
 
@@ -207,6 +208,49 @@ class ExamReviewAPITests(unittest.TestCase):
             fetch_exam_review_page(
                 ForbiddenSession({}), self.context, state=1
             )
+
+    def test_fetches_markpaper_html_for_the_selected_record(self):
+        class HtmlResponse:
+            status_code = 200
+            url = "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/markpaper"
+            text = "<html>grading page</html>"
+
+            def raise_for_status(self):
+                pass
+
+        class GetSession:
+            def get(self, url, **kwargs):
+                self.url = url
+                self.options = kwargs
+                return HtmlResponse()
+
+        session = GetSession()
+        html = fetch_exam_mark_paper(session, self.context, "answer-1")
+
+        self.assertEqual(html, "<html>grading page</html>")
+        self.assertTrue(session.url.endswith("/exam/test/markpaper"))
+        self.assertEqual(
+            session.options["params"],
+            {
+                "courseid": "course-1",
+                "id": "answer-1",
+                "classid": "class-1",
+                "groupid": "-1",
+                "ut": "t",
+                "cpi": "cpi-1",
+                "hideRetest": "false",
+                "groupIds": "",
+                "sw": "",
+                "sorttype": "",
+                "updateScore": "1",
+                "allowAnnotationRedoDownload": "1",
+                "sort": "",
+                "from": "list",
+            },
+        )
+        self.assertEqual(
+            session.options["headers"]["Referer"], self.context.marklist_url
+        )
 
 
 if __name__ == "__main__":

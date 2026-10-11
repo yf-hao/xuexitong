@@ -7,7 +7,9 @@ from PyQt6.QtWidgets import (
     QToolButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from core.apis.exam_api import ExamReviewContext, fetch_exam_review_page
+from core.apis.exam_api import (
+    ExamReviewContext, fetch_exam_mark_paper, fetch_exam_review_page,
+)
 from ui.dialogs.exam_ip_analysis_dialog import ExamIpAnalysisDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
@@ -43,6 +45,26 @@ class ExamReviewLoadWorker(QThread):
             self.failed.emit(self.request_id, str(exc))
 
 
+class MarkPaperWorker(QThread):
+    loaded = pyqtSignal(str)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, session, context, record_id, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.context = context
+        self.record_id = str(record_id)
+
+    def run(self):
+        try:
+            html = fetch_exam_mark_paper(
+                self.session, self.context, self.record_id
+            )
+            self.loaded.emit(self.record_id)
+        except Exception as exc:
+            self.failed.emit(self.record_id, str(exc))
+
+
 class ContentWidthComboBox(QComboBox):
     def showPopup(self):
         self.view().setFixedWidth(self.width())
@@ -65,6 +87,7 @@ class ExamReviewView(QWidget):
         self.total_pages = 0
         self._request_id = 0
         self._workers = []
+        self._markpaper_workers = []
         self._state_totals = {0: None, 1: None}
         self._setup_ui()
 
@@ -157,9 +180,12 @@ class ExamReviewView(QWidget):
         self.status_label.setObjectName("review_status")
         person_layout.addWidget(self.status_label)
 
-        self.records_table = QTableWidget(0, 7)
+        self.records_table = QTableWidget(0, 8)
         self.records_table.setHorizontalHeaderLabels(
-            ["姓名", "学号/账号", "状态", "提交时间", "考试用时", "提交IP", "成绩"]
+            [
+                "姓名", "学号/账号", "状态", "提交时间", "考试用时",
+                "提交IP", "成绩", "操作",
+            ]
         )
         self.records_table.verticalHeader().setVisible(False)
         self.records_table.setEditTriggers(
@@ -287,6 +313,23 @@ class ExamReviewView(QWidget):
                 border-color: {palette.accent};
                 color: {palette.text};
             }}
+            QPushButton#review_mark_button {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 13px;
+            }}
+            QPushButton#review_mark_button:hover {{
+                background-color: {palette.accent_hover};
+                color: #ffffff;
+            }}
+            QPushButton#review_mark_button:disabled {{
+                background-color: {palette.disabled_bg};
+                color: {palette.disabled_text};
+                border: 1px solid {palette.border};
+            }}
             QPushButton:checked {{
                 background-color: {palette.accent};
                 border-color: {palette.accent};
@@ -350,12 +393,12 @@ class ExamReviewView(QWidget):
         if available_width <= 0:
             available_width = self.records_table.width()
 
-        min_widths = (150, 130, 80, 145, 100, 150, 80)
+        min_widths = (145, 120, 75, 135, 95, 130, 72, 88)
         if available_width < sum(min_widths):
             widths = min_widths
         else:
             extra_width = available_width - sum(min_widths)
-            weights = (0.24, 0.16, 0.08, 0.17, 0.10, 0.17, 0.08)
+            weights = (0.22, 0.15, 0.08, 0.15, 0.10, 0.15, 0.07, 0.08)
             widths = [
                 base + int(extra_width * weight)
                 for base, weight in zip(min_widths, weights)
@@ -503,6 +546,25 @@ class ExamReviewView(QWidget):
                         else Qt.AlignmentFlag.AlignCenter
                     )
                 )
+            record_id = record.get("id")
+            marking_button = QPushButton("批阅")
+            marking_button.setObjectName("review_mark_button")
+            marking_button.setMinimumHeight(36)
+            marking_button.setEnabled(self.state == 1 and record_id not in (None, ""))
+            if self.state != 1:
+                marking_button.setToolTip("未交学生暂无可批阅的答卷")
+            elif record_id in (None, ""):
+                marking_button.setToolTip("缺少答卷记录 ID，无法打开批阅页面")
+            else:
+                marking_button.clicked.connect(
+                    lambda checked=False, answer_id=record_id: (
+                        self._request_mark_paper(answer_id)
+                    )
+                )
+            self.records_table.setCellWidget(row, 7, marking_button)
+            self.records_table.setRowHeight(
+                row, max(self.records_table.rowHeight(row), 44)
+            )
 
         state_name = "已交" if self.state == 1 else "未交"
         if page.total:
@@ -560,3 +622,67 @@ class ExamReviewView(QWidget):
             self.crawler.session, self.context, self
         )
         dialog.exec()
+
+    def _request_mark_paper(self, record_id):
+        if self.context is None or self.crawler is None:
+            return
+        button = self._find_mark_paper_button(record_id)
+        if button is None or not button.isEnabled():
+            return
+
+        button.setEnabled(False)
+        self.status_label.show()
+        self.status_label.setText("正在请求该学生的批阅页面...")
+        request_id = self._request_id
+        worker = MarkPaperWorker(
+            self.crawler.session, self.context, record_id, self
+        )
+        self._markpaper_workers.append(worker)
+        worker.loaded.connect(
+            lambda answer_id, generation=request_id: self._on_mark_paper_loaded(
+                generation, answer_id
+            )
+        )
+        worker.failed.connect(
+            lambda answer_id, message, generation=request_id: self._on_mark_paper_failed(
+                generation, answer_id, message
+            )
+        )
+        worker.finished.connect(self._on_mark_paper_worker_finished)
+        worker.start()
+
+    def _find_mark_paper_button(self, record_id):
+        for row in range(self.records_table.rowCount()):
+            item = self.records_table.item(row, 0)
+            if item is None or str(item.data(Qt.ItemDataRole.UserRole)) != str(record_id):
+                continue
+            button = self.records_table.cellWidget(row, 7)
+            if isinstance(button, QPushButton):
+                return button
+        return None
+
+    def _on_mark_paper_loaded(self, request_id, record_id):
+        button = self._find_mark_paper_button(record_id)
+        if button is not None:
+            button.setEnabled(True)
+        if request_id != self._request_id:
+            return
+        self.status_label.show()
+        self.status_label.setText(
+            "已收到该答卷的批阅页面 HTML（当前版本暂不解析或展示）"
+        )
+
+    def _on_mark_paper_failed(self, request_id, record_id, message):
+        button = self._find_mark_paper_button(record_id)
+        if button is not None:
+            button.setEnabled(True)
+        if request_id != self._request_id:
+            return
+        self.status_label.show()
+        self.status_label.setText(f"批阅页面请求失败：{message}")
+
+    def _on_mark_paper_worker_finished(self):
+        worker = self.sender()
+        if worker in self._markpaper_workers:
+            self._markpaper_workers.remove(worker)
+            worker.deleteLater()

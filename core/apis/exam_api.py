@@ -7,6 +7,9 @@ EXAM_REVIEW_LIST_URL = (
 EXAM_RECEIVE_IP_URL = (
     "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/answers-receiveip"
 )
+EXAM_MARK_PAPER_URL = (
+    "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/markpaper"
+)
 
 
 @dataclass(frozen=True)
@@ -205,3 +208,57 @@ def fetch_all_submitted_exam_records(
         if progress_callback is not None:
             progress_callback(page_num, total_pages)
     return records
+
+
+def fetch_exam_mark_paper(session, context: ExamReviewContext, record_id: str):
+    if not context.course_id or not context.class_id or not context.cpi:
+        raise ValueError("课程、班级或考试参数缺失")
+    if record_id in (None, ""):
+        raise ValueError("答卷记录 ID 缺失")
+
+    params = {
+        "courseid": context.course_id,
+        "id": str(record_id),
+        "classid": context.class_id,
+        "groupid": "-1",
+        "ut": "t",
+        "cpi": context.cpi,
+        "hideRetest": "false",
+        "groupIds": "",
+        "sw": "",
+        "sorttype": "",
+        "updateScore": "1",
+        "allowAnnotationRedoDownload": "1",
+        "sort": "",
+        "from": "list",
+    }
+    response = session.get(
+        EXAM_MARK_PAPER_URL,
+        params=params,
+        headers={
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,image/apng,*/*;q=0.8"
+            ),
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": context.marklist_url,
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/154.0.0.0 Safari/537.36"
+            ),
+            "Upgrade-Insecure-Requests": "1",
+        },
+        timeout=20,
+    )
+    if response.status_code == 403:
+        raise RuntimeError(
+            "批阅页面请求返回 HTTP 403：请确认登录状态和考试批阅权限"
+        )
+    response.raise_for_status()
+    response_url = str(getattr(response, "url", "") or "").lower()
+    if "passport2.chaoxing.com" in response_url:
+        raise RuntimeError("登录状态已失效，请重新登录")
+    return response.text
