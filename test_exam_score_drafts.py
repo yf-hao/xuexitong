@@ -44,6 +44,38 @@ class ExamScoreDraftStoreTests(unittest.TestCase):
             self.assertEqual(reloaded.get_score("question-2"), 3.0)
             self.assertEqual(reloaded.get_score("question-3"), 4.0)
 
+    def test_preserves_ai_score_breakdown_as_draft_metadata(self):
+        breakdown = {
+            "score": 8,
+            "earned_points": [{
+                "item": "主要推导正确",
+                "points": 8,
+                "evidence": "推导步骤完整",
+            }],
+            "lost_points": [{
+                "item": "缺少边界分析",
+                "points": 2,
+                "evidence": "未讨论边界情况",
+            }],
+            "summary": "整体完成较好。",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExamScoreDraftStore(Path(directory) / "drafts.json")
+            store.save_score(
+                "question-1",
+                8,
+                exam_id="exam-1",
+                ai_score_breakdown=breakdown,
+            )
+
+            reloaded = ExamScoreDraftStore(Path(directory) / "drafts.json")
+
+            self.assertEqual(reloaded.get_score("question-1"), 8.0)
+            self.assertEqual(
+                reloaded.get_entry("question-1")["ai_score_breakdown"],
+                breakdown,
+            )
+
     def test_saves_and_reloads_scores_by_exam_attempt(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ExamScoreDraftStore(Path(directory) / "drafts.json")

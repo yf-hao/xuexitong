@@ -3,10 +3,31 @@ import unittest
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from core.utils.attachment_preview import render_attachment_preview
+from core.utils.attachment_preview import (
+    extract_attachment_text,
+    render_attachment_preview,
+)
 
 
 class AttachmentPreviewTests(unittest.TestCase):
+    def test_extracts_code_and_markdown_as_plain_text(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code_path = Path(folder) / "answer.py"
+            code_path.write_text("def answer(): return 42", encoding="utf-8")
+            markdown_path = Path(folder) / "answer.md"
+            markdown_path.write_text(
+                "# Answer\n\nThe result is 42.", encoding="utf-8"
+            )
+
+            self.assertEqual(
+                extract_attachment_text(code_path),
+                "def answer(): return 42",
+            )
+            self.assertEqual(
+                extract_attachment_text(markdown_path),
+                "# Answer\n\nThe result is 42.",
+            )
+
     def test_preview_html_has_light_and_dark_theme_styles(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "main.py"
@@ -82,8 +103,10 @@ class AttachmentPreviewTests(unittest.TestCase):
                 )
 
             result = render_attachment_preview(path)
+            extracted_text = extract_attachment_text(path)
 
         self.assertIn("DOCX preview text", result.html)
+        self.assertIn("DOCX preview text", extracted_text)
         self.assertEqual(result.title, "answer.docx")
         self.assertIsInstance(result.warnings, tuple)
 

@@ -97,8 +97,12 @@ class ExamScoreDraftStore:
         return data
 
     def get_score(self, key):
-        entry = self._load()["drafts"].get(key)
+        entry = self.get_entry(key)
         return entry.get("score") if isinstance(entry, dict) else None
+
+    def get_entry(self, key):
+        entry = self._load()["drafts"].get(key)
+        return dict(entry) if isinstance(entry, dict) else None
 
     def save_score(self, key, score, **metadata):
         self.save_scores([(key, score, metadata)])

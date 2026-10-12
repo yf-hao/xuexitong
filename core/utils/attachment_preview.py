@@ -166,3 +166,29 @@ def render_attachment_preview(file_path):
     if suffix in {".md", ".markdown", ".mdown"}:
         return _markdown_document(path)
     return _code_document(path)
+
+
+def extract_attachment_text(file_path):
+    path = Path(file_path)
+    if path.stat().st_size > MAX_PREVIEW_SIZE:
+        raise ValueError("文件超过 20 MB，暂不支持 AI 评分")
+
+    suffix = path.suffix.lower()
+    if suffix == ".docx":
+        with path.open("rb") as document_file:
+            text = mammoth.extract_raw_text(document_file).value
+    elif suffix in {".md", ".markdown", ".mdown"}:
+        text = _read_text(path)
+    else:
+        try:
+            get_lexer_for_filename(str(path))
+        except ClassNotFound:
+            if suffix not in PLAIN_TEXT_EXTENSIONS:
+                raise UnsupportedAttachmentPreviewError(
+                    f"不支持从 {suffix or '该类型'} 附件提取 AI 评分文本"
+                )
+        text = _read_text(path)
+
+    if not text.strip():
+        raise ValueError(f"附件 {path.name} 中没有可用于评分的文本")
+    return text.strip()

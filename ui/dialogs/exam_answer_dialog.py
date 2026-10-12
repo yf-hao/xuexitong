@@ -1,10 +1,12 @@
 import base64
+import hashlib
+import json
 import math
 import os
 from html import escape
 
 from bs4 import BeautifulSoup
-from PyQt6.QtCore import QThread, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QSettings, QThread, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QDialog, QDoubleSpinBox, QFileDialog,
@@ -16,8 +18,10 @@ from PyQt6.QtWidgets import (
 from core.apis.exam_api import (
     download_exam_attachment, exam_attachment_cache_path,
 )
+from core.apis.ai_service import DiscreteMathAIService
 from core.utils.attachment_preview import (
-    UnsupportedAttachmentPreviewError, render_attachment_preview,
+    UnsupportedAttachmentPreviewError, extract_attachment_text,
+    render_attachment_preview,
 )
 from core.utils.exam_mark_paper_parser import ExamMarkPaperContent
 from core.utils.exam_score_drafts import (
@@ -97,6 +101,51 @@ class _ExamAttachmentDownloadWorker(QThread):
             self.completed.emit(self.attachment.object_id, False, str(exc))
 
 
+class _ExamAIScoringWorker(QThread):
+    completed = pyqtSignal(str, bool, object)
+    MAX_ATTACHMENT_TEXT_CHARS = 100_000
+
+    def __init__(self, question_key, scoring_data, attachments, session, parent=None):
+        super().__init__(parent)
+        self.question_key = question_key
+        self.scoring_data = scoring_data
+        self.attachments = attachments
+        self.session = session
+
+    def run(self):
+        try:
+            attachment_texts = []
+            total_chars = 0
+            for attachment in self.attachments:
+                if self.session is None:
+                    raise RuntimeError("当前没有可用的学习通登录会话")
+                cache_path = exam_attachment_cache_path(
+                    attachment.object_id, attachment.filename
+                )
+                if (
+                    not os.path.isfile(cache_path)
+                    or os.path.getsize(cache_path) == 0
+                ):
+                    download_exam_attachment(
+                        self.session, attachment.object_id, cache_path
+                    )
+                text = extract_attachment_text(cache_path)
+                total_chars += len(text)
+                if total_chars > self.MAX_ATTACHMENT_TEXT_CHARS:
+                    raise ValueError("附件文本总量超过 100,000 字符，无法进行 AI 评分")
+                attachment_texts.append({
+                    "filename": attachment.filename,
+                    "text": text,
+                })
+
+            scoring_data = dict(self.scoring_data)
+            scoring_data["student_attachments"] = attachment_texts
+            result = DiscreteMathAIService().generate_exam_score(scoring_data)
+            self.completed.emit(self.question_key, True, result)
+        except Exception as exc:
+            self.completed.emit(self.question_key, False, str(exc))
+
+
 class ExamAnswerDialog(QDialog):
     def __init__(
         self,
@@ -127,6 +176,10 @@ class ExamAnswerDialog(QDialog):
         self._score_draft_store = ExamScoreDraftStore()
         self._score_draft_questions = {}
         self._draft_scores = {}
+        self._ai_questions = {}
+        self._ai_score_workers = {}
+        self._ai_breakdowns = {}
+        self._expanded_ai_rationales = set()
         self._load_score_drafts(content)
         self._setup_ui(exam_title, student_name, student_id, content)
 
@@ -352,21 +405,62 @@ class ExamAnswerDialog(QDialog):
 
     def _load_score_drafts(self, content):
         for question in content.questions:
-            if not self._can_edit_score(question):
+            is_subjective = not self._is_objective_question(question)
+            if not self._can_edit_score(question) and not is_subjective:
                 continue
             key = self._score_draft_key(question)
             self._score_draft_questions[key] = question
+            if is_subjective:
+                self._ai_questions[self._ai_question_key(question)] = question
             try:
-                saved_score = self._score_draft_store.get_score(key)
+                entry = self._score_draft_store.get_entry(key)
             except (OSError, ValueError):
-                saved_score = None
+                entry = None
+            saved_score = entry.get("score") if entry else None
             if saved_score is not None:
                 self._draft_scores[key] = float(saved_score)
+            breakdown = entry.get("ai_score_breakdown") if entry else None
+            if isinstance(breakdown, dict):
+                self._ai_breakdowns[key] = breakdown
+
+    def _ai_question_key(self, question):
+        question_identity = question.question_id or json.dumps(
+            [question.question_type, question.number],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        identity = json.dumps(
+            [self._exam_id, question_identity],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+    def _ai_rubric_settings_key(self, question):
+        return f"exam_ai_rubrics/{self._ai_question_key(question)}"
 
     def _on_paper_link_clicked(self, url):
         if url.scheme() == "exam-attachment":
             object_id = url.path().lstrip("/") or url.host()
             self._open_answer_attachment(object_id)
+            return
+        if url.scheme() == "ai-grade":
+            question = self._ai_questions.get(url.path().lstrip("/"))
+            if question is not None:
+                self._start_ai_scoring(question)
+            return
+        if url.scheme() == "ai-rubric":
+            question = self._ai_questions.get(url.path().lstrip("/"))
+            if question is not None:
+                self._edit_ai_rubric(question)
+            return
+        if url.scheme() == "ai-rationale":
+            question_key = url.path().lstrip("/")
+            if question_key in self._expanded_ai_rationales:
+                self._expanded_ai_rationales.remove(question_key)
+            else:
+                self._expanded_ai_rationales.add(question_key)
+            self._refresh_paper_theme(None)
             return
         if url.scheme() != "score-draft":
             return
@@ -388,6 +482,101 @@ class ExamAnswerDialog(QDialog):
         if not accepted:
             return
         self._save_score_draft(key, question, score)
+
+    def _edit_ai_rubric(self, question):
+        settings = QSettings("HaoSoft", "XuexitongManager")
+        settings_key = self._ai_rubric_settings_key(question)
+        current_rubric = settings.value(settings_key, "", str)
+        rubric, accepted = QInputDialog.getMultiLineText(
+            self,
+            f"第 {question.number} 题的追加评分要求",
+            "同一道题的要求会应用于不同学生：",
+            current_rubric,
+        )
+        if accepted:
+            settings.setValue(settings_key, rubric.strip())
+            self.read_only_note.setText(
+                f"第 {question.number} 题的 AI 评分要求已保存"
+            )
+
+    def _start_ai_scoring(self, question):
+        question_key = self._ai_question_key(question)
+        if question_key in self._ai_score_workers:
+            return
+        if question.score is None or question.score <= 0:
+            QMessageBox.warning(
+                self,
+                "无法 AI 评分",
+                "该题缺少有效满分，无法校验 AI 返回的分数。",
+            )
+            return
+
+        settings = QSettings("HaoSoft", "XuexitongManager")
+        rubric = settings.value(
+            self._ai_rubric_settings_key(question), "", str
+        ).strip()
+        if len(rubric) > 5000:
+            QMessageBox.warning(self, "评分要求过长", "追加评分要求不能超过 5000 字符。")
+            return
+
+        scoring_data = {
+            "question": BeautifulSoup(
+                question.stem_html or "", "html.parser"
+            ).get_text("\n", strip=True),
+            "maximum_score": question.score,
+            "reference_answer": BeautifulSoup(
+                question.correct_answer_html or "", "html.parser"
+            ).get_text("\n", strip=True),
+            "reference_explanation": BeautifulSoup(
+                question.explanation_html or "", "html.parser"
+            ).get_text("\n", strip=True),
+            "student_answer": BeautifulSoup(
+                question.student_answer_html or "", "html.parser"
+            ).get_text("\n", strip=True),
+            "additional_scoring_requirements": rubric,
+        }
+        worker = _ExamAIScoringWorker(
+            question_key,
+            scoring_data,
+            question.attachments,
+            self._session,
+            self,
+        )
+        worker.completed.connect(self._on_ai_scoring_completed)
+        worker.finished.connect(worker.deleteLater)
+        self._ai_score_workers[question_key] = worker
+        self.read_only_note.setText(f"正在 AI 评分：第 {question.number} 题…")
+        self._refresh_paper_theme(None)
+        worker.start()
+
+    def _on_ai_scoring_completed(self, question_key, succeeded, result):
+        self._ai_score_workers.pop(question_key, None)
+        question = self._ai_questions.get(question_key)
+        if question is None:
+            return
+        if not succeeded:
+            self.read_only_note.setText(f"第 {question.number} 题 AI 评分失败")
+            QMessageBox.warning(self, "AI 评分失败", str(result))
+            self._refresh_paper_theme(None)
+            return
+
+        draft_key = self._score_draft_key(question)
+        previous_breakdown = self._ai_breakdowns.get(draft_key)
+        self._ai_breakdowns[draft_key] = result
+        if not self._save_score_draft(
+            draft_key,
+            question,
+            result["score"],
+            ai_breakdown=result,
+        ):
+            if previous_breakdown is None:
+                self._ai_breakdowns.pop(draft_key, None)
+            else:
+                self._ai_breakdowns[draft_key] = previous_breakdown
+            return
+        self.read_only_note.setText(
+            f"第 {question.number} 题 AI 评分已写入本地草稿"
+        )
 
     def _download_answer_attachment(self, object_id):
         attachment = self._answer_attachments.get(str(object_id))
@@ -521,22 +710,31 @@ class ExamAnswerDialog(QDialog):
                 f"附件已下载：{os.path.basename(path)}"
             )
 
-    def _save_score_draft(self, key, question, score):
+    def _save_score_draft(self, key, question, score, ai_breakdown=None):
+        metadata = {
+            "exam_id": self._exam_id,
+            "answer_id": self._answer_id,
+            "student_id": self._student_id,
+            "question_id": question.question_id,
+            "question_number": question.number,
+            "question_type": question.question_type,
+        }
+        if ai_breakdown is not None:
+            metadata["ai_score_breakdown"] = ai_breakdown
         try:
             self._score_draft_store.save_score(
                 key,
                 score,
-                exam_id=self._exam_id,
-                answer_id=self._answer_id,
-                student_id=self._student_id,
-                question_id=question.question_id,
-                question_number=question.number,
-                question_type=question.question_type,
+                **metadata,
             )
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "保存失败", f"分数未能保存到本地：{exc}")
             return False
         self._draft_scores[key] = score
+        if ai_breakdown is not None:
+            self._ai_breakdowns[key] = ai_breakdown
+        else:
+            self._ai_breakdowns.pop(key, None)
         self.read_only_note.setText("分数已保存到本地草稿，不会提交成绩")
         self._refresh_group_score_buttons()
         self._refresh_navigation_summaries()
@@ -973,6 +1171,9 @@ class ExamAnswerDialog(QDialog):
 
     def _paper_html(self, content, mode=None):
         palette = get_theme_palette(mode)
+        ai_action_color = (
+            palette.accent_focus if palette.mode == "dark" else palette.accent
+        )
         avatar_svg = (
             '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" '
             'viewBox="0 0 24 24">'
@@ -996,9 +1197,19 @@ class ExamAnswerDialog(QDialog):
             '<path d="M9 18h6M10 22h4M8.4 14.6a6 6 0 1 1 7.2 0c-.9.6-1.4 1.5-1.6 3.4h-4c-.2-1.9-.7-2.8-1.6-3.4Z"/>'
             '</svg>'
         )
+        ai_score_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" '
+            'viewBox="0 0 24 24" fill="none" '
+            f'stroke="{ai_action_color}" stroke-width="1.8" '
+            'stroke-linecap="round" stroke-linejoin="round">'
+            '<path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"/>'
+            '<path d="m19 14 .9 2.1L22 17l-2.1.9L19 20l-.9-2.1L16 17l2.1-.9L19 14Z"/>'
+            '</svg>'
+        )
         avatar_uri = self._svg_data_uri(avatar_svg)
         correct_uri = self._svg_data_uri(correct_svg)
         explanation_uri = self._svg_data_uri(explanation_svg)
+        ai_score_uri = self._svg_data_uri(ai_score_svg)
         body = []
         question_order = 0
         for group_index, group in enumerate(content.groups, 1):
@@ -1026,9 +1237,8 @@ class ExamAnswerDialog(QDialog):
                     "incorrect": '<span class="score-cross">&times;</span>',
                 }.get(grading_status, "")
                 editable_score = self._can_edit_score(question)
-                score_key = (
-                    self._score_draft_key(question) if editable_score else ""
-                )
+                is_objective = self._is_objective_question(question)
+                score_key = self._score_draft_key(question)
                 displayed_score = self._draft_scores.get(
                     score_key, question.earned_score
                 )
@@ -1036,7 +1246,6 @@ class ExamAnswerDialog(QDialog):
                     f"{displayed_score:g}"
                     if displayed_score is not None else "—"
                 )
-                is_objective = self._is_objective_question(question)
                 if editable_score and not is_objective:
                     score_value = (
                     f'<a class="score-value score-value-editable" '
@@ -1053,6 +1262,36 @@ class ExamAnswerDialog(QDialog):
                         f'<span class="score-value {value_class}">'
                         f'{score_text}</span>'
                     )
+                ai_controls = ""
+                if not is_objective:
+                    question_key = self._ai_question_key(question)
+                    if question_key in self._ai_score_workers:
+                        grade_action = '<span class="ai-grade-pending">AI 评分中…</span>'
+                    else:
+                        grade_action = (
+                            f'<a class="ai-grade-button" '
+                            f'href="ai-grade:{question_key}" '
+                            'title="根据题目、答案和评分要求生成建议分数">'
+                            f'<img src="{ai_score_uri}" width="16" height="16" '
+                            'align="middle"/> AI 评分</a>'
+                        )
+                    ai_controls = (
+                        '<div class="ai-score-actions">'
+                        f'{grade_action} '
+                        f'<a class="ai-rubric-link" href="ai-rubric:{question_key}" '
+                        'title="编辑并保存这道题通用的追加评分要求">评分要求</a>'
+                    )
+                    breakdown = self._ai_breakdowns.get(score_key)
+                    if breakdown:
+                        expanded = question_key in self._expanded_ai_rationales
+                        toggle_text = "收起理由" if expanded else "评分理由"
+                        ai_controls += (
+                            f' <a class="ai-rationale-link" '
+                            f'href="ai-rationale:{question_key}">{toggle_text}</a>'
+                        )
+                        if expanded:
+                            ai_controls += self._render_ai_breakdown(breakdown)
+                    ai_controls += '</div>'
                 answer_has_text = bool(
                     BeautifulSoup(
                         question.student_answer_html or "",
@@ -1111,6 +1350,7 @@ class ExamAnswerDialog(QDialog):
                     ' <span>分</span>'
                     f'{"&nbsp;&nbsp;" if score_indicator else ""}'
                     f'{score_indicator}'
+                    f'{ai_controls}'
                     '</td></tr>'
                 )
                 if not is_objective and not attachment_only_answer:
@@ -1261,7 +1501,89 @@ class ExamAnswerDialog(QDialog):
             .student-answer-incorrect {{ color: {palette.danger}; }}
             .answer-score {{
                 text-align: right;
+                min-width: 150px;
+            }}
+            .ai-score-actions {{
+                display: block;
+                margin-top: 8px;
+                white-space: normal;
+            }}
+            .ai-grade-button {{
+                align-items: center;
+                color: {ai_action_color};
+                display: inline-block;
+                font-size: 12pt;
+                font-weight: bold;
+                text-decoration: none;
+            }}
+            .ai-grade-button:hover {{
+                text-decoration: underline;
+            }}
+            .ai-grade-button:focus {{
+                outline: 2px solid {ai_action_color};
+                outline-offset: 2px;
+            }}
+            .ai-rubric-link, .ai-rationale-link {{
+                color: {palette.text_secondary};
+                font-size: 11pt;
+                margin-left: 5px;
+                padding: 4px 2px;
+                text-decoration: none;
+            }}
+            .ai-rubric-link:hover, .ai-rationale-link:hover {{
+                color: {palette.accent};
+                text-decoration: underline;
+            }}
+            .ai-grade-pending {{
+                color: {palette.text_muted};
+                font-size: 12pt;
+            }}
+            .ai-rationale {{
+                background-color: {palette.panel_bg};
+                border-left: 2px solid {palette.accent};
+                color: {palette.text_secondary};
+                font-size: 11pt;
+                margin-top: 6px;
+                padding: 8px 10px;
+                text-align: left;
+                white-space: normal;
+            }}
+            .ai-breakdown-section + .ai-breakdown-section {{
+                border-top: 1px solid {palette.border};
+                margin-top: 8px;
+                padding-top: 8px;
+            }}
+            .ai-breakdown-section ul {{
+                list-style: none;
+                margin: 4px 0 0;
+                padding: 0;
+            }}
+            .ai-breakdown-section li {{
+                margin: 5px 0;
+            }}
+            .ai-point-heading {{
+                align-items: baseline;
+                display: flex;
+                justify-content: space-between;
+                gap: 12px;
+            }}
+            .ai-earned .ai-point-heading strong {{
+                color: {palette.success};
                 white-space: nowrap;
+            }}
+            .ai-lost .ai-point-heading strong {{
+                color: {palette.danger};
+                white-space: nowrap;
+            }}
+            .ai-point-evidence {{
+                color: {palette.text_muted};
+                font-size: 10pt;
+                margin-top: 2px;
+            }}
+            .ai-breakdown-summary {{
+                border-top: 1px solid {palette.border};
+                margin-top: 8px;
+                padding-top: 8px;
             }}
             .score-label {{ font-size: 14pt; }}
             .score-value {{
@@ -1314,6 +1636,43 @@ class ExamAnswerDialog(QDialog):
             table {{ border-collapse: collapse; }}
             td, th {{ border: 1px solid {palette.border}; padding: 4px; }}
         </style></head><body>{''.join(body)}</body></html>"""
+
+    @classmethod
+    def _render_ai_breakdown(cls, breakdown):
+        sections = (
+            ("得分点", "earned_points", "+", "earned"),
+            ("失分点", "lost_points", "−", "lost"),
+        )
+        body = ['<div class="ai-rationale">']
+        for title, key, prefix, class_name in sections:
+            body.append(
+                f'<section class="ai-breakdown-section ai-{class_name}">'
+                f'<strong>{title}</strong>'
+            )
+            entries = breakdown.get(key, [])
+            if entries:
+                body.append('<ul>')
+                for entry in entries:
+                    points = cls._format_score(float(entry["points"]))
+                    body.append(
+                        '<li><div class="ai-point-heading">'
+                        f'<span>{escape(entry["item"])}</span>'
+                        f'<strong>{prefix}{points}分</strong></div>'
+                        '<div class="ai-point-evidence">依据：'
+                        f'{escape(entry["evidence"])}</div></li>'
+                    )
+                body.append('</ul>')
+            else:
+                body.append('<p>无</p>')
+            body.append('</section>')
+        summary = escape(str(breakdown.get("summary", "")))
+        if summary:
+            body.append(
+                '<div class="ai-breakdown-summary">'
+                f'<strong>总体评价：</strong>{summary}</div>'
+            )
+        body.append('</div>')
+        return ''.join(body)
 
     @staticmethod
     def _svg_data_uri(svg):
