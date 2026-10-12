@@ -1263,6 +1263,7 @@ class ExamAnswerDialog(QDialog):
                         f'{score_text}</span>'
                     )
                 ai_controls = ""
+                ai_rationale = ""
                 if not is_objective:
                     question_key = self._ai_question_key(question)
                     if question_key in self._ai_score_workers:
@@ -1290,7 +1291,7 @@ class ExamAnswerDialog(QDialog):
                             f'href="ai-rationale:{question_key}">{toggle_text}</a>'
                         )
                         if expanded:
-                            ai_controls += self._render_ai_breakdown(breakdown)
+                            ai_rationale = self._render_ai_breakdown(breakdown)
                     ai_controls += '</div>'
                 answer_has_text = bool(
                     BeautifulSoup(
@@ -1304,9 +1305,6 @@ class ExamAnswerDialog(QDialog):
                 student_answer = (
                     question.student_answer_html
                     if answer_has_text else empty_answer
-                )
-                attachment_only_answer = (
-                    bool(question.attachments) and not answer_has_text
                 )
                 if student_answer_class:
                     student_answer = (
@@ -1324,38 +1322,44 @@ class ExamAnswerDialog(QDialog):
                 body.append(
                     '<table class="answer-details-table" width="100%">'
                 )
-                body.append(
-                    '<tr>'
-                    '<td class="answer-icon-cell" width="32">'
-                    f'<img class="student-avatar" src="{avatar_uri}" '
-                    'width="22" height="22" align="middle"/></td>'
-                )
                 if is_objective:
                     body.append(
+                        '<tr><td class="answer-icon-cell" width="32">'
+                        f'<img class="student-avatar" src="{avatar_uri}" '
+                        'width="22" height="22" align="middle"/></td>'
                         '<td class="answer-content"><b>学生答案：</b>&nbsp;'
                         f'{student_answer}</td>'
-                    )
-                elif attachment_only_answer:
-                    body.append(
-                        '<td class="answer-content"><b>学生答案：</b>&nbsp;'
-                        f'{student_answer}</td>'
+                        '<td class="answer-score">'
+                        '<span class="score-label">得分：</span>'
+                        f'{score_value}'
+                        ' <span>分</span>'
+                        f'{"&nbsp;&nbsp;" if score_indicator else ""}'
+                        f'{score_indicator}'
+                        f'{ai_controls}'
+                        '</td></tr>'
                     )
                 else:
                     body.append(
-                        '<td class="answer-content"><b>学生答案：</b></td>'
+                        '<tr><td class="answer-score" colspan="3">'
+                        '<span class="score-label">得分：</span>'
+                        f'{score_value}'
+                        ' <span>分</span>'
+                        f'{"&nbsp;&nbsp;" if score_indicator else ""}'
+                        f'{score_indicator}'
+                        f'{ai_controls}'
+                        '</td></tr>'
                     )
-                body.append(
-                    '<td class="answer-score"><span class="score-label">得分：</span>'
-                    f'{score_value}'
-                    ' <span>分</span>'
-                    f'{"&nbsp;&nbsp;" if score_indicator else ""}'
-                    f'{score_indicator}'
-                    f'{ai_controls}'
-                    '</td></tr>'
-                )
-                if not is_objective and not attachment_only_answer:
+                    if ai_rationale:
+                        body.append(
+                            '<tr><td class="ai-rationale-cell" colspan="3">'
+                            f'{ai_rationale}</td></tr>'
+                        )
                     body.append(
-                        '<tr><td class="subjective-answer" colspan="3">'
+                        '<tr><td class="answer-content subjective-answer" '
+                        'colspan="3">'
+                        f'<img class="student-avatar" src="{avatar_uri}" '
+                        'width="22" height="22" align="middle"/> '
+                        '<b>学生答案：</b><br>'
                         f'{student_answer}</td></tr>'
                     )
                 if question.attachments:
@@ -1473,10 +1477,13 @@ class ExamAnswerDialog(QDialog):
             .answer-details-table .answer-icon-cell {{
                 padding-left: 0;
             }}
+            .answer-details-table .ai-rationale-cell {{
+                padding: 2px 0;
+            }}
             .answer-icon-cell {{ white-space: nowrap; }}
             .answer-content {{ font-size: 14pt; }}
             .subjective-answer {{
-                padding: 4px 8px 4px 40px;
+                padding: 4px 8px;
                 vertical-align: top;
             }}
             .answer-attachments {{
