@@ -3,7 +3,7 @@ from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QComboBox, QGridLayout, QHeaderView,
-    QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QToolButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -260,6 +260,15 @@ class ExamReviewView(QWidget):
         filter_row.addWidget(self.submitted_button)
         filter_row.addWidget(self.unsubmitted_button)
         filter_row.addStretch()
+        self.student_search_input = QLineEdit()
+        self.student_search_input.setPlaceholderText("搜索姓名或学号")
+        self.student_search_input.setClearButtonEnabled(True)
+        self.student_search_input.setFixedWidth(220)
+        self.student_search_input.setToolTip("筛选当前页的姓名或学号，支持输入部分内容")
+        self.student_search_input.textChanged.connect(
+            self._filter_current_page_records
+        )
+        filter_row.addWidget(self.student_search_input)
         filter_row.addWidget(QLabel("每页"))
         self.page_size_combo = ContentWidthComboBox()
         self.page_size_combo.addItems(
@@ -1025,6 +1034,32 @@ class ExamReviewView(QWidget):
         )
         self.previous_button.setEnabled(self.page_num > 1)
         self.next_button.setEnabled(self.page_num < self.total_pages)
+        self._filter_current_page_records()
+
+    def _filter_current_page_records(self):
+        query = self.student_search_input.text().strip().casefold()
+        match_count = 0
+        for row in range(self.records_table.rowCount()):
+            matches = not query
+            if query:
+                matches = any(
+                    item is not None and query in item.text().casefold()
+                    for column in (0, 1)
+                    for item in (self.records_table.item(row, column),)
+                )
+            self.records_table.setRowHidden(row, not matches)
+            match_count += matches
+
+        if not query:
+            if self.records_table.rowCount():
+                self.status_label.hide()
+            return
+
+        self.status_label.show()
+        if match_count:
+            self.status_label.setText(f"当前页匹配 {match_count} 名学生")
+        else:
+            self.status_label.setText("当前页没有匹配的姓名或学号")
 
     def _on_page_failed(self, request_id, message):
         if request_id != self._request_id or self.mode != "person":
