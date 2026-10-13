@@ -2,10 +2,12 @@ from PyQt6.QtCore import QByteArray, QEvent, QSettings, QThread, QTimer, Qt, QSi
 from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QComboBox, QGridLayout, QHeaderView,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
-    QToolButton, QSizePolicy, QVBoxLayout, QWidget,
+    QApplication, QAbstractItemView, QButtonGroup, QComboBox, QGridLayout,
+    QHeaderView, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget,
+    QTableWidgetItem,
+    QMessageBox, QToolButton, QSizePolicy, QVBoxLayout, QWidget,
 )
+from threading import Event
 
 from core.apis.exam_api import (
     ExamReviewContext, exam_mark_paper_referer,
@@ -14,11 +16,15 @@ from core.apis.exam_api import (
     fetch_exam_review_questions, next_exam_question_mark_url,
     skip_exam_question_answer,
 )
+from core.services.exam_ai_bulk_grading_service import ExamAIBulkGradingService
+from core.services.exam_ai_scoring_service import ExamAIScoringService
+from core.utils.exam_ai_grading_jobs import ExamAIGradingJobStore
+from core.utils.exam_score_drafts import ExamScoreDraftStore
 from core.utils.exam_mark_paper_parser import (
     parse_exam_mark_paper, parse_exam_question_mark_paper,
 )
 from ui.dialogs.exam_answer_dialog import ExamAnswerDialog
-from ui.dialogs.exam_ip_analysis_dialog import ExamIpAnalysisDialog
+from ui.dialogs.exam_ai_grading_records_dialog import ExamAIGradingRecordsDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
 )
@@ -94,6 +100,34 @@ class MarkPaperWorker(QThread):
             self.loaded.emit(self.record_id, content)
         except Exception as exc:
             self.failed.emit(self.record_id, str(exc))
+
+
+class ExamAIBulkGradingWorker(QThread):
+    progress = pyqtSignal(int, int, object)
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, service, answer_ids=None, parent=None):
+        super().__init__(parent)
+        self.service = service
+        self.answer_ids = answer_ids
+        self._stop_event = Event()
+
+    def request_stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        try:
+            result = self.service.run(
+                progress_callback=lambda current, total, outcome: (
+                    self.progress.emit(current, total, outcome)
+                ),
+                stop_requested=self._stop_event.is_set,
+                answer_ids=self.answer_ids,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class QuestionMarkPaperWorker(QThread):
@@ -199,8 +233,13 @@ class ExamReviewView(QWidget):
         self._question_mark_urls = {}
         self._markpaper_workers = []
         self._active_answer_dialog = None
+        self._bulk_grading_worker = None
+        self._ai_grading_job_store = ExamAIGradingJobStore()
         self._state_totals = {0: None, 1: None}
         self._setup_ui()
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._stop_bulk_grading_for_shutdown)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -346,12 +385,26 @@ class ExamReviewView(QWidget):
         page_controls_layout.addWidget(self.page_label)
         page_controls_layout.addWidget(self.next_button)
         page_row.addWidget(page_controls, 0, 1, Qt.AlignmentFlag.AlignCenter)
-        self.ip_analysis_button = QPushButton("IP分析")
-        self.ip_analysis_button.setFixedWidth(88)
-        self.ip_analysis_button.setToolTip("分析本场考试已交记录的重复 IP 与提交时间线索")
-        self.ip_analysis_button.clicked.connect(self._open_ip_analysis)
+        action_buttons = QWidget()
+        action_buttons_layout = QHBoxLayout(action_buttons)
+        action_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        action_buttons_layout.setSpacing(6)
+        self.grading_records_button = QPushButton("批改记录")
+        self.grading_records_button.clicked.connect(
+            self._open_ai_grading_records
+        )
+        self.grading_records_button.hide()
+        action_buttons_layout.addWidget(self.grading_records_button)
+        self.ai_grade_button = QPushButton("AI改卷")
+        self.ai_grade_button.setObjectName("review_ai_grade_button")
+        self.ai_grade_button.setMinimumSize(104, 38)
+        self.ai_grade_button.setToolTip(
+            "批改本场考试全部已交答卷中的主观题，完成后自动提交"
+        )
+        self.ai_grade_button.clicked.connect(self._toggle_ai_bulk_grading)
+        action_buttons_layout.addWidget(self.ai_grade_button)
         page_row.addWidget(
-            self.ip_analysis_button, 0, 2, Qt.AlignmentFlag.AlignRight
+            action_buttons, 0, 2, Qt.AlignmentFlag.AlignRight
         )
         person_layout.addLayout(page_row)
         layout.addWidget(self.person_panel, 1)
@@ -490,6 +543,28 @@ class ExamReviewView(QWidget):
                 color: {palette.disabled_text};
                 border: 1px solid {palette.border};
             }}
+            QPushButton#review_ai_grade_button {{
+                background-color: {palette.accent};
+                color: #ffffff;
+                border: 1px solid {palette.accent};
+                border-radius: 4px;
+                padding: 7px 16px;
+                font-weight: bold;
+            }}
+            QPushButton#review_ai_grade_button:hover {{
+                background-color: {palette.accent_hover};
+                border-color: {palette.accent_hover};
+                color: #ffffff;
+            }}
+            QPushButton#review_ai_grade_button:pressed {{
+                background-color: {palette.accent_focus};
+                border-color: {palette.accent_focus};
+            }}
+            QPushButton#review_ai_grade_button:disabled {{
+                background-color: {palette.disabled_bg};
+                border-color: {palette.border};
+                color: {palette.disabled_text};
+            }}
             QPushButton:checked {{
                 background-color: {palette.accent};
                 border-color: {palette.accent};
@@ -579,6 +654,7 @@ class ExamReviewView(QWidget):
         self._state_totals = {0: None, 1: None}
         self._restore_page_size()
         self._update_state_labels()
+        self._refresh_ai_grading_records_button()
         self.person_mode_button.setChecked(True)
         self.question_mode_button.setChecked(False)
         self.mode = "person"
@@ -1096,13 +1172,174 @@ class ExamReviewView(QWidget):
     def _refresh_current_page(self):
         self._load_page(self.page_num or 1)
 
-    def _open_ip_analysis(self):
+    def _create_ai_bulk_grading_service(self):
+        def rubric_provider(question):
+            settings = QSettings("HaoSoft", "XuexitongManager")
+            key = ExamAIScoringService.rubric_settings_key(
+                self.context.exam_id, question
+            )
+            return settings.value(key, "", str).strip()
+
+        return ExamAIBulkGradingService(
+            self.crawler.session,
+            self.context,
+            job_store=self._ai_grading_job_store,
+            score_draft_store=ExamScoreDraftStore(),
+            rubric_provider=rubric_provider,
+        )
+
+    def _toggle_ai_bulk_grading(self):
+        worker = self._bulk_grading_worker
+        if worker is not None and worker.isRunning():
+            worker.request_stop()
+            self.ai_grade_button.setText("正在安全停止…")
+            self.ai_grade_button.setEnabled(False)
+            return
+        self._start_ai_bulk_grading()
+
+    def _start_ai_bulk_grading(self, answer_ids=None):
+        if self.context is None or self.crawler is None:
+            return
+
+        self.ai_grade_button.setText(
+            "停止改卷" if answer_ids is None else "重试中…"
+        )
+        self.back_button.setEnabled(False)
+        self.status_label.show()
+        self.status_label.setText("正在读取本场考试已交答卷名单…")
+        self._refresh_ai_grading_records_button()
+        worker = ExamAIBulkGradingWorker(
+            self._create_ai_bulk_grading_service(), answer_ids, self
+        )
+        worker.progress.connect(self._on_ai_bulk_grading_progress)
+        worker.completed.connect(self._on_ai_bulk_grading_completed)
+        worker.failed.connect(self._on_ai_bulk_grading_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._bulk_grading_worker = worker
+        worker.start()
+        self._refresh_ai_grading_records_button()
+
+    def _on_ai_bulk_grading_progress(self, current, total, outcome):
+        name = outcome.get("student_name") or outcome.get("answer_id", "")
+        status = ExamAIGradingRecordsDialog.STATUS_LABELS.get(
+            outcome.get("status"), outcome.get("status", "处理中")
+        )
+        self.status_label.show()
+        self.status_label.setText(
+            f"AI改卷进度：{current}/{total}，{name}：{status}"
+        )
+        self._refresh_ai_grading_records_button()
+
+    def _on_ai_bulk_grading_completed(self, result):
+        self._bulk_grading_worker = None
+        self.ai_grade_button.setText("AI改卷")
+        self.ai_grade_button.setEnabled(True)
+        self.back_button.setEnabled(True)
+        outcomes = result.get("outcomes", [])
+        try:
+            issues = self._ai_grading_job_store.get_exam_issues(
+                self.context.exam_id
+            )
+        except (OSError, ValueError):
+            issues = [
+                outcome for outcome in outcomes
+                if outcome.get("status") in {
+                    "grading_failed", "submission_failed",
+                }
+            ]
+        submitted = sum(
+            outcome.get("status") == "submitted" for outcome in outcomes
+        )
+        stopped = result.get("stopped", False)
+        summary = (
+            f"AI改卷完成：已提交 {submitted} 份，异常 {len(issues)} 份"
+        )
+        if stopped:
+            summary = f"AI改卷已停止；{summary}"
+        self.status_label.show()
+        self.status_label.setText(summary)
+        self._refresh_ai_grading_records_button()
+        if issues:
+            details = "\n".join(
+                f"{item.get('student_name') or item.get('answer_id')}："
+                f"{item.get('stage', '')} {item.get('error', '')}".strip()
+                for item in issues[:10]
+            )
+            QMessageBox.warning(
+                self,
+                "AI改卷有异常",
+                summary + "\n\n" + details,
+            )
+        elif stopped:
+            QMessageBox.information(self, "AI改卷已停止", summary)
+
+    def _on_ai_bulk_grading_failed(self, message):
+        self._bulk_grading_worker = None
+        self.ai_grade_button.setText("AI改卷")
+        self.ai_grade_button.setEnabled(True)
+        self.back_button.setEnabled(True)
+        self.status_label.show()
+        self.status_label.setText(f"AI改卷任务启动失败：{message}")
+        self._refresh_ai_grading_records_button()
+        QMessageBox.warning(self, "AI改卷失败", message)
+
+    def _refresh_ai_grading_records_button(self):
+        if self.context is None:
+            self.grading_records_button.hide()
+            return
+        try:
+            records = self._ai_grading_job_store.get_exam_visible_records(
+                self.context.exam_id
+            )
+            issue_count = len(
+                self._ai_grading_job_store.get_exam_issues(
+                    self.context.exam_id
+                )
+            )
+        except (OSError, ValueError) as exc:
+            records = []
+            issue_count = 0
+            self.status_label.show()
+            self.status_label.setText(f"批改记录读取失败：{exc}")
+        worker_active = (
+            self._bulk_grading_worker is not None
+            and self._bulk_grading_worker.isRunning()
+        )
+        self.grading_records_button.setText(
+            f"批改记录 ({issue_count})" if issue_count else "批改记录"
+        )
+        self.grading_records_button.setVisible(bool(records) or worker_active)
+
+    def _open_ai_grading_records(self):
         if self.context is None:
             return
-        dialog = ExamIpAnalysisDialog(
-            self.crawler.session, self.context, self
+        records = self._ai_grading_job_store.get_exam_visible_records(
+            self.context.exam_id
         )
+        if not records:
+            self._refresh_ai_grading_records_button()
+            return
+        dialog = ExamAIGradingRecordsDialog(records, self)
+        dialog.resolve_requested.connect(self._resolve_ai_grading_issue)
+        dialog.retry_requested.connect(self._retry_ai_grading_issue)
         dialog.exec()
+        self._refresh_ai_grading_records_button()
+
+    def _resolve_ai_grading_issue(self, answer_id):
+        if self.context is None:
+            return
+        self._ai_grading_job_store.resolve_issue(
+            self.context.exam_id, answer_id
+        )
+
+    def _retry_ai_grading_issue(self, answer_id):
+        self._start_ai_bulk_grading([answer_id])
+
+    def _stop_bulk_grading_for_shutdown(self):
+        worker = self._bulk_grading_worker
+        if worker is not None and worker.isRunning():
+            worker.request_stop()
+            worker.wait()
 
     def _request_mark_paper(self, record_id):
         if self.context is None or self.crawler is None:

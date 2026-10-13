@@ -1,11 +1,15 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication, QTableWidgetItem
 
 from ui.views.exam_review_view import ExamReviewView
+from core.utils.exam_ai_grading_jobs import ExamAIGradingJobStore
 
 
 _APP = QApplication.instance() or QApplication(["exam-review-search-tests"])
@@ -80,6 +84,34 @@ class ExamReviewSearchTests(unittest.TestCase):
         self.assertEqual(
             self.view.status_label.text(), "当前页没有匹配的姓名或学号"
         )
+
+    def test_grading_records_button_only_shows_for_active_or_unresolved_jobs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.view.context = SimpleNamespace(exam_id="exam-1")
+            self.view._ai_grading_job_store = ExamAIGradingJobStore(
+                Path(directory) / "jobs.json"
+            )
+            self.view._refresh_ai_grading_records_button()
+            self.assertTrue(self.view.grading_records_button.isHidden())
+
+            self.view._ai_grading_job_store.update_record(
+                "exam-1",
+                "answer-1",
+                "grading_failed",
+                student_name="学生甲",
+                error="AI服务异常",
+            )
+            self.view._refresh_ai_grading_records_button()
+            self.assertFalse(self.view.grading_records_button.isHidden())
+            self.assertEqual(
+                self.view.grading_records_button.text(), "批改记录 (1)"
+            )
+
+            self.view._ai_grading_job_store.resolve_issue(
+                "exam-1", "answer-1"
+            )
+            self.view._refresh_ai_grading_records_button()
+            self.assertTrue(self.view.grading_records_button.isHidden())
 
 
 if __name__ == "__main__":

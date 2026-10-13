@@ -519,6 +519,7 @@ def fetch_exam_review_page(
     state: int,
     page_num: int = 1,
     page_size: int = 20,
+    include_ips: bool = True,
 ) -> ExamReviewPage:
     if state not in (0, 1):
         raise ValueError("state must be 0 (unsubmitted) or 1 (submitted)")
@@ -610,7 +611,7 @@ def fetch_exam_review_page(
     if not isinstance(records, list):
         raise RuntimeError("考试批阅列表响应缺少 data 数组")
 
-    if state == 1:
+    if state == 1 and include_ips:
         record_ids = [
             str(record["id"])
             for record in records
@@ -667,9 +668,15 @@ def fetch_all_submitted_exam_records(
     context: ExamReviewContext,
     page_size: int = 100,
     progress_callback=None,
+    include_ips: bool = True,
 ) -> list:
     first_page = fetch_exam_review_page(
-        session, context, state=1, page_num=1, page_size=page_size
+        session,
+        context,
+        state=1,
+        page_num=1,
+        page_size=page_size,
+        include_ips=include_ips,
     )
     records = list(first_page.records)
     total_pages = max(1, first_page.total_pages)
@@ -683,6 +690,7 @@ def fetch_all_submitted_exam_records(
             state=1,
             page_num=page_num,
             page_size=page_size,
+            include_ips=include_ips,
         )
         records.extend(page.records)
         if progress_callback is not None:

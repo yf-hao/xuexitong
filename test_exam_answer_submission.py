@@ -357,7 +357,7 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
         worker.completed.connect(lambda *result: outcomes.append(result))
         with (
             patch(
-                "ui.dialogs.exam_answer_dialog.exam_attachment_cache_path",
+                "core.services.exam_ai_scoring_service.exam_attachment_cache_path",
                 return_value="cached-answer.docx",
             ),
             patch(
@@ -369,11 +369,11 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
                 return_value=10,
             ),
             patch(
-                "ui.dialogs.exam_answer_dialog.extract_attachment_scoring_content",
+                "core.services.exam_ai_scoring_service.extract_attachment_scoring_content",
                 return_value=("正文前 [图片 1] 正文后", (image_data_uri,)),
             ),
             patch(
-                "ui.dialogs.exam_answer_dialog.DiscreteMathAIService"
+                "core.services.exam_ai_scoring_service.DiscreteMathAIService"
             ) as ai_service_class,
         ):
             worker.run()

@@ -1,10 +1,8 @@
 import base64
-import hashlib
 import json
 import math
 import os
 from html import escape
-from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from PyQt6.QtCore import QByteArray, QSettings, QThread, QTimer, Qt, QUrl, pyqtSignal
@@ -22,15 +20,16 @@ from PyQt6.QtWidgets import (
 from core.apis.exam_api import (
     download_exam_attachment, exam_attachment_cache_path, submit_exam_mark,
 )
-from core.apis.ai_service import DiscreteMathAIService
 from core.utils.attachment_preview import (
-    UnsupportedAttachmentPreviewError, extract_attachment_scoring_content,
-    render_attachment_preview,
+    UnsupportedAttachmentPreviewError, render_attachment_preview,
 )
 from core.utils.exam_mark_paper_parser import ExamMarkPaperContent
-from core.utils.image_utils import validated_image_data_uri
 from core.utils.exam_score_drafts import (
     ExamScoreDraftStore, distribute_group_score,
+)
+from core.utils.exam_mark_submission import build_exam_mark_submission_payload
+from core.services.exam_ai_scoring_service import (
+    ExamAIScoringService, student_answer_image_data_uris,
 )
 from ui.dialogs.attachment_preview_dialog import AttachmentPreviewDialog
 from ui.theme import (
@@ -38,13 +37,7 @@ from ui.theme import (
 )
 
 
-def _student_answer_image_data_uris(answer_html):
-    answer_soup = BeautifulSoup(answer_html or "", "html.parser")
-    return [
-        image_data_uri
-        for image in answer_soup.find_all("img")
-        if (image_data_uri := validated_image_data_uri(image.get("src", "")))
-    ]
+_student_answer_image_data_uris = student_answer_image_data_uris
 
 
 class _SelectAllOnFocusLineEdit(QLineEdit):
@@ -187,7 +180,6 @@ class _ExamAttachmentDownloadWorker(QThread):
 
 class _ExamAIScoringWorker(QThread):
     completed = pyqtSignal(str, bool, object)
-    MAX_ATTACHMENT_TEXT_CHARS = 100_000
 
     def __init__(self, question_key, scoring_data, attachments, session, parent=None):
         super().__init__(parent)
@@ -198,55 +190,9 @@ class _ExamAIScoringWorker(QThread):
 
     def run(self):
         try:
-            attachment_texts = []
-            answer_images = [
-                {
-                    "data_uri": image_data_uri,
-                    "context": f"答卷中的图片 {image_index}",
-                }
-                for image_index, image_data_uri in enumerate(
-                    self.scoring_data.get("student_answer_images") or [], 1
-                )
-            ]
-            total_chars = 0
-            for attachment in self.attachments:
-                if self.session is None:
-                    raise RuntimeError("当前没有可用的学习通登录会话")
-                cache_path = exam_attachment_cache_path(
-                    attachment.object_id, attachment.filename
-                )
-                if (
-                    not os.path.isfile(cache_path)
-                    or os.path.getsize(cache_path) == 0
-                ):
-                    download_exam_attachment(
-                        self.session, attachment.object_id, cache_path
-                    )
-                text, image_data_uris = extract_attachment_scoring_content(
-                    cache_path
-                )
-                total_chars += len(text)
-                if total_chars > self.MAX_ATTACHMENT_TEXT_CHARS:
-                    raise ValueError("附件文本总量超过 100,000 字符，无法进行 AI 评分")
-                for image_index, image_data_uri in enumerate(
-                    image_data_uris, 1
-                ):
-                    answer_images.append({
-                        "data_uri": image_data_uri,
-                        "context": (
-                            f"附件 {attachment.filename} 中的图片 {image_index}，"
-                            f"对应正文标记 [图片 {image_index}]"
-                        ),
-                    })
-                attachment_texts.append({
-                    "filename": attachment.filename,
-                    "text": text,
-                })
-
-            scoring_data = dict(self.scoring_data)
-            scoring_data["student_attachments"] = attachment_texts
-            scoring_data["student_answer_images"] = answer_images
-            result = DiscreteMathAIService().generate_exam_score(scoring_data)
+            result = ExamAIScoringService().score(
+                self.scoring_data, self.attachments, self.session
+            )
             self.completed.emit(self.question_key, True, result)
         except Exception as exc:
             self.completed.emit(self.question_key, False, str(exc))
@@ -601,7 +547,7 @@ class ExamAnswerDialog(QDialog):
 
     @staticmethod
     def _is_objective_question(question):
-        return question.question_type in {"单选题", "多选题", "判断题"}
+        return not ExamAIScoringService.is_subjective_question(question)
 
     @classmethod
     def _can_edit_score(cls, question):
@@ -641,20 +587,12 @@ class ExamAnswerDialog(QDialog):
                 self._ai_breakdowns[key] = breakdown
 
     def _ai_question_key(self, question):
-        question_identity = question.question_id or json.dumps(
-            [question.question_type, question.number],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        identity = json.dumps(
-            [self._exam_id, question_identity],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        return ExamAIScoringService.question_key(self._exam_id, question)
 
     def _ai_rubric_settings_key(self, question):
-        return f"exam_ai_rubrics/{self._ai_question_key(question)}"
+        return ExamAIScoringService.rubric_settings_key(
+            self._exam_id, question
+        )
 
     def _on_paper_link_clicked(self, url):
         if url.scheme() == "exam-attachment":
@@ -863,25 +801,9 @@ class ExamAnswerDialog(QDialog):
                 QMessageBox.warning(self, error_title, error_message)
             return False, error_message
 
-        scoring_data = {
-            "question": BeautifulSoup(
-                question.stem_html or "", "html.parser"
-            ).get_text("\n", strip=True),
-            "maximum_score": question.score,
-            "reference_answer": BeautifulSoup(
-                question.correct_answer_html or "", "html.parser"
-            ).get_text("\n", strip=True),
-            "reference_explanation": BeautifulSoup(
-                question.explanation_html or "", "html.parser"
-            ).get_text("\n", strip=True),
-            "student_answer": BeautifulSoup(
-                question.student_answer_html or "", "html.parser"
-            ).get_text("\n", strip=True),
-            "student_answer_images": _student_answer_image_data_uris(
-                question.student_answer_html
-            ),
-            "additional_scoring_requirements": rubric,
-        }
+        scoring_data = ExamAIScoringService.build_scoring_data(
+            question, rubric
+        )
         worker = _ExamAIScoringWorker(
             question_key,
             scoring_data,
@@ -942,199 +864,21 @@ class ExamAnswerDialog(QDialog):
                 f"第 {question.number} 题 AI 评分已写入本地草稿"
             )
 
-    @staticmethod
-    def _set_submission_field(fields, name, value, required=False):
-        found = False
-        updated = []
-        for field_name, field_value in fields:
-            if field_name == name:
-                updated.append((field_name, str(value)))
-                found = True
-            else:
-                updated.append((field_name, field_value))
-        if not found:
-            if required:
-                raise ValueError(f"批阅表单缺少字段：{name}")
-            updated.append((name, str(value)))
-        return updated
-
-    @classmethod
-    def _ai_teacher_content(cls, breakdown):
-        body = []
-        summary = str(breakdown.get("summary", "")).strip()
-        if summary:
-            body.append(f'<p>{escape(summary)}</p>')
-        for title, key, prefix in (
-            ("得分点", "earned_points", "+"),
-            ("失分点", "lost_points", "−"),
-        ):
-            entries = breakdown.get(key, [])
-            if not entries:
-                continue
-            body.append(f'<p><strong>{title}</strong></p><ul>')
-            for entry in entries:
-                points = cls._format_score(float(entry["points"]))
-                item = escape(str(entry.get("item", "")))
-                evidence = escape(str(entry.get("evidence", "")))
-                body.append(
-                    '<li>'
-                    f'<strong>{prefix}{points}分：</strong>{item}'
-                    f'<br>依据：{evidence}'
-                    '</li>'
-                )
-            body.append('</ul>')
-        return ''.join(body)
-
     def _build_submission_payload(self):
-        submission = self._content.submission
-        if submission is None:
-            raise ValueError("当前答卷没有可用的批阅提交表单")
-        if not self._content.questions:
-            raise ValueError("答卷中没有可提交的题目")
-
-        form_fields = list(submission.fields)
-        if urlsplit(submission.action).path.endswith("/submit-markquestion"):
-            return self._build_question_submission_payload(
-                submission, form_fields
-            )
-
-        original_values = dict(form_fields)
-        required_globals = (
-            "testUserRelationId", "testPaperId", "courseId", "classId",
-            "questionId", "sumScore",
-        )
-        for name in required_globals:
-            if not original_values.get(name, "").strip():
-                raise ValueError(f"批阅表单缺少必要信息：{name}")
-
-        final_scores = []
+        score_overrides = {}
+        ai_breakdowns = {}
         for question in self._content.questions:
             question_id = str(question.question_id or "")
-            if not question_id:
-                raise ValueError(f"第 {question.number} 题缺少题目 ID")
-            score_field = f"score{question_id}"
-            if score_field not in original_values:
-                raise ValueError(f"批阅表单缺少第 {question.number} 题的分数字段")
-
-            score = self._draft_scores.get(
-                self._score_draft_key(question), question.earned_score
-            )
-            if score is None:
-                try:
-                    score = float(original_values[score_field])
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"第 {question.number} 题尚无有效得分，不能提交"
-                    ) from None
-            score = float(score)
-            maximum_score = question.score
-            if maximum_score is None:
-                try:
-                    maximum_score = float(
-                        original_values[f"per{question_id}"]
-                    )
-                except (KeyError, TypeError, ValueError):
-                    raise ValueError(
-                        f"第 {question.number} 题缺少有效满分"
-                    ) from None
-            if (
-                not math.isfinite(score)
-                or score < 0
-                or score > maximum_score + 1e-6
-            ):
-                raise ValueError(
-                    f"第 {question.number} 题得分超出有效范围 0–"
-                    f"{maximum_score:g}"
-                )
-            final_scores.append(score)
-            form_fields = self._set_submission_field(
-                form_fields, score_field, f"{score:g}", required=True
-            )
-
-            breakdown = self._ai_breakdowns.get(
-                self._score_draft_key(question)
-            )
+            draft_key = self._score_draft_key(question)
+            if draft_key in self._draft_scores:
+                score_overrides[question_id] = self._draft_scores[draft_key]
+            breakdown = self._ai_breakdowns.get(draft_key)
             if breakdown is not None:
-                teacher_content_field = f"teacherContent{question_id}"
-                teacher_content = self._ai_teacher_content(breakdown)
-                form_fields = self._set_submission_field(
-                    form_fields,
-                    teacher_content_field,
-                    teacher_content,
-                    required=True,
-                )
-
-        total_score = math.fsum(final_scores)
-        form_fields = self._set_submission_field(
-            form_fields, "sumScore", f"{total_score:g}", required=True
-        )
-        final_values = dict(form_fields)
-        query_values = dict(submission.query_params)
-        for name in (
-            "classId", "markStyle", "submitType", "sumScore",
-            "testUserRelationId",
-        ):
-            if name in final_values:
-                query_values[name] = final_values[name]
-        return (
-            submission.action,
-            tuple(query_values.items()),
-            tuple(form_fields),
-            submission.referer,
-        )
-
-    def _build_question_submission_payload(self, submission, form_fields):
-        if len(self._content.questions) != 1:
-            raise ValueError("按题批阅页面应只包含当前题目")
-        question = self._content.questions[0]
-        question_id = str(question.question_id or "")
-        if not question_id:
-            raise ValueError("当前题目缺少题目 ID")
-
-        original_values = dict(form_fields)
-        score_field = f"score{question_id}"
-        if score_field not in original_values:
-            raise ValueError("按题批阅表单缺少当前题目的分数字段")
-        score = self._draft_scores.get(
-            self._score_draft_key(question), question.earned_score
-        )
-        if score is None:
-            try:
-                score = float(original_values[score_field])
-            except (TypeError, ValueError):
-                raise ValueError("当前题目尚无有效得分，不能提交") from None
-
-        score = float(score)
-        maximum_score = question.score
-        if maximum_score is None or not math.isfinite(maximum_score):
-            raise ValueError("当前题目缺少有效满分")
-        if (
-            not math.isfinite(score)
-            or score < 0
-            or score > maximum_score + 1e-6
-        ):
-            raise ValueError(
-                f"当前题目得分超出有效范围 0–{maximum_score:g}"
-            )
-
-        form_fields = self._set_submission_field(
-            form_fields, score_field, f"{score:g}", required=True
-        )
-        breakdown = self._ai_breakdowns.get(self._score_draft_key(question))
-        if breakdown is not None:
-            teacher_content_field = f"teacherContent{question_id}"
-            form_fields = self._set_submission_field(
-                form_fields,
-                teacher_content_field,
-                self._ai_teacher_content(breakdown),
-                required=True,
-            )
-
-        return (
-            submission.action,
-            submission.query_params,
-            tuple(form_fields),
-            submission.referer,
+                ai_breakdowns[question_id] = breakdown
+        return build_exam_mark_submission_payload(
+            self._content,
+            score_overrides=score_overrides,
+            ai_breakdowns=ai_breakdowns,
         )
 
     def _submit_grades(self):

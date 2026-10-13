@@ -249,6 +249,35 @@ class ExamReviewAPITests(unittest.TestCase):
         self.assertEqual(progress, [(1, 2), (2, 2)])
         self.assertEqual(len(session.calls), 4)
 
+    def test_fetches_all_submitted_pages_without_ip_lookup_for_grading(self):
+        session = FakeSession([
+            {
+                "code": 0,
+                "total": 2,
+                "classSize": 2,
+                "size": 100,
+                "pageNum": 1,
+                "totalPage": 2,
+                "data": [{"id": 101, "loginName": "s101"}],
+            },
+            {
+                "code": 0,
+                "total": 2,
+                "classSize": 2,
+                "size": 100,
+                "pageNum": 2,
+                "totalPage": 2,
+                "data": [{"id": 102, "loginName": "s102"}],
+            },
+        ])
+
+        records = fetch_all_submitted_exam_records(
+            session, self.context, page_size=100, include_ips=False
+        )
+
+        self.assertEqual([record["id"] for record in records], [101, 102])
+        self.assertEqual(len(session.calls), 2)
+
     def test_rejects_unknown_state_without_sending_request(self):
         session = FakeSession({})
 
