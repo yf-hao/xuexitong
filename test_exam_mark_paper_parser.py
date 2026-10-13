@@ -348,6 +348,10 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         </div>
         <div class="infoHead"><h2>张同学 <span class="markStatus">待批阅</span></h2>
           <span class="xuehao">s001</span></div>
+        <div class="fanyaMarkingBootm"><div class="markNumBx">
+          <span class="waitMark">35 待批</span>
+          <span class="alreadyMark">39 已交</span>
+        </div></div>
         <div id="stuAnswer_q1"><div class="answerCon stuAnswerWords">
           <p>学生答案内容</p>
         </div></div>
@@ -361,6 +365,8 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         self.assertEqual(page.student_name, "张同学")
         self.assertEqual(page.student_id, "s001")
         self.assertEqual(page.answer_id, "answer-1")
+        self.assertEqual(page.pending_count, 35)
+        self.assertEqual(page.submitted_count, 39)
         question = page.content.questions[0]
         self.assertEqual(question.question_id, "q1")
         self.assertEqual(question.number, "1")

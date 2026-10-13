@@ -8,9 +8,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QEventLoop, QTimer, QUrl
 from PyQt6.QtGui import QImage, QTextDocument
-from PyQt6.QtWidgets import QApplication, QDialog
+from PyQt6.QtWidgets import QApplication, QDialog, QInputDialog
 
-from core.apis.exam_api import EXAM_SUBMIT_MARK_URL
+from core.apis.exam_api import (
+    EXAM_SUBMIT_MARK_URL, exam_question_mark_referer,
+)
 from core.utils.exam_mark_paper_parser import (
     parse_exam_mark_paper, parse_exam_question_mark_paper,
 )
@@ -18,6 +20,7 @@ from ui.dialogs.exam_answer_dialog import (
     ExamAnswerDialog, _ExamAnswerTextBrowser, _ExamAIScoringWorker,
     _student_answer_image_data_uris,
 )
+from ui.views.exam_review_view import QuestionAnswerAdvanceWorker
 
 
 _APP = QApplication.instance() or QApplication(["exam-answer-submission-tests"])
@@ -86,6 +89,85 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
         self.dialog.deleteLater()
         _APP.processEvents()
 
+    def test_question_navigation_can_be_hidden_without_changing_default(self):
+        self.assertFalse(self.dialog.navigation_scroll.isHidden())
+
+        dialog = ExamAnswerDialog(
+            "考试", "学生", "1", self.content,
+            exam_id="exam-1", answer_id="answer-1", session=object(),
+            show_question_navigation=False,
+        )
+        try:
+            self.assertTrue(dialog.navigation_scroll.isHidden())
+            self.assertTrue(dialog.question_navigation_buttons)
+        finally:
+            dialog.deleteLater()
+            _APP.processEvents()
+
+    def test_question_review_buttons_do_not_change_person_review(self):
+        self.assertEqual(self.dialog.submit_button.text(), "提交批阅")
+        self.assertFalse(hasattr(self.dialog, "skip_button"))
+        self.assertTrue(self.dialog.review_counts_label.isHidden())
+
+        session = FakeSubmitSession()
+        dialog = ExamAnswerDialog(
+            "考试", "学生", "1", self.content,
+            exam_id="exam-1", answer_id="answer-1", session=session,
+            show_question_navigation=False, question_review_mode=True,
+        )
+        skip_events = []
+        dialog.skip_requested.connect(lambda: skip_events.append("skip"))
+        try:
+            self.assertEqual(
+                dialog.submit_button.text(), "提交并进入下一份"
+            )
+            self.assertEqual(
+                dialog.review_counts_label.text(), "-- 待批  ·  -- 已交"
+            )
+            self.assertFalse(dialog.skip_button.isHidden())
+            dialog.skip_button.click()
+            self.assertEqual(skip_events, ["skip"])
+            self.assertEqual(session.calls, [])
+            self.assertTrue(dialog._skip_pending)
+            with patch("ui.dialogs.exam_answer_dialog.QMessageBox.warning"):
+                dialog._finish_question_skip(False, "network error")
+            self.assertFalse(dialog._skip_pending)
+            self.assertTrue(dialog.submit_button.isEnabled())
+            self.assertTrue(dialog.skip_button.isEnabled())
+            dialog._skip_current_answer()
+            dialog._question_skip_succeeded()
+            dialog._finish_question_skip(False, "refresh failed")
+            self.assertFalse(dialog._skip_pending)
+            self.assertFalse(dialog.submit_button.isEnabled())
+            self.assertFalse(dialog.skip_button.isEnabled())
+            self.assertIn("已跳过当前答卷", dialog.read_only_note.text())
+        finally:
+            dialog.deleteLater()
+            _APP.processEvents()
+
+    def test_question_review_requests_next_only_after_successful_submit(self):
+        dialog = ExamAnswerDialog(
+            "考试", "学生", "1", self.content,
+            exam_id="exam-1", answer_id="answer-1", session=FakeSubmitSession(),
+            show_question_navigation=False, question_review_mode=True,
+        )
+        next_events = []
+        finished_events = []
+        dialog.next_requested.connect(lambda: next_events.append("next"))
+        dialog.finished.connect(
+            lambda result: finished_events.append(result)
+        )
+        try:
+            with patch("ui.dialogs.exam_answer_dialog.QMessageBox.warning"):
+                dialog._on_mark_submission_completed(False, "network error")
+            self.assertEqual(next_events, [])
+            dialog._on_mark_submission_completed(True, {"msg": "批阅成功"})
+            self.assertEqual(next_events, ["next"])
+            self.assertEqual(finished_events, [])
+        finally:
+            dialog.deleteLater()
+            _APP.processEvents()
+
     def test_ai_reason_is_submitted_as_teacher_content_and_scores_are_summed(self):
         first_question, second_question = self.content.questions
         self.dialog._draft_scores[
@@ -123,6 +205,34 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
         self.assertEqual(values["teacherContentq2"], "原有评语")
         self.assertEqual(dict(query_params)["sumScore"], "15")
         self.assertEqual(referer, "")
+
+    def test_ai_rubric_dialog_has_larger_resizable_multiline_editor(self):
+        question = self.content.questions[0]
+        settings = unittest.mock.Mock()
+        with (
+            patch(
+                "ui.dialogs.exam_answer_dialog.QSettings",
+                return_value=settings,
+            ),
+            patch("ui.dialogs.exam_answer_dialog.QInputDialog") as dialog_class,
+        ):
+            rubric_dialog = dialog_class.return_value
+            rubric_dialog.exec.return_value = QDialog.DialogCode.Accepted
+            rubric_dialog.textValue.return_value = "需要解释边界情况"
+
+            self.dialog._edit_ai_rubric(question)
+
+        dialog_class.assert_called_once_with(self.dialog)
+        rubric_dialog.setMinimumSize.assert_called_once_with(700, 460)
+        rubric_dialog.resize.assert_called_once_with(820, 560)
+        rubric_dialog.setSizeGripEnabled.assert_called_once_with(True)
+        rubric_dialog.setOption.assert_called_once()
+        _multiline_option, enabled = rubric_dialog.setOption.call_args.args
+        self.assertTrue(enabled)
+        settings.setValue.assert_called_once_with(
+            self.dialog._ai_rubric_settings_key(question),
+            "需要解释边界情况",
+        )
 
     def test_submit_button_posts_in_worker_and_closes_only_on_success(self):
         first_question = self.content.questions[0]
@@ -283,6 +393,130 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
                 "context": "附件 answer.docx 中的图片 1，对应正文标记 [图片 1]",
             }],
         )
+    def test_advance_worker_skips_before_loading_next_answer(self):
+        events = []
+        current_url = (
+            "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/"
+            "markquestionnew?clazzid=class-1&courseid=course-1&ut=t&"
+            "cpi=cpi-1&id=exam-1&qid=q1"
+        )
+        page = object()
+        with (
+            patch("ui.views.exam_review_view.skip_exam_question_answer") as skip,
+            patch("ui.views.exam_review_view.fetch_exam_question_mark_paper") as fetch,
+            patch("ui.views.exam_review_view.parse_exam_question_mark_paper") as parse,
+        ):
+            skip.side_effect = lambda *_args, **_kwargs: events.append("post")
+            fetch.side_effect = lambda *_args, **_kwargs: (
+                events.append("get") or "<html></html>"
+            )
+            parse.side_effect = lambda *_args, **_kwargs: (
+                events.append("parse") or page
+            )
+            worker = QuestionAnswerAdvanceWorker(
+                object(), SimpleNamespace(), "q1", current_url, "answer-1",
+                skip_current=True,
+            )
+            worker.skip_succeeded.connect(
+                lambda _question_id: events.append("skip signal")
+            )
+            worker.loaded.connect(
+                lambda _question_id, _page: events.append("loaded")
+            )
+            failures = []
+            worker.failed.connect(lambda *args: failures.append(args))
+
+            worker.run()
+
+            self.assertEqual(
+                events, ["post", "skip signal", "get", "parse", "loaded"]
+            )
+            self.assertEqual(failures, [])
+            skip.assert_called_once()
+            fetch.assert_called_once()
+            self.assertEqual(
+                skip.call_args.kwargs["referer"],
+                exam_question_mark_referer(current_url, "answer-1"),
+            )
+            self.assertEqual(
+                fetch.call_args.kwargs["referer"],
+                exam_question_mark_referer(current_url, "answer-1"),
+            )
+
+    def test_advance_worker_does_not_load_next_after_skip_failure(self):
+        current_url = (
+            "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/"
+            "markquestionnew?clazzid=class-1&courseid=course-1&ut=t&"
+            "cpi=cpi-1&id=exam-1&qid=q1"
+        )
+        failures = []
+        with (
+            patch(
+                "ui.views.exam_review_view.skip_exam_question_answer",
+                side_effect=RuntimeError("skip rejected"),
+            ),
+            patch("ui.views.exam_review_view.fetch_exam_question_mark_paper") as fetch,
+        ):
+            worker = QuestionAnswerAdvanceWorker(
+                object(), SimpleNamespace(), "q1", current_url, "answer-1",
+                skip_current=True,
+            )
+            worker.failed.connect(lambda *args: failures.append(args))
+
+            worker.run()
+
+            fetch.assert_not_called()
+            self.assertEqual(failures, [("q1", "skip rejected")])
+
+    def test_question_page_replaces_content_in_the_same_dialog(self):
+        html = """
+        <form id="submitMarking"
+          action="/mooc2-ans/exam/test/submit-markquestion?clazzid=class-1&amp;id=exam-1&amp;answerid=answer-2&amp;qid=q1">
+          <input name="answerid" value="answer-2">
+          <input name="qid" id="qid" value="q1">
+          <input id="fullScoreq1" value="33.0">
+          <input name="scoreq1" value="">
+          <textarea name="teacherContentq1"></textarea>
+        </form>
+        <div class="changeTimu"><span class="timuNum">第1题</span></div>
+        <div class="stem">1.<span>(简答题，33.0分)</span>
+          <div class="hiddenTitle"><p>下一份题目</p></div>
+        </div>
+        <div class="infoHead"><h2>下一位学生</h2><span class="xuehao">2</span></div>
+                <div class="markNumBx"><span class="waitMark">34 待批</span>
+                    <span class="alreadyMark">40 已交</span></div>
+        <div id="stuAnswer_q1"><div class="answerCon stuAnswerWords">
+          <p>下一份答案</p>
+        </div></div>
+        """
+        page = parse_exam_question_mark_paper(html)
+        dialog = ExamAnswerDialog(
+            "考试", "学生", "1", self.content,
+            exam_id="exam-1", answer_id="answer-1", session=object(),
+            show_question_navigation=False, question_review_mode=True,
+        )
+        dialog.show()
+        _APP.processEvents()
+        dialog_id = id(dialog)
+
+        try:
+            dialog.load_question_page("考试", page)
+            _APP.processEvents()
+
+            self.assertEqual(id(dialog), dialog_id)
+            self.assertTrue(dialog.isVisible())
+            self.assertEqual(dialog._answer_id, "answer-2")
+            self.assertEqual(dialog.student_label.text(), "下一位学生（2）")
+            self.assertEqual(
+                dialog.review_counts_label.text(), "34 待批  ·  40 已交"
+            )
+            self.assertIn("下一份答案", dialog.paper_browser.toPlainText())
+            self.assertTrue(dialog.navigation_scroll.isHidden())
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            _APP.processEvents()
+
     def test_question_mark_dialog_builds_question_specific_submit_payload(self):
         html = """
         <form id="submitMarking"

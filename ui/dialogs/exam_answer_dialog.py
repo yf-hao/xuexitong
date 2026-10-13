@@ -282,6 +282,8 @@ class _ExamMarkSubmissionWorker(QThread):
 
 class ExamAnswerDialog(QDialog):
     submitted = pyqtSignal()
+    next_requested = pyqtSignal()
+    skip_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -293,6 +295,10 @@ class ExamAnswerDialog(QDialog):
         exam_id: str = "",
         answer_id: str = "",
         session=None,
+        show_question_navigation: bool = True,
+        question_review_mode: bool = False,
+        pending_count: int | None = None,
+        submitted_count: int | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"答卷查看 - {student_name or student_id}")
@@ -303,6 +309,12 @@ class ExamAnswerDialog(QDialog):
         self._answer_id = str(answer_id or student_id or "")
         self._student_id = str(student_id or student_name or "")
         self._session = session
+        self._show_question_navigation = bool(show_question_navigation)
+        self._question_review_mode = bool(question_review_mode)
+        self._skip_pending = False
+        self._skip_completed = False
+        self._advance_pending = False
+        self._current_answer_submitted = False
         self._submission_worker = None
         self._answer_attachments = {
             attachment.object_id: attachment
@@ -327,6 +339,9 @@ class ExamAnswerDialog(QDialog):
         self._ai_batch_current_key = None
         self._load_score_drafts(content)
         self._setup_ui(exam_title, student_name, student_id, content)
+        self._set_question_review_counts(
+            pending_count, submitted_count
+        )
 
     def _setup_ui(self, exam_title, student_name, student_id, content):
         layout = QVBoxLayout(self)
@@ -339,9 +354,18 @@ class ExamAnswerDialog(QDialog):
         student_text = student_name or "未知学生"
         if student_id:
             student_text = f"{student_text}（{student_id}）"
-        student = QLabel(student_text)
-        student.setObjectName("answer_student")
-        layout.addWidget(student)
+        self.student_label = QLabel(student_text)
+        self.student_label.setObjectName("answer_student")
+        student_row = QHBoxLayout()
+        student_row.addWidget(self.student_label, 1)
+        self.review_counts_label = QLabel()
+        self.review_counts_label.setObjectName("answer_review_counts")
+        self.review_counts_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.review_counts_label.setVisible(self._question_review_mode)
+        student_row.addWidget(self.review_counts_label)
+        layout.addLayout(student_row)
 
         self.paper_browser = _ExamAnswerTextBrowser()
         self.paper_browser.setObjectName("answer_paper")
@@ -361,7 +385,9 @@ class ExamAnswerDialog(QDialog):
         content_layout = QHBoxLayout()
         content_layout.setSpacing(10)
         content_layout.addWidget(self.paper_browser, 1)
+        self._content_layout = content_layout
         self._build_question_navigation(content)
+        self.navigation_scroll.setVisible(self._show_question_navigation)
         content_layout.addWidget(self.navigation_scroll)
         layout.addLayout(content_layout, 1)
 
@@ -376,7 +402,11 @@ class ExamAnswerDialog(QDialog):
         self.read_only_note.setObjectName("answer_read_only_note")
         footer.addWidget(self.read_only_note)
         footer.addStretch()
-        self.submit_button = QPushButton("提交批阅")
+        submit_label = (
+            "提交并进入下一份"
+            if self._question_review_mode else "提交批阅"
+        )
+        self.submit_button = QPushButton(submit_label)
         self.submit_button.setMinimumWidth(100)
         self.submit_button.setEnabled(
             content.submission is not None and self._session is not None
@@ -387,6 +417,11 @@ class ExamAnswerDialog(QDialog):
             else "当前页面缺少提交表单或登录会话"
         )
         self.submit_button.clicked.connect(self._submit_grades)
+        if self._question_review_mode:
+            self.skip_button = QPushButton("跳过")
+            self.skip_button.setMinimumWidth(80)
+            self.skip_button.clicked.connect(self._skip_current_answer)
+            footer.addWidget(self.skip_button)
         footer.addWidget(self.submit_button)
         layout.addLayout(footer)
 
@@ -403,6 +438,11 @@ class ExamAnswerDialog(QDialog):
             QLabel#answer_student {{
                 color: {palette.text_secondary};
                 font-size: 15px;
+            }}
+            QLabel#answer_review_counts {{
+                color: {palette.text_muted};
+                font-size: 13px;
+                font-weight: 600;
             }}
             QLabel#answer_read_only_note {{
                 color: {palette.text_muted};
@@ -664,13 +704,21 @@ class ExamAnswerDialog(QDialog):
         settings = QSettings("HaoSoft", "XuexitongManager")
         settings_key = self._ai_rubric_settings_key(question)
         current_rubric = settings.value(settings_key, "", str)
-        rubric, accepted = QInputDialog.getMultiLineText(
-            self,
-            f"第 {question.number} 题的追加评分要求",
-            "同一道题的要求会应用于不同学生：",
-            current_rubric,
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(f"第 {question.number} 题的追加评分要求")
+        dialog.setLabelText("同一道题的要求会应用于不同学生：")
+        dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        dialog.setOption(
+            QInputDialog.InputDialogOption.UsePlainTextEditForTextInput,
+            True,
         )
+        dialog.setTextValue(current_rubric)
+        dialog.setMinimumSize(700, 460)
+        dialog.resize(820, 560)
+        dialog.setSizeGripEnabled(True)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
         if accepted:
+            rubric = dialog.textValue()
             settings.setValue(settings_key, rubric.strip())
             self.read_only_note.setText(
                 f"第 {question.number} 题的 AI 评分要求已保存"
@@ -1090,7 +1138,11 @@ class ExamAnswerDialog(QDialog):
         )
 
     def _submit_grades(self):
-        if self._submission_worker is not None:
+        if (
+            self._submission_worker is not None
+            or self._skip_pending
+            or self._advance_pending
+        ):
             return
         if self._ai_batch_active or self._ai_score_workers:
             QMessageBox.warning(
@@ -1109,6 +1161,8 @@ class ExamAnswerDialog(QDialog):
 
         self.submit_button.setEnabled(False)
         self.submit_button.setText("提交中…")
+        if self._question_review_mode:
+            self.skip_button.setEnabled(False)
         self.read_only_note.setText("正在提交批阅到学习通…")
         worker = _ExamMarkSubmissionWorker(
             self._session,
@@ -1134,23 +1188,182 @@ class ExamAnswerDialog(QDialog):
         self._submission_worker = None
         if succeeded:
             message = result.get("msg", "批阅成功")
-            self.read_only_note.setText(str(message))
             self.submitted.emit()
+            if self._question_review_mode:
+                self._current_answer_submitted = True
+                self._advance_pending = True
+                self.submit_button.setEnabled(False)
+                self.skip_button.setEnabled(False)
+                self.read_only_note.setText(f"{message}，正在加载下一份…")
+                self.next_requested.emit()
+                return
+            self.read_only_note.setText(str(message))
             self.accept()
             return
 
-        self.submit_button.setText("提交批阅")
+        self.submit_button.setText(
+            "提交并进入下一份"
+            if self._question_review_mode else "提交批阅"
+        )
         self.submit_button.setEnabled(True)
+        if self._question_review_mode:
+            self.skip_button.setEnabled(True)
         self.read_only_note.setText("提交失败，答卷仍保留在当前窗口")
         QMessageBox.warning(self, "提交批阅失败", str(result))
 
+    def _skip_current_answer(self):
+        if (
+            not self._question_review_mode
+            or self._submission_worker is not None
+            or self._skip_pending
+            or self._advance_pending
+            or self._current_answer_submitted
+        ):
+            return
+        if self._ai_batch_active or self._ai_score_workers:
+            QMessageBox.warning(
+                self,
+                "AI 评分尚未完成",
+                "请等待当前 AI 评分任务结束后再跳过当前答卷。",
+            )
+            return
+        self._skip_pending = True
+        self._skip_completed = False
+        self.submit_button.setEnabled(False)
+        self.skip_button.setEnabled(False)
+        self.read_only_note.setText("正在跳过当前答卷…")
+        self.skip_requested.emit()
+
+    def _question_skip_succeeded(self):
+        if self._skip_pending:
+            self._skip_completed = True
+            self.read_only_note.setText("已跳过，正在加载下一份…")
+
+    def _finish_question_skip(self, skipped, message=""):
+        if not self._skip_pending:
+            return
+        self._skip_pending = False
+        if skipped:
+            self._skip_completed = True
+            self.submit_button.setEnabled(False)
+            self.skip_button.setEnabled(False)
+            self.read_only_note.setText(
+                f"已跳过当前答卷，下一份加载失败：{message}"
+                if message else "已跳过当前答卷，下一份暂不可用"
+            )
+            return
+        if self._skip_completed:
+            self.submit_button.setEnabled(False)
+            self.skip_button.setEnabled(False)
+            self.read_only_note.setText(
+                f"已跳过当前答卷，下一份加载失败：{message}"
+            )
+            return
+
+        self.submit_button.setEnabled(
+            self._content.submission is not None and self._session is not None
+        )
+        self.skip_button.setEnabled(True)
+        self.read_only_note.setText("跳过失败，答卷仍保留在当前窗口")
+        QMessageBox.warning(self, "跳过答卷失败", str(message))
+
+    def _finish_question_advance(self, message):
+        if not self._advance_pending:
+            return
+        self._advance_pending = False
+        self.submit_button.setEnabled(False)
+        self.skip_button.setEnabled(False)
+        self.read_only_note.setText(
+            f"当前答卷已提交，下一份加载失败：{message}"
+        )
+
+    def load_question_page(self, exam_title, page):
+        if not self._question_review_mode:
+            raise RuntimeError("只有按题批阅窗口可以切换答卷")
+
+        self._content = page.content
+        self._answer_id = str(page.answer_id or "")
+        self._student_id = str(page.student_id or page.student_name or "")
+        self._answer_attachments = {
+            attachment.object_id: attachment
+            for question in page.content.questions
+            for attachment in question.attachments
+        }
+        self._score_draft_questions.clear()
+        self._draft_scores.clear()
+        self._ai_questions.clear()
+        self._ai_breakdowns.clear()
+        self._expanded_ai_rationales.clear()
+        self._navigation_group_totals = []
+        self.question_navigation_score_inputs = {}
+        self._navigation_group_summaries = []
+        self.question_navigation_buttons = {}
+        self._selected_navigation_button = None
+        self._load_score_drafts(page.content)
+
+        student_text = page.student_name or "未知学生"
+        if page.student_id:
+            student_text = f"{student_text}（{page.student_id}）"
+        self.student_label.setText(student_text)
+        self._set_question_review_counts(
+            page.pending_count, page.submitted_count
+        )
+        self.setWindowTitle(f"答卷查看 - {page.student_name or page.student_id}")
+        self.paper_browser.setHtml(self._paper_html(page.content))
+
+        old_navigation = self.navigation_scroll
+        self._content_layout.removeWidget(old_navigation)
+        old_navigation.setParent(None)
+        old_navigation.deleteLater()
+        self._build_question_navigation(page.content)
+        self.navigation_scroll.setVisible(self._show_question_navigation)
+        self._content_layout.addWidget(self.navigation_scroll)
+
+        self.submit_button.setText("提交并进入下一份")
+        self.submit_button.setEnabled(
+            page.content.submission is not None and self._session is not None
+        )
+        self.skip_button.setEnabled(bool(page.answer_id))
+        self.skip_button.setToolTip(
+            "跳过当前答卷并加载下一份"
+            if page.answer_id else "当前答卷缺少 answerid，无法跳过"
+        )
+        if page.content.submission is not None and self._session is not None:
+            note = "修改的分数保存在本地草稿；提交后会加载下一份"
+        elif self._score_draft_questions:
+            note = "分数只保存到本地草稿，当前批阅页面不支持提交"
+        else:
+            note = "只读查看，不会修改或提交成绩"
+        self.read_only_note.setText(note)
+        self._skip_pending = False
+        self._skip_completed = False
+        self._advance_pending = False
+        self._current_answer_submitted = False
+
+    def _set_question_review_counts(self, pending_count, submitted_count):
+        if not self._question_review_mode:
+            return
+        pending = "--" if pending_count is None else str(pending_count)
+        submitted = "--" if submitted_count is None else str(submitted_count)
+        self.review_counts_label.setText(
+            f"{pending} 待批  ·  {submitted} 已交"
+        )
+
     def reject(self):
-        if self._submission_worker is not None:
+        if (
+            self._submission_worker is not None
+            or self._skip_pending
+            or self._advance_pending
+        ):
             return
         super().reject()
 
     def closeEvent(self, event):
-        if self._submission_worker is not None:
+        if (
+            self._submission_worker is not None
+            or self._skip_pending
+            or self._advance_pending
+        ):
             event.ignore()
             return
         super().closeEvent(event)

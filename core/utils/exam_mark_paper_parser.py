@@ -82,6 +82,8 @@ class ExamQuestionMarkPaper:
     student_name: str
     student_id: str
     answer_id: str
+    pending_count: int | None = None
+    submitted_count: int | None = None
 
 
 _REMOVED_TAGS = {
@@ -610,10 +612,20 @@ def parse_exam_question_mark_paper(html, referer=""):
     student_id = student_id_node.get_text(" ", strip=True) if student_id_node else ""
     answer_id_node = form.select_one("input[name='answerid']")
     answer_id = str(answer_id_node.get("value") or "") if answer_id_node else ""
+    pending_node = soup.select_one(".markNumBx .waitMark")
+    submitted_node = soup.select_one(".markNumBx .alreadyMark")
+
+    def parse_count(node):
+        if node is None:
+            return None
+        match = re.search(r"\d+", node.get_text(" ", strip=True))
+        return int(match.group(0)) if match else None
 
     return ExamQuestionMarkPaper(
         content=content,
         student_name=student_name,
         student_id=student_id,
         answer_id=answer_id,
+        pending_count=parse_count(pending_node),
+        submitted_count=parse_count(submitted_node),
     )

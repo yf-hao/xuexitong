@@ -35,6 +35,40 @@ class AIExamScoreResponseTests(unittest.TestCase):
         self.assertEqual(result["score"], 10)
         self.assertEqual(result["lost_points"], [])
 
+    def test_accepts_half_point_score(self):
+        result = parse_exam_score_response(
+            '{"score": 10.5, "earned_points": [{"item":"正确内容",'
+            '"points":10.5,"evidence":"答案满足对应要求"}], '
+            '"lost_points": [{"item":"部分缺漏","points":1.5,'
+            '"evidence":"有一项未满足"}], "summary":"基本正确。"}',
+            12,
+        )
+
+        self.assertEqual(result["score"], 10.5)
+
+    def test_rounds_scores_to_half_point_increments(self):
+        for score in (10.3, 10.6):
+            response = (
+                f'{{"score": {score}, "earned_points": '
+                f'[{{"item":"得分项","points":{score},'
+                '"evidence":"有答案依据"}], '
+                f'"lost_points": [{{"item":"失分项",'
+                f'"points":{20 - score},"evidence":"有扣分依据"}}], '
+                '"summary":"完成评分。"}'
+            )
+            with self.subTest(score=score):
+                result = parse_exam_score_response(response, 20)
+
+                self.assertEqual(result["score"], 10.5)
+                self.assertAlmostEqual(
+                    sum(item["points"] for item in result["earned_points"]),
+                    10.5,
+                )
+                self.assertAlmostEqual(
+                    sum(item["points"] for item in result["lost_points"]),
+                    9.5,
+                )
+
     def test_rejects_invalid_json_and_scores_outside_maximum(self):
         with self.assertRaisesRegex(ValueError, "有效 JSON"):
             parse_exam_score_response("not json", 10)
@@ -102,6 +136,8 @@ class AIExamScoreResponseTests(unittest.TestCase):
         system_prompt = post.call_args.kwargs["json"]["messages"][0]["content"]
         self.assertIn("earned_points", system_prompt)
         self.assertIn("lost_points", system_prompt)
+        self.assertIn("无法验证的评分点不得给分", system_prompt)
+        self.assertIn("不得断言学生确定没有完成", system_prompt)
         self.assertIn(
             "步骤分占一半。",
             post.call_args.kwargs["json"]["messages"][1]["content"],
@@ -109,6 +145,55 @@ class AIExamScoreResponseTests(unittest.TestCase):
         log_info.assert_not_called()
         log_warning.assert_not_called()
         response.close.assert_called_once()
+
+    def test_retries_once_when_lost_points_total_is_inconsistent(self):
+        service = DiscreteMathAIService.__new__(DiscreteMathAIService)
+        service.api_key = "test-key"
+        service.base_url = "https://example.test/v1"
+        service.model = "test-model"
+        service.endpoint_type = "chat_completions"
+        invalid_response = Mock()
+        invalid_response.status_code = 200
+        invalid_response.json.return_value = {
+            "choices": [{
+                "message": {
+                    "content": '{"score": 8, "earned_points": '
+                    '[{"item":"步骤正确","points":8,"evidence":"推导正确"}], '
+                    '"lost_points": [{"item":"结论缺失","points":1,'
+                    '"evidence":"没有结论"}], "summary":"基本正确。"}'
+                }
+            }]
+        }
+        corrected_response = Mock()
+        corrected_response.status_code = 200
+        corrected_response.json.return_value = {
+            "choices": [{
+                "message": {
+                    "content": '{"score": 8, "earned_points": '
+                    '[{"item":"步骤正确","points":8,"evidence":"推导正确"}], '
+                    '"lost_points": [{"item":"结论缺失","points":2,'
+                    '"evidence":"没有结论"}], "summary":"基本正确。"}'
+                }
+            }]
+        }
+
+        with patch(
+            "core.apis.ai_service.requests.post",
+            side_effect=[invalid_response, corrected_response],
+        ) as post:
+            result = service.generate_exam_score({
+                "question": "示例题目",
+                "maximum_score": 10,
+            })
+
+        self.assertEqual(result["score"], 8)
+        self.assertEqual(result["lost_points"][0]["points"], 2)
+        self.assertEqual(post.call_count, 2)
+        retry_prompt = post.call_args.kwargs["json"]["messages"][1]["content"]
+        self.assertIn("previous_response", retry_prompt)
+        self.assertIn("重新核对并调整", retry_prompt)
+        invalid_response.close.assert_called_once()
+        corrected_response.close.assert_called_once()
 
     def test_scoring_request_sends_all_images_for_both_supported_endpoints(self):
         image_data_uris = [

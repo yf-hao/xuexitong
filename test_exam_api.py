@@ -4,13 +4,17 @@ import zlib
 
 from core.apis.exam_api import (
     EXAM_SUBQUESTIONS_URL,
+    EXAM_SKIP_QUESTION_MARK_URL,
     EXAM_SUBMIT_QUESTION_MARK_URL,
     ExamReviewContext,
+    exam_question_mark_referer,
     fetch_all_submitted_exam_records,
     fetch_exam_mark_paper,
     fetch_exam_question_mark_paper,
     fetch_exam_review_page,
     fetch_exam_review_questions,
+    next_exam_question_mark_url,
+    skip_exam_question_answer,
     submit_exam_mark,
 )
 
@@ -507,6 +511,101 @@ class ExamReviewAPITests(unittest.TestCase):
         )
         self.assertEqual(session.options["headers"]["Sec-Fetch-Mode"], "navigate")
 
+    def test_question_mark_page_uses_current_page_as_optional_referer(self):
+        current_url = (
+            "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/"
+            "markquestionnew?clazzid=class-1&qid=q1&answerId=answer-1"
+        )
+        next_url = next_exam_question_mark_url(current_url)
+
+        class HtmlResponse:
+            status_code = 200
+            url = next_url
+            text = "<html><body>next answer</body></html>"
+
+            def raise_for_status(self):
+                pass
+
+        class GetSession:
+            def get(self, url, **kwargs):
+                self.url = url
+                self.options = kwargs
+                return HtmlResponse()
+
+        session = GetSession()
+        html = fetch_exam_question_mark_paper(
+            session, self.context, next_url, referer=current_url
+        )
+
+        self.assertIn("next answer", html)
+        self.assertEqual(session.url, next_url)
+        self.assertEqual(
+            session.options["headers"]["Referer"], current_url
+        )
+
+    def test_skips_question_answer_and_builds_next_page_url(self):
+        current_url = (
+            "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/"
+            "markquestionnew?clazzid=class-1&courseid=course-1&ut=t&"
+            "cpi=cpi-1&id=exam-1&qid=q1&groupIds=&answerId=answer-1"
+        )
+        session = FakeSession({"status": "success", "message": "操作成功"})
+
+        result = skip_exam_question_answer(
+            session, self.context, current_url, "answer-1"
+        )
+
+        self.assertEqual(result["status"], "success")
+        url, options = session.calls[0]
+        self.assertEqual(url, EXAM_SKIP_QUESTION_MARK_URL)
+        self.assertEqual(
+            options["data"],
+            {
+                "courseid": "course-1",
+                "clazzid": "class-1",
+                "cpi": "cpi-1",
+                "id": "exam-1",
+                "qid": "q1",
+                "ut": "t",
+                "answerid": "answer-1",
+            },
+        )
+        self.assertEqual(
+            options["headers"]["X-Requested-With"], "XMLHttpRequest"
+        )
+        self.assertIn(
+            "answerId=answer-1", options["headers"]["Referer"]
+        )
+
+        next_url = next_exam_question_mark_url(current_url)
+        self.assertIn("qid=q1", next_url)
+        self.assertIn("num=1", next_url)
+        self.assertIn("ht=0", next_url)
+        self.assertIn("ha=0", next_url)
+        self.assertIn("wn=0", next_url)
+        self.assertNotIn("answerId", next_url)
+        self.assertNotIn("groupIds", next_url)
+
+        skip_referer = exam_question_mark_referer(current_url, "answer-1")
+        self.assertIn("ht=0", skip_referer)
+        self.assertIn("ha=0", skip_referer)
+        self.assertIn("wn=0", skip_referer)
+        self.assertIn("answerId=answer-1", skip_referer)
+        self.assertNotIn("groupIds", skip_referer)
+
+    def test_skip_question_rejects_untrusted_mark_url(self):
+        session = FakeSession({"status": "success"})
+
+        with self.assertRaisesRegex(ValueError, "受信任"):
+            skip_exam_question_answer(
+                session,
+                self.context,
+                "https://outside.invalid/markquestionnew?qid=q1",
+                "answer-1",
+            )
+
+        self.assertEqual(session.calls, [])
+
     def test_question_mark_page_rejects_untrusted_url(self):
         class GetSession:
             calls = 0
@@ -544,6 +643,42 @@ class ExamReviewAPITests(unittest.TestCase):
             options["data"],
             [("scoreq1", "28"), ("teacherContentq1", "AI 评分理由")],
         )
+
+    def test_question_submit_accepts_plain_saveok_response(self):
+        class SaveOkResponse:
+            status_code = 200
+            url = EXAM_SUBMIT_QUESTION_MARK_URL
+            text = "saveok"
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                raise ValueError("not JSON")
+
+        class SaveOkSession:
+            calls = []
+
+            def post(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return SaveOkResponse()
+
+        session = SaveOkSession()
+        result = submit_exam_mark(
+            session,
+            "/mooc2-ans/exam/test/submit-markquestion?"
+            "clazzid=class-1&id=exam-1&answerid=answer-1&qid=q1&"
+            "forward=0&_score=33",
+            [],
+            [("scoreq1", "33"), ("teacherContentq1", "批阅意见")],
+            referer="https://mooc2-gray.chaoxing.com/markquestionnew",
+        )
+
+        self.assertEqual(result["status"], "success")
+        url, options = session.calls[0]
+        self.assertEqual(url, EXAM_SUBMIT_QUESTION_MARK_URL)
+        self.assertEqual(options["params"][-2:], [("forward", "0"), ("_score", "33")])
+        self.assertEqual(options["headers"]["Accept"], "*/*")
 
 if __name__ == "__main__":
     unittest.main()

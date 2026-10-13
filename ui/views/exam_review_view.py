@@ -8,9 +8,11 @@ from PyQt6.QtWidgets import (
 )
 
 from core.apis.exam_api import (
-    ExamReviewContext, exam_mark_paper_referer, fetch_exam_mark_paper,
+    ExamReviewContext, exam_mark_paper_referer,
+    exam_question_mark_referer, fetch_exam_mark_paper,
     fetch_exam_question_mark_paper, fetch_exam_review_page,
-    fetch_exam_review_questions,
+    fetch_exam_review_questions, next_exam_question_mark_url,
+    skip_exam_question_answer,
 )
 from core.utils.exam_mark_paper_parser import (
     parse_exam_mark_paper, parse_exam_question_mark_paper,
@@ -118,6 +120,56 @@ class QuestionMarkPaperWorker(QThread):
             self.failed.emit(self.question_id, str(exc))
 
 
+class QuestionAnswerAdvanceWorker(QThread):
+    loaded = pyqtSignal(str, object)
+    failed = pyqtSignal(str, str)
+    skip_succeeded = pyqtSignal(str)
+
+    def __init__(
+        self, session, context, question_id, mark_url, answer_id,
+        skip_current=False, parent=None,
+    ):
+        super().__init__(parent)
+        self.session = session
+        self.context = context
+        self.question_id = str(question_id)
+        self.mark_url = mark_url
+        self.answer_id = str(answer_id or "")
+        self.skip_current = bool(skip_current)
+
+    def run(self):
+        try:
+            current_answer_referer = exam_question_mark_referer(
+                self.mark_url, self.answer_id
+            )
+            if self.skip_current:
+                skip_exam_question_answer(
+                    self.session,
+                    self.context,
+                    self.mark_url,
+                    self.answer_id,
+                    referer=current_answer_referer,
+                )
+                self.skip_succeeded.emit(self.question_id)
+            next_url = next_exam_question_mark_url(self.mark_url)
+            page_referer = (
+                current_answer_referer
+                if self.skip_current else self.mark_url
+            )
+            html = fetch_exam_question_mark_paper(
+                self.session,
+                self.context,
+                next_url,
+                referer=page_referer,
+            )
+            page = parse_exam_question_mark_paper(
+                html, referer=page_referer
+            )
+            self.loaded.emit(self.question_id, page)
+        except Exception as exc:
+            self.failed.emit(self.question_id, str(exc))
+
+
 class ContentWidthComboBox(QComboBox):
     def showPopup(self):
         self.view().setFixedWidth(self.width())
@@ -142,6 +194,9 @@ class ExamReviewView(QWidget):
         self._workers = []
         self._question_workers = []
         self._question_markpaper_workers = []
+        self._question_advance_workers = []
+        self._question_advance_dialogs = {}
+        self._question_mark_urls = {}
         self._markpaper_workers = []
         self._active_answer_dialog = None
         self._state_totals = {0: None, 1: None}
@@ -556,6 +611,10 @@ class ExamReviewView(QWidget):
     def _on_questions_loaded(self, request_id, questions):
         if request_id != self._request_id or self.mode != "question":
             return
+        self._question_mark_urls = {
+            str(question.get("question_id") or ""): question.get("mark_url", "")
+            for question in questions
+        }
         self.questions_table.setRowCount(len(questions))
         for row, question in enumerate(questions):
             values = (
@@ -686,6 +745,20 @@ class ExamReviewView(QWidget):
             f"已加载第 {question_number} 题，学生："
             f"{page.student_name or page.student_id or '未知'}"
         )
+        active_dialog = self._active_answer_dialog
+        if (
+            active_dialog is not None
+            and active_dialog._question_review_mode
+        ):
+            active_dialog.load_question_page(
+                self.context.exam_title, page
+            )
+            self.question_status_label.setText(
+                f"已加载第 {question_number} 题，下一份："
+                f"{page.student_name or page.student_id or '未知'}"
+            )
+            return
+
         dialog = ExamAnswerDialog(
             self.context.exam_title,
             page.student_name,
@@ -695,15 +768,100 @@ class ExamReviewView(QWidget):
             exam_id=self.context.exam_id,
             answer_id=page.answer_id or f"question-{question_id}",
             session=self.crawler.session,
+            show_question_navigation=False,
+            question_review_mode=True,
+            pending_count=page.pending_count,
+            submitted_count=page.submitted_count,
         )
+        mark_url = self._question_mark_urls.get(str(question_id), "")
+        answer_id = page.answer_id or f"question-{question_id}"
+        if not page.answer_id:
+            dialog.skip_button.setEnabled(False)
+            dialog.skip_button.setToolTip("当前答卷缺少 answerid，无法跳过")
         self._active_answer_dialog = dialog
         dialog.finished.connect(
             lambda _result, answer_dialog=dialog:
             self._release_answer_dialog(answer_dialog)
         )
-        dialog.submitted.connect(self._refresh_after_question_submission)
+        dialog.next_requested.connect(
+            lambda qid=str(question_id), url=mark_url, aid=answer_id:
+            self._request_next_question_answer(
+                qid, url, aid, dialog=dialog
+            )
+        )
+        dialog.skip_requested.connect(
+            lambda qid=str(question_id), url=mark_url, aid=answer_id,
+            answer_dialog=dialog:
+            self._request_next_question_answer(
+                qid, url, aid, skip_current=True, dialog=answer_dialog
+            )
+        )
+        dialog.finished.connect(self._refresh_after_question_submission)
         dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
         dialog.show()
+
+    def _request_next_question_answer(
+        self, question_id, mark_url, answer_id, skip_current=False,
+        dialog=None,
+    ):
+        if self.context is None or self.crawler is None or not mark_url:
+            if dialog is not None:
+                message = "缺少课程上下文或题目链接，无法加载下一份"
+                if dialog._skip_pending:
+                    dialog._finish_question_skip(False, message)
+                else:
+                    dialog._finish_question_advance(message)
+            self.question_status_label.setText("无法加载下一份：题目链接缺失")
+            return
+        action = "跳过当前答卷并加载下一份" if skip_current else "正在加载下一份答卷"
+        self.question_status_label.setText(action + "…")
+        worker = QuestionAnswerAdvanceWorker(
+            self.crawler.session,
+            self.context,
+            question_id,
+            mark_url,
+            answer_id,
+            skip_current=skip_current,
+            parent=self,
+        )
+        worker.loaded.connect(self._on_question_advance_loaded)
+        worker.failed.connect(self._on_question_advance_failed)
+        worker.skip_succeeded.connect(self._on_question_skip_succeeded)
+        worker.finished.connect(self._on_question_advance_worker_finished)
+        self._question_advance_workers.append(worker)
+        self._question_advance_dialogs[worker] = dialog
+        worker.start()
+
+    def _on_question_advance_loaded(self, question_id, page):
+        dialog = self._question_advance_dialogs.get(self.sender())
+        if self.mode != "question":
+            return
+        if dialog is None or self._active_answer_dialog is not dialog:
+            return
+        self._on_question_mark_paper_loaded(
+            self._request_id, question_id, page
+        )
+
+    def _on_question_advance_failed(self, question_id, message):
+        dialog = self._question_advance_dialogs.get(self.sender())
+        if dialog is not None and self._active_answer_dialog is dialog:
+            if dialog._skip_pending:
+                dialog._finish_question_skip(False, message)
+            else:
+                dialog._finish_question_advance(message)
+        self.question_status_label.setText(f"加载下一份失败：{message}")
+
+    def _on_question_skip_succeeded(self, _question_id):
+        dialog = self._question_advance_dialogs.get(self.sender())
+        if dialog is not None and self._active_answer_dialog is dialog:
+            dialog._question_skip_succeeded()
+
+    def _on_question_advance_worker_finished(self):
+        worker = self.sender()
+        self._question_advance_dialogs.pop(worker, None)
+        if worker in self._question_advance_workers:
+            self._question_advance_workers.remove(worker)
+            worker.deleteLater()
 
     def _refresh_after_question_submission(self):
         if self.mode == "question":

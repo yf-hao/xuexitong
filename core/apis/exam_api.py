@@ -33,6 +33,9 @@ EXAM_SUBMIT_MARK_URL = (
 EXAM_SUBMIT_QUESTION_MARK_URL = (
     "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/submit-markquestion"
 )
+EXAM_SKIP_QUESTION_MARK_URL = (
+    "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/skipmarkquestion"
+)
 EXAM_ATTACHMENT_STATUS_URL = (
     "https://mooc2-gray.chaoxing.com/ananas/status"
 )
@@ -343,9 +346,7 @@ def fetch_exam_review_questions(session, context: ExamReviewContext):
     return questions
 
 
-def fetch_exam_question_mark_paper(session, context, mark_url):
-    if session is None:
-        raise ValueError("当前没有可用的学习通登录会话")
+def _validated_exam_question_mark_url(mark_url):
     target_url = urljoin(EXAM_SUBQUESTIONS_URL, str(mark_url or ""))
     target = urlsplit(target_url)
     expected = urlsplit(EXAM_SUBQUESTIONS_URL)
@@ -355,6 +356,118 @@ def fetch_exam_question_mark_paper(session, context, mark_url):
         or target.path != "/mooc2-ans/exam/test/markquestionnew"
     ):
         raise ValueError("题目批阅链接不是受信任的学习通页面")
+    return target_url, target
+
+
+def next_exam_question_mark_url(mark_url):
+    _target_url, target = _validated_exam_question_mark_url(mark_url)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(target.query, keep_blank_values=True)
+        if key.lower() not in {"answerid", "groupids", "num"}
+    ]
+    existing_keys = {key.lower() for key, _value in query}
+    for name in ("ht", "ha", "wn"):
+        if name not in existing_keys:
+            query.append((name, "0"))
+    query.append(("num", "1"))
+    return urlunsplit((
+        target.scheme, target.netloc, target.path, urlencode(query), ""
+    ))
+
+
+def exam_question_mark_referer(mark_url, answer_id):
+    _target_url, target = _validated_exam_question_mark_url(mark_url)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(target.query, keep_blank_values=True)
+        if key.lower() not in {"answerid", "groupids"}
+    ]
+    existing_keys = {key.lower() for key, _value in query}
+    for name in ("ht", "ha", "wn"):
+        if name not in existing_keys:
+            query.append((name, "0"))
+    query.append(("answerId", str(answer_id)))
+    return urlunsplit((
+        target.scheme, target.netloc, target.path, urlencode(query), ""
+    ))
+
+
+def skip_exam_question_answer(
+    session, context, mark_url, answer_id, referer=""
+):
+    if session is None:
+        raise ValueError("当前没有可用的学习通登录会话")
+    if not answer_id:
+        raise ValueError("当前答卷缺少 answerid，无法跳过")
+    target_url, target = _validated_exam_question_mark_url(mark_url)
+    query = dict(parse_qsl(target.query, keep_blank_values=True))
+    question_id = str(query.get("qid") or "")
+    if not question_id:
+        raise ValueError("题目批阅链接缺少 qid，无法跳过")
+    if not all((context.course_id, context.class_id, context.cpi, context.exam_id)):
+        raise ValueError("课程、班级或考试参数缺失，无法跳过")
+
+    response = session.post(
+        EXAM_SKIP_QUESTION_MARK_URL,
+        data={
+            "courseid": context.course_id,
+            "clazzid": context.class_id,
+            "cpi": context.cpi,
+            "id": context.exam_id,
+            "qid": question_id,
+            "ut": query.get("ut", ""),
+            "answerid": str(answer_id),
+        },
+        headers={
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": (
+                "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5"
+            ),
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Origin": "https://mooc2-gray.chaoxing.com",
+            "Pragma": "no-cache",
+            "Referer": referer or exam_question_mark_referer(
+                mark_url, answer_id
+            ),
+            "X-Requested-With": "XMLHttpRequest",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/154.0.0.0 Safari/537.36"
+            ),
+        },
+        timeout=20,
+    )
+    if response.status_code == 403:
+        raise RuntimeError(
+            "跳过答卷接口返回 HTTP 403：请确认登录状态和考试批阅权限"
+        )
+    response.raise_for_status()
+    response_url = str(getattr(response, "url", "") or "").lower()
+    if "passport2.chaoxing.com" in response_url:
+        raise RuntimeError("登录状态已失效，请重新登录")
+    try:
+        result = response.json()
+    except (AttributeError, ValueError) as exc:
+        raise RuntimeError("跳过答卷接口未返回有效 JSON") from exc
+    if not isinstance(result, dict) or result.get("status") != "success":
+        message = (
+            result.get("message", "跳过答卷失败")
+            if isinstance(result, dict) else "跳过答卷失败"
+        )
+        raise RuntimeError(str(message))
+    return result
+
+
+def fetch_exam_question_mark_paper(
+    session, context, mark_url, referer=None
+):
+    if session is None:
+        raise ValueError("当前没有可用的学习通登录会话")
+    target_url, _target = _validated_exam_question_mark_url(mark_url)
 
     response = session.get(
         target_url,
@@ -369,7 +482,7 @@ def fetch_exam_question_mark_paper(session, context, mark_url):
             ),
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
-            "Referer": context.marklist_url,
+            "Referer": referer or context.marklist_url,
             "Sec-Fetch-Dest": "document",
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "same-origin",
@@ -666,9 +779,19 @@ def submit_exam_mark(session, action, query_params, form_fields, referer=""):
     )
     merged_query_params.update(dict(query_params))
     submit_url = urlunsplit((target.scheme, target.netloc, target.path, "", ""))
+    question_submit = (
+        target.path == urlsplit(EXAM_SUBMIT_QUESTION_MARK_URL).path
+    )
 
     headers = {
-        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept": (
+            "*/*" if question_submit
+            else "application/json, text/javascript, */*; q=0.01"
+        ),
+        "Accept-Language": (
+            "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5"
+        ),
+        "Connection": "keep-alive",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Origin": "https://mooc2-gray.chaoxing.com",
         "Pragma": "no-cache",
@@ -695,10 +818,15 @@ def submit_exam_mark(session, action, query_params, form_fields, referer=""):
     response_url = str(getattr(response, "url", "") or "").lower()
     if "passport2.chaoxing.com" in response_url:
         raise RuntimeError("登录状态已失效，请重新登录")
+    response_text = str(getattr(response, "text", "") or "").strip()
+    if question_submit and response_text.lower() == "saveok":
+        return {"status": "success", "msg": "批阅成功"}
     try:
         payload = response.json()
     except (AttributeError, ValueError) as exc:
         raise RuntimeError("提交批阅接口返回了无法识别的响应") from exc
+    if question_submit and isinstance(payload, str) and payload.lower() == "saveok":
+        return {"status": "success", "msg": "批阅成功"}
     if (
         not isinstance(payload, dict)
         or str(payload.get("status", "")).lower() != "success"
