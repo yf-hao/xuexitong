@@ -200,6 +200,43 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         self.assertEqual(question.correct_answer_html, "")
         self.assertIn("解析内容", question.explanation_html)
 
+    def test_preserves_submit_form_template_and_page_options(self):
+        html = """
+        <form id="submitMarking" method="post"
+          action="/mooc2-ans/exam/test/submitmark?testUserRelationId=answer-1&amp;classId=class-1">
+          <input type="hidden" name="per42" value="10">
+          <input type="hidden" name="relationid42" value="relation-42">
+          <input type="hidden" name="recordid42" value="record-42">
+          <input type="text" name="score42" value="6">
+          <textarea name="teacherContent42"><p>原评语</p></textarea>
+          <input type="hidden" name="questionId" value="42,">
+          <input type="text" name="sumScore" value="6">
+          <input type="hidden" id="checkHiddenObjectQuestion" value="1">
+        </form>
+        <div class="questionWrap" index="1" name="简答题">
+          <input id="fullScore42" value="10">
+          <input name="score42" value="6">
+          <h3 class="mark_name" id="questionStem_42">题目</h3>
+        </div>
+        """
+
+        content = parse_exam_mark_paper(html)
+        submission = content.submission
+        fields = dict(submission.fields)
+        query_params = dict(submission.query_params)
+
+        self.assertEqual(
+            submission.action.split("?", 1)[0],
+            "/mooc2-ans/exam/test/submitmark",
+        )
+        self.assertEqual(fields["teacherContent42"], "<p>原评语</p>")
+        self.assertEqual(fields["recordid42"], "record-42")
+        self.assertEqual(query_params["testUserRelationId"], "answer-1")
+        self.assertEqual(query_params["classId"], "class-1")
+        self.assertEqual(query_params["checkHiddenObjectQuestion"], "1")
+        self.assertEqual(query_params["sorttype"], "0")
+        self.assertEqual(content.questions[0].question_id, "42")
+
     def test_extracts_student_answer_attachments_from_cloud_iframes(self):
         metadata = quote(
             json.dumps({
@@ -268,6 +305,26 @@ class ExamMarkPaperParserTests(unittest.TestCase):
             "可编辑文本", "提交成绩", "onclick", "href", "src",
         ):
             self.assertNotIn(forbidden, answer)
+
+    def test_keeps_valid_inline_raster_image_and_rejects_mismatched_data_uri(self):
+        image_payload = base64.b64encode(
+            b"\x89PNG\r\n\x1a\nimage-data"
+        ).decode("ascii")
+        html = f"""
+        <div class="questionWrap" name="简答题">
+          <h3 class="mark_name">题干</h3>
+          <div class="topicStudentAnswer">
+            <p><img src="data:image/png;base64,{image_payload}" width="120"></p>
+            <img src="data:image/png;base64,SGVsbG8=">
+          </div>
+        </div>
+        """
+
+        answer = parse_exam_mark_paper(html).questions[0].student_answer_html
+
+        self.assertIn(f'data:image/png;base64,{image_payload}', answer)
+        self.assertIn('width="120"', answer)
+        self.assertEqual(answer.count("[附件或媒体内容]"), 1)
 
     def test_rejects_page_without_question_sections(self):
         with self.assertRaisesRegex(ValueError, "没有找到题目内容"):

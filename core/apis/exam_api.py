@@ -1,11 +1,16 @@
 from dataclasses import dataclass
+import base64
 import hashlib
 from html import unescape
 import os
 from pathlib import Path
 import re
 import tempfile
-from urllib.parse import quote, urljoin, urlsplit, urlunsplit
+from urllib.parse import (
+    parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit,
+)
+
+from bs4 import BeautifulSoup
 
 from core.config import DATA_DIR
 
@@ -19,12 +24,140 @@ EXAM_RECEIVE_IP_URL = (
 EXAM_MARK_PAPER_URL = (
     "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/markpaper"
 )
+EXAM_SUBMIT_MARK_URL = (
+    "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/submitmark"
+)
 EXAM_ATTACHMENT_STATUS_URL = (
     "https://mooc2-gray.chaoxing.com/ananas/status"
 )
 EXAM_ATTACHMENT_IFRAME_URL = (
     "https://mooc2-gray.chaoxing.com/ananas/common-modules/attachment/insertCloud.html"
 )
+_MAX_EXAM_ANSWER_IMAGE_BYTES = 8 * 1024 * 1024
+_MAX_EXAM_ANSWER_IMAGES_PER_PAGE = 30
+_MAX_EXAM_ANSWER_IMAGES_PAGE_BYTES = 32 * 1024 * 1024
+
+
+def _is_trusted_chaoxing_url(url):
+    parsed = urlsplit(str(url or ""))
+    host = (parsed.hostname or "").lower()
+    try:
+        valid_port = parsed.port in (None, 443)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and valid_port
+        and parsed.username is None
+        and parsed.password is None
+        and (host == "chaoxing.com" or host.endswith(".chaoxing.com"))
+    )
+
+
+def _raster_image_mime_type(content):
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp"
+    if content.startswith(b"BM"):
+        return "image/bmp"
+    return ""
+
+
+def _fetch_trusted_answer_image(session, image_url, request_headers):
+    current_url = image_url
+    redirect_statuses = {301, 302, 303, 307, 308}
+    for redirect_count in range(4):
+        response = session.get(
+            current_url,
+            headers=request_headers,
+            timeout=(5, 20),
+            allow_redirects=False,
+        )
+        status_code = getattr(response, "status_code", 0)
+        if status_code in redirect_statuses:
+            if redirect_count == 3:
+                return b""
+            location = getattr(response, "headers", {}).get("Location", "")
+            redirect_url = urljoin(current_url, str(location))
+            if not location or not _is_trusted_chaoxing_url(redirect_url):
+                return b""
+            current_url = redirect_url
+            continue
+        if status_code != 200:
+            return b""
+        response_url = getattr(response, "url", "") or current_url
+        if not _is_trusted_chaoxing_url(response_url):
+            return b""
+        content = getattr(response, "content", b"")
+        return content if isinstance(content, bytes) else b""
+    return b""
+
+
+def _embed_exam_answer_images(session, html, referer):
+    soup = BeautifulSoup(html or "", "lxml")
+    image_nodes = soup.select("img.ans-ued-img")
+    if not image_nodes:
+        return html
+
+    page_bytes = 0
+    origin = urlsplit(EXAM_MARK_PAPER_URL)
+    image_referer = f"{origin.scheme}://{origin.netloc}/"
+    request_headers = {
+        "Accept": (
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        ),
+        "Accept-Language": (
+            "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5"
+        ),
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Pragma": "no-cache",
+        "Referer": image_referer,
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "same-site",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/154.0.0.0 Safari/537.36"
+        ),
+        "sec-ch-ua": (
+            '"Chromium";v="154", "Google Chrome";v="154", '
+            '"Not A(Brand";v="99"'
+        ),
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+    }
+    for image_node in image_nodes[:_MAX_EXAM_ANSWER_IMAGES_PER_PAGE]:
+        image_url = urljoin(referer, str(image_node.get("src") or ""))
+        if not _is_trusted_chaoxing_url(image_url):
+            continue
+        try:
+            image_bytes = _fetch_trusted_answer_image(
+                session, image_url, request_headers
+            )
+            if (
+                not isinstance(image_bytes, bytes)
+                or not image_bytes
+                or len(image_bytes) > _MAX_EXAM_ANSWER_IMAGE_BYTES
+                or page_bytes + len(image_bytes)
+                > _MAX_EXAM_ANSWER_IMAGES_PAGE_BYTES
+            ):
+                continue
+            mime_type = _raster_image_mime_type(image_bytes)
+            if not mime_type:
+                continue
+            encoded = base64.b64encode(image_bytes).decode("ascii")
+            image_node["src"] = f"data:{mime_type};base64,{encoded}"
+            page_bytes += len(image_bytes)
+        except Exception:
+            continue
+    return str(soup)
 
 
 def _attachment_response_message(response):
@@ -288,13 +421,12 @@ def fetch_all_submitted_exam_records(
     return records
 
 
-def fetch_exam_mark_paper(session, context: ExamReviewContext, record_id: str):
+def _exam_mark_paper_params(context: ExamReviewContext, record_id: str):
     if not context.course_id or not context.class_id or not context.cpi:
         raise ValueError("课程、班级或考试参数缺失")
     if record_id in (None, ""):
         raise ValueError("答卷记录 ID 缺失")
-
-    params = {
+    return {
         "courseid": context.course_id,
         "id": str(record_id),
         "classid": context.class_id,
@@ -310,6 +442,15 @@ def fetch_exam_mark_paper(session, context: ExamReviewContext, record_id: str):
         "sort": "",
         "from": "list",
     }
+
+
+def exam_mark_paper_referer(context: ExamReviewContext, record_id: str):
+    params = _exam_mark_paper_params(context, record_id)
+    return f"{EXAM_MARK_PAPER_URL}?{urlencode(params)}"
+
+
+def fetch_exam_mark_paper(session, context: ExamReviewContext, record_id: str):
+    params = _exam_mark_paper_params(context, record_id)
     response = session.get(
         EXAM_MARK_PAPER_URL,
         params=params,
@@ -339,7 +480,71 @@ def fetch_exam_mark_paper(session, context: ExamReviewContext, record_id: str):
     response_url = str(getattr(response, "url", "") or "").lower()
     if "passport2.chaoxing.com" in response_url:
         raise RuntimeError("登录状态已失效，请重新登录")
-    return response.text
+    page_referer = exam_mark_paper_referer(context, record_id)
+    return _embed_exam_answer_images(
+        session, response.text, page_referer
+    )
+
+
+def submit_exam_mark(session, action, query_params, form_fields, referer=""):
+    if session is None:
+        raise ValueError("当前没有可用的学习通登录会话")
+    if not action:
+        raise ValueError("批阅表单提交地址缺失")
+
+    target_url = urljoin(EXAM_MARK_PAPER_URL, str(action))
+    target = urlsplit(target_url)
+    expected = urlsplit(EXAM_SUBMIT_MARK_URL)
+    if (
+        target.scheme != expected.scheme
+        or target.netloc != expected.netloc
+        or target.path != expected.path
+    ):
+        raise ValueError("批阅表单提交地址不是受信任的学习通接口")
+    merged_query_params = dict(
+        parse_qsl(target.query, keep_blank_values=True)
+    )
+    merged_query_params.update(dict(query_params))
+
+    headers = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://mooc2-gray.chaoxing.com",
+        "Pragma": "no-cache",
+        "Referer": referer or EXAM_MARK_PAPER_URL,
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/154.0.0.0 Safari/537.36"
+        ),
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    response = session.post(
+        EXAM_SUBMIT_MARK_URL,
+        params=list(merged_query_params.items()),
+        data=list(form_fields),
+        headers=headers,
+        timeout=30,
+    )
+    if response.status_code == 403:
+        raise RuntimeError(
+            "提交批阅返回 HTTP 403：请确认登录状态和考试批阅权限"
+        )
+    response.raise_for_status()
+    response_url = str(getattr(response, "url", "") or "").lower()
+    if "passport2.chaoxing.com" in response_url:
+        raise RuntimeError("登录状态已失效，请重新登录")
+    try:
+        payload = response.json()
+    except (AttributeError, ValueError) as exc:
+        raise RuntimeError("提交批阅接口返回了无法识别的响应") from exc
+    if (
+        not isinstance(payload, dict)
+        or str(payload.get("status", "")).lower() != "success"
+    ):
+        message = payload.get("msg") if isinstance(payload, dict) else ""
+        raise RuntimeError(message or "学习通未确认批阅提交成功")
+    return payload
 
 
 def download_exam_attachment(session, object_id: str, save_path: str) -> str:

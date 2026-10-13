@@ -1,10 +1,13 @@
+import struct
 import unittest
+import zlib
 
 from core.apis.exam_api import (
     ExamReviewContext,
     fetch_all_submitted_exam_records,
     fetch_exam_mark_paper,
     fetch_exam_review_page,
+    submit_exam_mark,
 )
 
 
@@ -251,6 +254,171 @@ class ExamReviewAPITests(unittest.TestCase):
         self.assertEqual(
             session.options["headers"]["Referer"], self.context.marklist_url
         )
+
+    def test_submits_mark_form_with_action_and_updated_query_parameters(self):
+        session = FakeSession({"status": "success", "msg": "批阅成功"})
+
+        result = submit_exam_mark(
+            session,
+            "/mooc2-ans/exam/test/submitmark?testUserRelationId=answer-1&classId=class-1",
+            [("sumScore", "93"), ("testUserRelationId", "answer-2")],
+            [("scoreq1", "8"), ("teacherContentq1", "<p>AI理由</p>")],
+        )
+
+        self.assertEqual(result["status"], "success")
+        url, options = session.calls[0]
+        self.assertTrue(url.endswith("/exam/test/submitmark"))
+        self.assertEqual(options["params"], [
+            ("testUserRelationId", "answer-2"),
+            ("classId", "class-1"),
+            ("sumScore", "93"),
+        ])
+        self.assertEqual(options["data"], [
+            ("scoreq1", "8"), ("teacherContentq1", "<p>AI理由</p>"),
+        ])
+        self.assertEqual(
+            options["headers"]["X-Requested-With"], "XMLHttpRequest"
+        )
+
+    def test_submit_mark_rejects_external_actions_and_unsuccessful_status(self):
+        session = FakeSession({"status": "failed", "msg": "提交失败"})
+        with self.assertRaisesRegex(ValueError, "受信任"):
+            submit_exam_mark(
+                session, "https://outside.invalid/submitmark", [], []
+            )
+        self.assertEqual(session.calls, [])
+
+        with self.assertRaisesRegex(RuntimeError, "提交失败"):
+            submit_exam_mark(
+                session,
+                "/mooc2-ans/exam/test/submitmark",
+                [],
+                [],
+            )
+
+    def test_fetches_and_embeds_trusted_answer_images_only(self):
+        def png_chunk(chunk_type, data):
+            return (
+                struct.pack(">I", len(data))
+                + chunk_type
+                + data
+                + struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
+            )
+
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n"
+            + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+            + png_chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00\xff"))
+            + png_chunk(b"IEND", b"")
+        )
+        page_html = """
+        <html><body>
+          <img class="ans-ued-img" src="https://p.ananas.chaoxing.com/image.jpg">
+          <img class="ans-ued-img" src="https://outside.invalid/image.jpg">
+        </body></html>
+        """
+
+        class HtmlResponse:
+            status_code = 200
+            url = "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/markpaper"
+            text = page_html
+
+            def raise_for_status(self):
+                pass
+
+        class ImageResponse:
+            status_code = 200
+            url = "https://p.ananas.chaoxing.com/image.jpg"
+            content = png_bytes
+
+        class ImageSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                if url.endswith("/image.jpg"):
+                    return ImageResponse()
+                return HtmlResponse()
+
+        session = ImageSession()
+        page = fetch_exam_mark_paper(session, self.context, "answer-1")
+
+        self.assertEqual(len(session.calls), 2)
+        image_headers = session.calls[1][1]["headers"]
+        self.assertEqual(
+            image_headers["Referer"],
+            "https://mooc2-gray.chaoxing.com/",
+        )
+        self.assertEqual(image_headers["Accept-Language"].split(",", 1)[0], "zh-CN")
+        self.assertEqual(image_headers["Sec-Fetch-Dest"], "image")
+        self.assertEqual(image_headers["Sec-Fetch-Mode"], "no-cors")
+        self.assertEqual(image_headers["Sec-Fetch-Site"], "same-site")
+        self.assertIn("data:image/png;base64,", page)
+        self.assertFalse(
+            any("outside.invalid" in call[0] for call in session.calls)
+        )
+
+    def test_follows_only_trusted_image_redirects(self):
+        page_html = (
+            '<img class="ans-ued-img" '
+            'src="https://p.ananas.chaoxing.com/source.jpg">'
+        )
+
+        class PageResponse:
+            status_code = 200
+            url = "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/markpaper"
+            text = page_html
+
+            def raise_for_status(self):
+                pass
+
+        class RedirectResponse:
+            status_code = 302
+            headers = {"Location": "/cdn/final.jpg"}
+            url = "https://p.ananas.chaoxing.com/source.jpg"
+
+        class ImageResponse:
+            status_code = 200
+            url = "https://p.ananas.chaoxing.com/cdn/final.jpg"
+            content = b"\xff\xd8\xffjpeg-data"
+
+        class RedirectSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append(url)
+                if url.endswith("/markpaper"):
+                    return PageResponse()
+                if url.endswith("/source.jpg"):
+                    return RedirectResponse()
+                return ImageResponse()
+
+        session = RedirectSession()
+        page = fetch_exam_mark_paper(session, self.context, "answer-1")
+
+        self.assertEqual(len(session.calls), 3)
+        self.assertIn("data:image/jpeg;base64,", page)
+
+        class ExternalRedirectResponse:
+            status_code = 302
+            headers = {"Location": "https://outside.invalid/final.jpg"}
+            url = "https://p.ananas.chaoxing.com/source.jpg"
+
+        class ExternalRedirectSession(RedirectSession):
+            def get(self, url, **kwargs):
+                self.calls.append(url)
+                if url.endswith("/markpaper"):
+                    return PageResponse()
+                return ExternalRedirectResponse()
+
+        external_session = ExternalRedirectSession()
+        page = fetch_exam_mark_paper(
+            external_session, self.context, "answer-1"
+        )
+        self.assertEqual(len(external_session.calls), 2)
+        self.assertNotIn("data:image/", page)
 
 
 if __name__ == "__main__":

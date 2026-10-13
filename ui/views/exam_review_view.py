@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import (
 )
 
 from core.apis.exam_api import (
-    ExamReviewContext, fetch_exam_mark_paper, fetch_exam_review_page,
+    ExamReviewContext, exam_mark_paper_referer, fetch_exam_mark_paper,
+    fetch_exam_review_page,
 )
 from core.utils.exam_mark_paper_parser import parse_exam_mark_paper
 from ui.dialogs.exam_answer_dialog import ExamAnswerDialog
@@ -61,7 +62,12 @@ class MarkPaperWorker(QThread):
             html = fetch_exam_mark_paper(
                 self.session, self.context, self.record_id
             )
-            content = parse_exam_mark_paper(html)
+            content = parse_exam_mark_paper(
+                html,
+                referer=exam_mark_paper_referer(
+                    self.context, self.record_id
+                ),
+            )
             self.loaded.emit(self.record_id, content)
         except Exception as exc:
             self.failed.emit(self.record_id, str(exc))
@@ -700,6 +706,7 @@ class ExamReviewView(QWidget):
             lambda _result, answer_dialog=dialog:
             self._release_answer_dialog(answer_dialog)
         )
+        dialog.submitted.connect(self._refresh_current_page)
         dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
         dialog.show()
 

@@ -6,8 +6,11 @@ import os
 from html import escape
 
 from bs4 import BeautifulSoup
-from PyQt6.QtCore import QSettings, QThread, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import QByteArray, QSettings, QThread, QTimer, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import (
+    QDesktopServices, QIcon, QImage, QPainter, QPixmap, QTextDocument,
+)
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QDialog, QDoubleSpinBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -16,7 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.apis.exam_api import (
-    download_exam_attachment, exam_attachment_cache_path,
+    download_exam_attachment, exam_attachment_cache_path, submit_exam_mark,
 )
 from core.apis.ai_service import DiscreteMathAIService
 from core.utils.attachment_preview import (
@@ -31,6 +34,25 @@ from ui.dialogs.attachment_preview_dialog import AttachmentPreviewDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
 )
+
+
+def _student_answer_image_data_uris(answer_html):
+    answer_soup = BeautifulSoup(answer_html or "", "html.parser")
+    allowed_prefixes = (
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/gif;base64,",
+        "data:image/webp;base64,",
+        "data:image/bmp;base64,",
+    )
+    return [
+        source
+        for image in answer_soup.find_all("img")
+        if (source := str(image.get("src") or "").strip()).startswith(
+            allowed_prefixes
+        )
+    ]
+
 
 class _SelectAllOnFocusLineEdit(QLineEdit):
     def focusInEvent(self, event):
@@ -51,6 +73,75 @@ class _GroupTotalScoreSpinBox(QDoubleSpinBox):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+class _ExamAnswerTextBrowser(QTextBrowser):
+    MAX_IMAGE_DATA_URI_CHARS = 11_184_812
+    ALLOWED_IMAGE_MIME_TYPES = {
+        "data:image/png;base64",
+        "data:image/jpeg;base64",
+        "data:image/gif;base64",
+        "data:image/webp;base64",
+        "data:image/bmp;base64",
+    }
+    SVG_MIME_TYPE = "data:image/svg+xml;base64"
+    MAX_SVG_DATA_URI_CHARS = 262_144
+
+    def loadResource(self, resource_type, name):
+        if (
+            resource_type != QTextDocument.ResourceType.ImageResource
+            or name.scheme() != "data"
+        ):
+            return super().loadResource(resource_type, name)
+
+        data_uri = name.toString()
+        if len(data_uri) > self.MAX_IMAGE_DATA_URI_CHARS:
+            return QImage()
+        header, separator, encoded = data_uri.partition(",")
+        header = header.lower()
+        if not separator:
+            return QImage()
+        if header == self.SVG_MIME_TYPE:
+            if len(data_uri) > self.MAX_SVG_DATA_URI_CHARS:
+                return QImage()
+            try:
+                renderer = QSvgRenderer(
+                    QByteArray(base64.b64decode(encoded, validate=True))
+                )
+            except (ValueError, base64.binascii.Error):
+                return QImage()
+            if not renderer.isValid():
+                return QImage()
+            svg_size = renderer.defaultSize()
+            width = max(1, min(svg_size.width(), 512))
+            height = max(1, min(svg_size.height(), 512))
+            image = QImage(
+                width,
+                height,
+                QImage.Format.Format_ARGB32_Premultiplied,
+            )
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            renderer.render(painter)
+            painter.end()
+            return image
+        if header not in self.ALLOWED_IMAGE_MIME_TYPES:
+            return QImage()
+        try:
+            image_bytes = base64.b64decode(encoded, validate=True)
+        except (ValueError, base64.binascii.Error):
+            return QImage()
+        if len(image_bytes) > 8 * 1024 * 1024:
+            return QImage()
+        image = QImage.fromData(image_bytes)
+        if image.isNull():
+            return image
+        return image.scaled(
+            900,
+            1400,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
 
 
 class _ExamAttachmentDownloadWorker(QThread):
@@ -146,7 +237,37 @@ class _ExamAIScoringWorker(QThread):
             self.completed.emit(self.question_key, False, str(exc))
 
 
+class _ExamMarkSubmissionWorker(QThread):
+    def __init__(
+        self, session, action, query_params, form_fields, referer="", parent=None
+    ):
+        super().__init__(parent)
+        self.session = session
+        self.action = action
+        self.query_params = query_params
+        self.form_fields = form_fields
+        self.referer = referer
+        self.succeeded = False
+        self.result = None
+
+    def run(self):
+        try:
+            result = submit_exam_mark(
+                self.session,
+                self.action,
+                self.query_params,
+                self.form_fields,
+                referer=self.referer,
+            )
+            self.succeeded = True
+            self.result = result
+        except Exception as exc:
+            self.result = str(exc)
+
+
 class ExamAnswerDialog(QDialog):
+    submitted = pyqtSignal()
+
     def __init__(
         self,
         exam_title: str,
@@ -167,6 +288,7 @@ class ExamAnswerDialog(QDialog):
         self._answer_id = str(answer_id or student_id or "")
         self._student_id = str(student_id or student_name or "")
         self._session = session
+        self._submission_worker = None
         self._answer_attachments = {
             attachment.object_id: attachment
             for question in content.questions
@@ -180,6 +302,14 @@ class ExamAnswerDialog(QDialog):
         self._ai_score_workers = {}
         self._ai_breakdowns = {}
         self._expanded_ai_rationales = set()
+        self._ai_batch_active = False
+        self._ai_batch_queue = []
+        self._ai_batch_total = 0
+        self._ai_batch_completed = 0
+        self._ai_batch_succeeded = 0
+        self._ai_batch_skipped = 0
+        self._ai_batch_failures = []
+        self._ai_batch_current_key = None
         self._load_score_drafts(content)
         self._setup_ui(exam_title, student_name, student_id, content)
 
@@ -198,7 +328,7 @@ class ExamAnswerDialog(QDialog):
         student.setObjectName("answer_student")
         layout.addWidget(student)
 
-        self.paper_browser = QTextBrowser()
+        self.paper_browser = _ExamAnswerTextBrowser()
         self.paper_browser.setObjectName("answer_paper")
         self.paper_browser.setReadOnly(True)
         self.paper_browser.setOpenLinks(False)
@@ -221,15 +351,28 @@ class ExamAnswerDialog(QDialog):
         layout.addLayout(content_layout, 1)
 
         footer = QHBoxLayout()
-        note = "分数只保存到本地草稿，不会提交成绩" if self._score_draft_questions else "只读查看，不会修改或提交成绩"
+        if content.submission is not None and self._session is not None:
+            note = "修改的分数保存在本地草稿；点击提交批阅后才会提交到学习通"
+        elif self._score_draft_questions:
+            note = "分数只保存到本地草稿，当前批阅页面不支持提交"
+        else:
+            note = "只读查看，不会修改或提交成绩"
         self.read_only_note = QLabel(note)
         self.read_only_note.setObjectName("answer_read_only_note")
         footer.addWidget(self.read_only_note)
         footer.addStretch()
-        self.close_button = QPushButton("关闭")
-        self.close_button.setMinimumWidth(84)
-        self.close_button.clicked.connect(self.accept)
-        footer.addWidget(self.close_button)
+        self.submit_button = QPushButton("提交批阅")
+        self.submit_button.setMinimumWidth(100)
+        self.submit_button.setEnabled(
+            content.submission is not None and self._session is not None
+        )
+        self.submit_button.setToolTip(
+            "提交当前答卷中的分数及 AI 评分理由到学习通"
+            if self.submit_button.isEnabled()
+            else "当前页面缺少提交表单或登录会话"
+        )
+        self.submit_button.clicked.connect(self._submit_grades)
+        footer.addWidget(self.submit_button)
         layout.addLayout(footer)
 
         apply_theme_stylesheet(self, lambda palette: f"""
@@ -274,6 +417,25 @@ class ExamAnswerDialog(QDialog):
                 font-size: 16px;
                 font-weight: bold;
                 padding: 4px 0;
+            }}
+            QPushButton#ai_batch_grade_button {{
+                background-color: {palette.accent};
+                border: 1px solid {palette.accent};
+                border-radius: 4px;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 4px 6px;
+            }}
+            QPushButton#ai_batch_grade_button:enabled:hover,
+            QPushButton#ai_batch_grade_button:focus {{
+                background-color: {palette.accent_hover};
+                border-color: {palette.accent_hover};
+            }}
+            QPushButton#ai_batch_grade_button:disabled {{
+                background-color: {palette.disabled_bg};
+                border-color: {palette.border};
+                color: {palette.disabled_text};
             }}
             QLabel#question_navigation_group {{
                 color: {palette.text};
@@ -499,25 +661,144 @@ class ExamAnswerDialog(QDialog):
                 f"第 {question.number} 题的 AI 评分要求已保存"
             )
 
-    def _start_ai_scoring(self, question):
-        question_key = self._ai_question_key(question)
-        if question_key in self._ai_score_workers:
+    def _start_ai_batch_scoring(self):
+        if self._ai_batch_active:
             return
-        if question.score is None or question.score <= 0:
-            QMessageBox.warning(
+        if self._ai_score_workers:
+            QMessageBox.information(
                 self,
-                "无法 AI 评分",
-                "该题缺少有效满分，无法校验 AI 返回的分数。",
+                "AI 评分正在进行",
+                "请等待当前单题评分完成后，再开始一键评分。",
             )
             return
+
+        all_questions = list(self._ai_questions.values())
+        questions = []
+        skipped_count = 0
+        for question in all_questions:
+            draft_key = self._score_draft_key(question)
+            if draft_key in self._ai_breakdowns:
+                skipped_count += 1
+            else:
+                questions.append(question)
+        if not questions:
+            if skipped_count:
+                self.read_only_note.setText(
+                    f"已跳过 {skipped_count} 道已有 AI 评分的主观题，"
+                    "没有需要评分的题目"
+                )
+            else:
+                self.read_only_note.setText("当前答卷没有可 AI 评分的主观题")
+            return
+
+        self._ai_batch_active = True
+        self._ai_batch_queue = questions
+        self._ai_batch_total = len(questions)
+        self._ai_batch_completed = 0
+        self._ai_batch_succeeded = 0
+        self._ai_batch_skipped = skipped_count
+        self._ai_batch_failures = []
+        self.ai_batch_grade_button.setEnabled(False)
+        self._run_next_ai_batch_question()
+
+    def _run_next_ai_batch_question(self):
+        if not self._ai_batch_active:
+            return
+        if not self._ai_batch_queue:
+            self._finish_ai_batch_scoring()
+            return
+
+        question = self._ai_batch_queue.pop(0)
+        self._ai_batch_current_key = self._ai_question_key(question)
+        current_index = self._ai_batch_completed + 1
+        self.ai_batch_grade_button.setText(
+            f"评分中 {current_index}/{self._ai_batch_total}"
+        )
+        self.read_only_note.setText(
+            f"批量 AI 评分：{current_index}/{self._ai_batch_total}，"
+            f"正在评分第 {question.number} 题…"
+        )
+        started, error = self._start_ai_scoring(
+            question, show_warning=False
+        )
+        if not started:
+            self._record_ai_batch_result(question, False, error)
+
+    def _record_ai_batch_result(self, question, succeeded, error=""):
+        if not self._ai_batch_active:
+            return
+        self._ai_batch_completed += 1
+        if succeeded:
+            self._ai_batch_succeeded += 1
+        else:
+            self._ai_batch_failures.append(
+                (question.number, str(error or "未知错误"))
+            )
+        self._ai_batch_current_key = None
+        self.read_only_note.setText(
+            f"批量 AI 评分进度：{self._ai_batch_completed}/"
+            f"{self._ai_batch_total}（成功 {self._ai_batch_succeeded}）"
+        )
+        QTimer.singleShot(0, self._run_next_ai_batch_question)
+
+    def _finish_ai_batch_scoring(self):
+        total = self._ai_batch_total
+        succeeded = self._ai_batch_succeeded
+        failures = self._ai_batch_failures[:]
+        skipped = self._ai_batch_skipped
+        self._ai_batch_active = False
+        self._ai_batch_current_key = None
+        self._ai_batch_queue = []
+        self.ai_batch_grade_button.setText("AI一键评分")
+        self.ai_batch_grade_button.setEnabled(bool(self._ai_questions))
+        summary = f"AI 一键评分完成：成功 {succeeded}/{total} 道待评分主观题"
+        if skipped:
+            summary += f"；已跳过 {skipped} 道已有 AI 评分的题目"
+        self.read_only_note.setText(
+            f"{summary}；分数只保存到本地草稿，不会提交成绩"
+        )
+        self._refresh_paper_theme(None)
+        if failures:
+            failure_lines = [
+                f"第 {number} 题：{error[:240]}"
+                for number, error in failures[:8]
+            ]
+            omitted_failure_count = len(failures) - len(failure_lines)
+            if omitted_failure_count > 0:
+                failure_lines.append(
+                    f"另有 {omitted_failure_count} 道题失败"
+                )
+            QMessageBox.warning(
+                self,
+                "AI 一键评分完成",
+                summary + "\n\n失败详情：\n" + "\n".join(failure_lines),
+            )
+
+    def _start_ai_scoring(self, question, show_warning=True):
+        question_key = self._ai_question_key(question)
+        if question_key in self._ai_score_workers:
+            return False, "该题的 AI 评分已在进行中"
+        if (
+            self._ai_batch_active
+            and question_key != self._ai_batch_current_key
+        ):
+            return False, "批量 AI 评分正在进行"
+        error_title = "无法 AI 评分"
+        error_message = ""
+        if question.score is None or question.score <= 0:
+            error_message = "该题缺少有效满分，无法校验 AI 返回的分数。"
 
         settings = QSettings("HaoSoft", "XuexitongManager")
         rubric = settings.value(
             self._ai_rubric_settings_key(question), "", str
         ).strip()
-        if len(rubric) > 5000:
-            QMessageBox.warning(self, "评分要求过长", "追加评分要求不能超过 5000 字符。")
-            return
+        if not error_message and len(rubric) > 5000:
+            error_title = "评分要求过长"
+            error_message = "追加评分要求不能超过 5000 字符。"
+        if error_message:
+            if show_warning:
+                QMessageBox.warning(self, error_title, error_message)
+            return False, error_message
 
         scoring_data = {
             "question": BeautifulSoup(
@@ -533,6 +814,9 @@ class ExamAnswerDialog(QDialog):
             "student_answer": BeautifulSoup(
                 question.student_answer_html or "", "html.parser"
             ).get_text("\n", strip=True),
+            "student_answer_images": _student_answer_image_data_uris(
+                question.student_answer_html
+            ),
             "additional_scoring_requirements": rubric,
         }
         worker = _ExamAIScoringWorker(
@@ -545,9 +829,13 @@ class ExamAnswerDialog(QDialog):
         worker.completed.connect(self._on_ai_scoring_completed)
         worker.finished.connect(worker.deleteLater)
         self._ai_score_workers[question_key] = worker
-        self.read_only_note.setText(f"正在 AI 评分：第 {question.number} 题…")
+        if not self._ai_batch_active:
+            self.read_only_note.setText(
+                f"正在 AI 评分：第 {question.number} 题…"
+            )
         self._refresh_paper_theme(None)
         worker.start()
+        return True, ""
 
     def _on_ai_scoring_completed(self, question_key, succeeded, result):
         self._ai_score_workers.pop(question_key, None)
@@ -555,8 +843,13 @@ class ExamAnswerDialog(QDialog):
         if question is None:
             return
         if not succeeded:
-            self.read_only_note.setText(f"第 {question.number} 题 AI 评分失败")
-            QMessageBox.warning(self, "AI 评分失败", str(result))
+            if self._ai_batch_active:
+                self._record_ai_batch_result(question, False, result)
+            else:
+                self.read_only_note.setText(
+                    f"第 {question.number} 题 AI 评分失败"
+                )
+                QMessageBox.warning(self, "AI 评分失败", str(result))
             self._refresh_paper_theme(None)
             return
 
@@ -568,15 +861,225 @@ class ExamAnswerDialog(QDialog):
             question,
             result["score"],
             ai_breakdown=result,
+            show_warning=not self._ai_batch_active,
         ):
             if previous_breakdown is None:
                 self._ai_breakdowns.pop(draft_key, None)
             else:
                 self._ai_breakdowns[draft_key] = previous_breakdown
+            if self._ai_batch_active:
+                self._record_ai_batch_result(
+                    question, False, "AI 分数未能保存到本地草稿"
+                )
             return
-        self.read_only_note.setText(
-            f"第 {question.number} 题 AI 评分已写入本地草稿"
+        if self._ai_batch_active:
+            self._record_ai_batch_result(question, True)
+        else:
+            self.read_only_note.setText(
+                f"第 {question.number} 题 AI 评分已写入本地草稿"
+            )
+
+    @staticmethod
+    def _set_submission_field(fields, name, value, required=False):
+        found = False
+        updated = []
+        for field_name, field_value in fields:
+            if field_name == name:
+                updated.append((field_name, str(value)))
+                found = True
+            else:
+                updated.append((field_name, field_value))
+        if not found:
+            if required:
+                raise ValueError(f"批阅表单缺少字段：{name}")
+            updated.append((name, str(value)))
+        return updated
+
+    @classmethod
+    def _ai_teacher_content(cls, breakdown):
+        body = []
+        summary = str(breakdown.get("summary", "")).strip()
+        if summary:
+            body.append(f'<p>{escape(summary)}</p>')
+        for title, key, prefix in (
+            ("得分点", "earned_points", "+"),
+            ("失分点", "lost_points", "−"),
+        ):
+            entries = breakdown.get(key, [])
+            if not entries:
+                continue
+            body.append(f'<p><strong>{title}</strong></p><ul>')
+            for entry in entries:
+                points = cls._format_score(float(entry["points"]))
+                item = escape(str(entry.get("item", "")))
+                evidence = escape(str(entry.get("evidence", "")))
+                body.append(
+                    '<li>'
+                    f'<strong>{prefix}{points}分：</strong>{item}'
+                    f'<br>依据：{evidence}'
+                    '</li>'
+                )
+            body.append('</ul>')
+        return ''.join(body)
+
+    def _build_submission_payload(self):
+        submission = self._content.submission
+        if submission is None:
+            raise ValueError("当前答卷没有可用的批阅提交表单")
+        if not self._content.questions:
+            raise ValueError("答卷中没有可提交的题目")
+
+        form_fields = list(submission.fields)
+        original_values = dict(form_fields)
+        required_globals = (
+            "testUserRelationId", "testPaperId", "courseId", "classId",
+            "questionId", "sumScore",
         )
+        for name in required_globals:
+            if not original_values.get(name, "").strip():
+                raise ValueError(f"批阅表单缺少必要信息：{name}")
+
+        final_scores = []
+        for question in self._content.questions:
+            question_id = str(question.question_id or "")
+            if not question_id:
+                raise ValueError(f"第 {question.number} 题缺少题目 ID")
+            score_field = f"score{question_id}"
+            if score_field not in original_values:
+                raise ValueError(f"批阅表单缺少第 {question.number} 题的分数字段")
+
+            score = self._draft_scores.get(
+                self._score_draft_key(question), question.earned_score
+            )
+            if score is None:
+                try:
+                    score = float(original_values[score_field])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"第 {question.number} 题尚无有效得分，不能提交"
+                    ) from None
+            score = float(score)
+            maximum_score = question.score
+            if maximum_score is None:
+                try:
+                    maximum_score = float(
+                        original_values[f"per{question_id}"]
+                    )
+                except (KeyError, TypeError, ValueError):
+                    raise ValueError(
+                        f"第 {question.number} 题缺少有效满分"
+                    ) from None
+            if (
+                not math.isfinite(score)
+                or score < 0
+                or score > maximum_score + 1e-6
+            ):
+                raise ValueError(
+                    f"第 {question.number} 题得分超出有效范围 0–"
+                    f"{maximum_score:g}"
+                )
+            final_scores.append(score)
+            form_fields = self._set_submission_field(
+                form_fields, score_field, f"{score:g}", required=True
+            )
+
+            breakdown = self._ai_breakdowns.get(
+                self._score_draft_key(question)
+            )
+            if breakdown is not None:
+                teacher_content_field = f"teacherContent{question_id}"
+                teacher_content = self._ai_teacher_content(breakdown)
+                form_fields = self._set_submission_field(
+                    form_fields,
+                    teacher_content_field,
+                    teacher_content,
+                    required=True,
+                )
+
+        total_score = math.fsum(final_scores)
+        form_fields = self._set_submission_field(
+            form_fields, "sumScore", f"{total_score:g}", required=True
+        )
+        final_values = dict(form_fields)
+        query_values = dict(submission.query_params)
+        for name in (
+            "classId", "markStyle", "submitType", "sumScore",
+            "testUserRelationId",
+        ):
+            if name in final_values:
+                query_values[name] = final_values[name]
+        return (
+            submission.action,
+            tuple(query_values.items()),
+            tuple(form_fields),
+            submission.referer,
+        )
+
+    def _submit_grades(self):
+        if self._submission_worker is not None:
+            return
+        if self._ai_batch_active or self._ai_score_workers:
+            QMessageBox.warning(
+                self,
+                "AI 评分尚未完成",
+                "请等待当前 AI 评分任务结束后再提交批阅。",
+            )
+            return
+        try:
+            action, query_params, form_fields, referer = (
+                self._build_submission_payload()
+            )
+        except (TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "无法提交批阅", str(exc))
+            return
+
+        self.submit_button.setEnabled(False)
+        self.submit_button.setText("提交中…")
+        self.read_only_note.setText("正在提交批阅到学习通…")
+        worker = _ExamMarkSubmissionWorker(
+            self._session,
+            action,
+            query_params,
+            form_fields,
+            referer,
+            self,
+        )
+        worker.finished.connect(self._on_mark_submission_worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._submission_worker = worker
+        worker.start()
+
+    def _on_mark_submission_worker_finished(self):
+        worker = self._submission_worker
+        if worker is not None:
+            self._on_mark_submission_completed(
+                worker.succeeded, worker.result
+            )
+
+    def _on_mark_submission_completed(self, succeeded, result):
+        self._submission_worker = None
+        if succeeded:
+            message = result.get("msg", "批阅成功")
+            self.read_only_note.setText(str(message))
+            self.submitted.emit()
+            self.accept()
+            return
+
+        self.submit_button.setText("提交批阅")
+        self.submit_button.setEnabled(True)
+        self.read_only_note.setText("提交失败，答卷仍保留在当前窗口")
+        QMessageBox.warning(self, "提交批阅失败", str(result))
+
+    def reject(self):
+        if self._submission_worker is not None:
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._submission_worker is not None:
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _download_answer_attachment(self, object_id):
         attachment = self._answer_attachments.get(str(object_id))
@@ -710,7 +1213,9 @@ class ExamAnswerDialog(QDialog):
                 f"附件已下载：{os.path.basename(path)}"
             )
 
-    def _save_score_draft(self, key, question, score, ai_breakdown=None):
+    def _save_score_draft(
+        self, key, question, score, ai_breakdown=None, show_warning=True
+    ):
         metadata = {
             "exam_id": self._exam_id,
             "answer_id": self._answer_id,
@@ -728,9 +1233,19 @@ class ExamAnswerDialog(QDialog):
                 **metadata,
             )
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "保存失败", f"分数未能保存到本地：{exc}")
+            if show_warning:
+                QMessageBox.warning(
+                    self, "保存失败", f"分数未能保存到本地：{exc}"
+                )
             return False
         self._draft_scores[key] = score
+        score_input = getattr(
+            self, "question_navigation_score_inputs", {}
+        ).get(key)
+        if score_input is not None:
+            score_input.blockSignals(True)
+            score_input.setValue(score)
+            score_input.blockSignals(False)
         if ai_breakdown is not None:
             self._ai_breakdowns[key] = ai_breakdown
         else:
@@ -913,6 +1428,25 @@ class ExamAnswerDialog(QDialog):
         for label, group in self._navigation_group_summaries:
             label.setText(self._group_score_summary(group))
 
+    @staticmethod
+    def _create_ai_batch_icon():
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" '
+            'viewBox="0 0 24 24" fill="none" stroke="#ffffff" '
+            'stroke-width="1.8" stroke-linecap="round" '
+            'stroke-linejoin="round">'
+            '<path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"/>'
+            '<path d="m19 14 .9 2.1L22 17l-2.1.9L19 20l-.9-2.1L16 17l2.1-.9L19 14Z"/>'
+            '</svg>'
+        )
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(18, 18)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+
     def _build_question_navigation(self, content):
         self.navigation_scroll = QScrollArea()
         self.navigation_scroll.setObjectName("question_navigation_scroll")
@@ -926,9 +1460,26 @@ class ExamAnswerDialog(QDialog):
         panel_layout.setContentsMargins(4, 4, 4, 4)
         panel_layout.setSpacing(8)
 
+        title_row = QWidget()
+        title_layout = QHBoxLayout(title_row)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(6)
+
         title = QLabel("题目导航")
         title.setObjectName("question_navigation_title")
-        panel_layout.addWidget(title)
+        title_layout.addWidget(title, 1)
+        self.ai_batch_grade_button = QPushButton("AI一键评分")
+        self.ai_batch_grade_button.setObjectName("ai_batch_grade_button")
+        self.ai_batch_grade_button.setIcon(self._create_ai_batch_icon())
+        self.ai_batch_grade_button.setToolTip(
+            "依次为当前答卷的所有主观题评分，结果仅保存到本地草稿"
+        )
+        self.ai_batch_grade_button.setEnabled(bool(self._ai_questions))
+        self.ai_batch_grade_button.clicked.connect(
+            self._start_ai_batch_scoring
+        )
+        title_layout.addWidget(self.ai_batch_grade_button)
+        panel_layout.addWidget(title_row)
         self.question_navigation_buttons = {}
         self._navigation_group_summaries = []
 
@@ -1293,18 +1844,20 @@ class ExamAnswerDialog(QDialog):
                         if expanded:
                             ai_rationale = self._render_ai_breakdown(breakdown)
                     ai_controls += '</div>'
-                answer_has_text = bool(
-                    BeautifulSoup(
-                        question.student_answer_html or "",
-                        "html.parser",
-                    ).get_text(strip=True)
+                answer_fragment = BeautifulSoup(
+                    question.student_answer_html or "",
+                    "html.parser",
+                )
+                answer_has_content = bool(
+                    answer_fragment.get_text(strip=True)
+                    or answer_fragment.find("img")
                 )
                 empty_answer = (
                     "答案以附件提交" if question.attachments else "暂无作答"
                 )
                 student_answer = (
                     question.student_answer_html
-                    if answer_has_text else empty_answer
+                    if answer_has_content else empty_answer
                 )
                 if student_answer_class:
                     student_answer = (

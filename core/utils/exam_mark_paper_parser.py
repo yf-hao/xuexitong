@@ -4,7 +4,7 @@ import binascii
 from dataclasses import dataclass
 import json
 import re
-from urllib.parse import unquote
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from bs4 import Tag
 
@@ -55,8 +55,17 @@ class ExamQuestionGroup:
 
 
 @dataclass(frozen=True)
+class ExamMarkPaperSubmission:
+    action: str
+    fields: tuple[tuple[str, str], ...]
+    query_params: tuple[tuple[str, str], ...]
+    referer: str = ""
+
+
+@dataclass(frozen=True)
 class ExamMarkPaperContent:
     groups: tuple[ExamQuestionGroup, ...]
+    submission: ExamMarkPaperSubmission | None = None
 
     @property
     def questions(self):
@@ -71,10 +80,10 @@ _REMOVED_TAGS = {
     "button", "embed", "form", "iframe", "input", "object", "script",
     "select", "style", "textarea",
 }
-_MEDIA_TAGS = {"audio", "img", "svg", "video"}
+_MEDIA_TAGS = {"audio", "svg", "video"}
 _ALLOWED_TAGS = {
     "b", "blockquote", "br", "caption", "code", "dd", "del", "div",
-    "dl", "dt", "em", "h1", "h2", "h3", "h4", "hr", "i", "li",
+    "dl", "dt", "em", "h1", "h2", "h3", "h4", "hr", "i", "img", "li",
     "ol", "p", "pre", "s", "span", "strike", "strong", "sub", "sup",
     "table", "tbody", "td", "th", "thead", "tr", "u", "ul",
 }
@@ -92,6 +101,20 @@ def _safe_fragment(node):
     for child in list(fragment.find_all(True)):
         if child.name in _REMOVED_TAGS:
             child.decompose()
+        elif child.name == "img":
+            image_src = _validated_image_data_uri(child.get("src", ""))
+            if image_src is None:
+                child.replace_with("[附件或媒体内容]")
+                continue
+            image_attributes = {"src": image_src}
+            for dimension in ("width", "height"):
+                value = str(child.get(dimension, ""))
+                if value.isdecimal() and 0 < int(value) <= 4096:
+                    image_attributes[dimension] = value
+            alt_text = str(child.get("alt", ""))[:256]
+            if alt_text:
+                image_attributes["alt"] = alt_text
+            child.attrs = image_attributes
         elif child.name in _MEDIA_TAGS:
             child.replace_with("[附件或媒体内容]")
         elif child.name == "a":
@@ -107,6 +130,37 @@ def _safe_fragment(node):
 
     fragment.attrs = {}
     return "".join(str(child) for child in fragment.contents).strip()
+
+
+def _validated_image_data_uri(value):
+    match = re.fullmatch(
+        r"data:image/(png|jpeg|gif|webp|bmp);base64,([A-Za-z0-9+/]*={0,2})",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    if match is None or len(match.group(2)) > 11_184_812:
+        return None
+    try:
+        image_bytes = base64.b64decode(match.group(2), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if len(image_bytes) > 8 * 1024 * 1024:
+        return None
+
+    image_type = match.group(1).lower()
+    signatures = {
+        "png": image_bytes.startswith(b"\x89PNG\r\n\x1a\n"),
+        "jpeg": image_bytes.startswith(b"\xff\xd8\xff"),
+        "gif": image_bytes.startswith((b"GIF87a", b"GIF89a")),
+        "webp": (
+            image_bytes.startswith(b"RIFF")
+            and image_bytes[8:12] == b"WEBP"
+        ),
+        "bmp": image_bytes.startswith(b"BM"),
+    }
+    if not signatures[image_type]:
+        return None
+    return f"data:image/{image_type};base64,{match.group(2)}"
 
 
 def _question_score(question_node):
@@ -304,6 +358,84 @@ def _uniform_question_score(questions):
     return None
 
 
+def _submission_template(soup, referer=""):
+    form = soup.select_one("form#submitMarking")
+    if form is None:
+        form = soup.find(
+            "form", action=re.compile(r"/exam/test/submitmark(?:\?|$)")
+        )
+    if form is None:
+        return None
+
+    fields = []
+    for control in form.select("input[name], textarea[name], select[name]"):
+        name = str(control.get("name") or "")
+        if control.name == "input":
+            control_type = str(control.get("type") or "text").lower()
+            if control_type in {"button", "reset", "submit", "image"}:
+                continue
+            if control_type in {"checkbox", "radio"} and not control.has_attr("checked"):
+                continue
+            value = str(control.get("value", "on" if control_type in {
+                "checkbox", "radio",
+            } else ""))
+        elif control.name == "textarea":
+            value = control.get_text()
+        else:
+            options = control.select("option[selected]")
+            if not options:
+                options = control.select("option")[:1]
+            for option in options:
+                fields.append((name, str(option.get("value", option.get_text()))))
+            continue
+        fields.append((name, value))
+
+    action = str(form.get("action") or "")
+    query_params = parse_qsl(urlsplit(action).query, keep_blank_values=True)
+    query_values = dict(query_params)
+    query_field_names = {
+        "classId", "markStyle", "submitType", "sumScore",
+        "testUserRelationId",
+    }
+    for field_name in query_field_names:
+        for name, value in fields:
+            if name == field_name:
+                query_values[name] = value
+
+    page_option_names = (
+        "checkHiddenTitle", "checkHiddenAnswer",
+        "checkSubjectAnswerWordNum", "checkHiddenObjectQuestion",
+        "hideRetest", "sw", "sorttype", "sort", "updateScore",
+        "allowAnnotationRedoDownload", "from",
+    )
+    for name in page_option_names:
+        control = soup.find(id=name)
+        if control is not None:
+            query_values[name] = str(control.get("value", ""))
+    query_defaults = (
+        ("checkHiddenTitle", "0"),
+        ("checkHiddenAnswer", "0"),
+        ("checkSubjectAnswerWordNum", "0"),
+        ("checkHiddenObjectQuestion", "1"),
+        ("hideRetest", "false"),
+        ("sw", ""),
+        ("sorttype", "0"),
+        ("sort", ""),
+        ("updateScore", "1"),
+        ("allowAnnotationRedoDownload", "1"),
+        ("from", "list"),
+    )
+    for name, default in query_defaults:
+        query_values.setdefault(name, default)
+
+    return ExamMarkPaperSubmission(
+        action=action,
+        fields=tuple(fields),
+        query_params=tuple(query_values.items()),
+        referer=referer,
+    )
+
+
 def _group_title(group_number, question_type, questions, total_score):
     score_text = f"{total_score:.1f}" if total_score is not None else "未知"
     question_score = _uniform_question_score(questions)
@@ -332,10 +464,11 @@ def _add_per_question_score(title, questions):
     )
 
 
-def parse_exam_mark_paper(html):
+def parse_exam_mark_paper(html, referer=""):
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html or "", "lxml")
+    submission = _submission_template(soup, referer)
     question_nodes = soup.select(".questionWrap")
     if not question_nodes:
         raise ValueError("批阅页面中没有找到题目内容")
@@ -417,4 +550,4 @@ def parse_exam_mark_paper(html):
             total_score=total_score,
         ))
 
-    return ExamMarkPaperContent(tuple(groups))
+    return ExamMarkPaperContent(tuple(groups), submission=submission)

@@ -110,6 +110,75 @@ class AIExamScoreResponseTests(unittest.TestCase):
         log_warning.assert_not_called()
         response.close.assert_called_once()
 
+    def test_scoring_request_sends_all_images_for_both_supported_endpoints(self):
+        image_data_uris = [
+            "data:image/png;base64,aW1hZ2UtMQ==",
+            "data:image/jpeg;base64,aW1hZ2UtMg==",
+        ]
+        scoring_data = {
+            "question": "识别图中答案并评分",
+            "maximum_score": 10,
+            "student_answer": "答案文字",
+            "student_answer_images": image_data_uris,
+        }
+        reply = (
+            '{"score": 10, "earned_points": [{"item":"正确",'
+            '"points":10,"evidence":"文字和图片作答完整"}],'
+            '"lost_points":[],"summary":"作答完整。"}'
+        )
+
+        for endpoint_type in ("chat_completions", "responses"):
+            with self.subTest(endpoint_type=endpoint_type):
+                service = DiscreteMathAIService.__new__(DiscreteMathAIService)
+                service.api_key = "test-key"
+                service.base_url = "https://example.test/v1"
+                service.model = "vision-model"
+                service.endpoint_type = endpoint_type
+                response = Mock()
+                response.status_code = 200
+                if endpoint_type == "responses":
+                    response.json.return_value = {"output_text": reply}
+                else:
+                    response.json.return_value = {
+                        "choices": [{"message": {"content": reply}}],
+                    }
+
+                with patch(
+                    "core.apis.ai_service.requests.post", return_value=response
+                ) as post:
+                    result = service.generate_exam_score(scoring_data)
+
+                self.assertEqual(result["score"], 10)
+                payload = post.call_args.kwargs["json"]
+                if endpoint_type == "responses":
+                    user_content = payload["input"][1]["content"]
+                    images = [
+                        item["image_url"]
+                        for item in user_content
+                        if item["type"] == "input_image"
+                    ]
+                    text_item = next(
+                        item for item in user_content
+                        if item["type"] == "input_text"
+                    )
+                    prompt_text = text_item["text"]
+                else:
+                    user_content = payload["messages"][1]["content"]
+                    images = [
+                        item["image_url"]["url"]
+                        for item in user_content
+                        if item["type"] == "image_url"
+                    ]
+                    text_item = next(
+                        item for item in user_content if item["type"] == "text"
+                    )
+                    prompt_text = text_item["text"]
+
+                self.assertEqual(images, image_data_uris)
+                self.assertIn("答案文字", prompt_text)
+                self.assertNotIn(image_data_uris[0], prompt_text)
+                response.close.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
