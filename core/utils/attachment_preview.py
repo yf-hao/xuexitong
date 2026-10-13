@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 import mammoth
 import markdown
 import nh3
@@ -14,6 +15,7 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_for_filename
 from pygments.token import STANDARD_TYPES
 from pygments.util import ClassNotFound
+from core.utils.image_utils import validated_image_data_uri
 
 
 MAX_PREVIEW_SIZE = 20 * 1024 * 1024
@@ -192,3 +194,32 @@ def extract_attachment_text(file_path):
     if not text.strip():
         raise ValueError(f"附件 {path.name} 中没有可用于评分的文本")
     return text.strip()
+
+
+def extract_attachment_scoring_content(file_path):
+    path = Path(file_path)
+    if path.suffix.lower() != ".docx":
+        return extract_attachment_text(path), ()
+    if path.stat().st_size > MAX_PREVIEW_SIZE:
+        raise ValueError("文件超过 20 MB，暂不支持 AI 评分")
+
+    with path.open("rb") as document_file:
+        result = mammoth.convert_to_html(
+            document_file,
+            convert_image=mammoth.images.img_element(_docx_image),
+        )
+    document = BeautifulSoup(result.value, "html.parser")
+    image_data_uris = []
+    for image_index, image in enumerate(document.find_all("img"), 1):
+        image_data_uri = validated_image_data_uri(image.get("src", ""))
+        if image_data_uri is None:
+            raise ValueError(
+                f"附件 {path.name} 的第 {image_index} 张图片格式不受支持或超过 8 MB"
+            )
+        image_data_uris.append(image_data_uri)
+        image.replace_with(f"[图片 {image_index}]")
+
+    text = document.get_text("\n", strip=True)
+    if not text and not image_data_uris:
+        raise ValueError(f"附件 {path.name} 中没有可用于评分的文本或图片")
+    return text, tuple(image_data_uris)

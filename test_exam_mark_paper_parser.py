@@ -3,7 +3,9 @@ import json
 import unittest
 from urllib.parse import quote
 
-from core.utils.exam_mark_paper_parser import parse_exam_mark_paper
+from core.utils.exam_mark_paper_parser import (
+    parse_exam_mark_paper, parse_exam_question_mark_paper,
+)
 
 
 class ExamMarkPaperParserTests(unittest.TestCase):
@@ -45,7 +47,6 @@ class ExamMarkPaperParserTests(unittest.TestCase):
           "4": "graded",
           "5": "pending",
         })
-
     def test_objective_student_answer_excludes_source_labels_and_score_controls(self):
         html = """
         <div class="questionWrap" name="单选题">
@@ -330,6 +331,48 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "没有找到题目内容"):
             parse_exam_mark_paper("<html><body>empty</body></html>")
 
+
+    def test_parses_question_mark_page_into_reusable_answer_content(self):
+        html = """
+        <form id="submitMarking"
+          action="/mooc2-ans/exam/test/submit-markquestion?clazzid=class-1&amp;id=exam-1&amp;answerid=answer-1&amp;qid=q1">
+          <input name="answerid" value="answer-1">
+          <input name="qid" id="qid" value="q1">
+          <input id="fullScoreq1" value="33.0">
+          <input name="scoreq1" value="">
+          <textarea name="teacherContentq1"></textarea>
+        </form>
+        <div class="changeTimu"><span class="timuNum">第1题</span></div>
+        <div class="stem">1.<span>(简答题，33.0分)</span>
+          <div class="hiddenTitle"><p>实现学生信息录入与查询。</p></div>
+        </div>
+        <div class="infoHead"><h2>张同学 <span class="markStatus">待批阅</span></h2>
+          <span class="xuehao">s001</span></div>
+        <div id="stuAnswer_q1"><div class="answerCon stuAnswerWords">
+          <p>学生答案内容</p>
+        </div></div>
+        <div id="correctanswer_q1"></div>
+        """
+
+        page = parse_exam_question_mark_paper(
+            html, referer="https://example.test/markquestionnew"
+        )
+
+        self.assertEqual(page.student_name, "张同学")
+        self.assertEqual(page.student_id, "s001")
+        self.assertEqual(page.answer_id, "answer-1")
+        question = page.content.questions[0]
+        self.assertEqual(question.question_id, "q1")
+        self.assertEqual(question.number, "1")
+        self.assertEqual(question.question_type, "简答题")
+        self.assertEqual(question.score, 33.0)
+        self.assertIn("实现学生信息录入与查询", question.stem_html)
+        self.assertIn("学生答案内容", question.student_answer_html)
+        self.assertEqual(
+            page.content.submission.action.split("?", 1)[0],
+            "/mooc2-ans/exam/test/submit-markquestion",
+        )
+        self.assertIn(("scoreq1", ""), page.content.submission.fields)
 
 if __name__ == "__main__":
     unittest.main()

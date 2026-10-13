@@ -4,6 +4,7 @@ import json
 import math
 import os
 from html import escape
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from PyQt6.QtCore import QByteArray, QSettings, QThread, QTimer, Qt, QUrl, pyqtSignal
@@ -23,10 +24,11 @@ from core.apis.exam_api import (
 )
 from core.apis.ai_service import DiscreteMathAIService
 from core.utils.attachment_preview import (
-    UnsupportedAttachmentPreviewError, extract_attachment_text,
+    UnsupportedAttachmentPreviewError, extract_attachment_scoring_content,
     render_attachment_preview,
 )
 from core.utils.exam_mark_paper_parser import ExamMarkPaperContent
+from core.utils.image_utils import validated_image_data_uri
 from core.utils.exam_score_drafts import (
     ExamScoreDraftStore, distribute_group_score,
 )
@@ -38,19 +40,10 @@ from ui.theme import (
 
 def _student_answer_image_data_uris(answer_html):
     answer_soup = BeautifulSoup(answer_html or "", "html.parser")
-    allowed_prefixes = (
-        "data:image/png;base64,",
-        "data:image/jpeg;base64,",
-        "data:image/gif;base64,",
-        "data:image/webp;base64,",
-        "data:image/bmp;base64,",
-    )
     return [
-        source
+        image_data_uri
         for image in answer_soup.find_all("img")
-        if (source := str(image.get("src") or "").strip()).startswith(
-            allowed_prefixes
-        )
+        if (image_data_uri := validated_image_data_uri(image.get("src", "")))
     ]
 
 
@@ -206,6 +199,15 @@ class _ExamAIScoringWorker(QThread):
     def run(self):
         try:
             attachment_texts = []
+            answer_images = [
+                {
+                    "data_uri": image_data_uri,
+                    "context": f"答卷中的图片 {image_index}",
+                }
+                for image_index, image_data_uri in enumerate(
+                    self.scoring_data.get("student_answer_images") or [], 1
+                )
+            ]
             total_chars = 0
             for attachment in self.attachments:
                 if self.session is None:
@@ -220,10 +222,22 @@ class _ExamAIScoringWorker(QThread):
                     download_exam_attachment(
                         self.session, attachment.object_id, cache_path
                     )
-                text = extract_attachment_text(cache_path)
+                text, image_data_uris = extract_attachment_scoring_content(
+                    cache_path
+                )
                 total_chars += len(text)
                 if total_chars > self.MAX_ATTACHMENT_TEXT_CHARS:
                     raise ValueError("附件文本总量超过 100,000 字符，无法进行 AI 评分")
+                for image_index, image_data_uri in enumerate(
+                    image_data_uris, 1
+                ):
+                    answer_images.append({
+                        "data_uri": image_data_uri,
+                        "context": (
+                            f"附件 {attachment.filename} 中的图片 {image_index}，"
+                            f"对应正文标记 [图片 {image_index}]"
+                        ),
+                    })
                 attachment_texts.append({
                     "filename": attachment.filename,
                     "text": text,
@@ -231,6 +245,7 @@ class _ExamAIScoringWorker(QThread):
 
             scoring_data = dict(self.scoring_data)
             scoring_data["student_attachments"] = attachment_texts
+            scoring_data["student_answer_images"] = answer_images
             result = DiscreteMathAIService().generate_exam_score(scoring_data)
             self.completed.emit(self.question_key, True, result)
         except Exception as exc:
@@ -930,6 +945,11 @@ class ExamAnswerDialog(QDialog):
             raise ValueError("答卷中没有可提交的题目")
 
         form_fields = list(submission.fields)
+        if urlsplit(submission.action).path.endswith("/submit-markquestion"):
+            return self._build_question_submission_payload(
+                submission, form_fields
+            )
+
         original_values = dict(form_fields)
         required_globals = (
             "testUserRelationId", "testPaperId", "courseId", "classId",
@@ -1011,6 +1031,60 @@ class ExamAnswerDialog(QDialog):
         return (
             submission.action,
             tuple(query_values.items()),
+            tuple(form_fields),
+            submission.referer,
+        )
+
+    def _build_question_submission_payload(self, submission, form_fields):
+        if len(self._content.questions) != 1:
+            raise ValueError("按题批阅页面应只包含当前题目")
+        question = self._content.questions[0]
+        question_id = str(question.question_id or "")
+        if not question_id:
+            raise ValueError("当前题目缺少题目 ID")
+
+        original_values = dict(form_fields)
+        score_field = f"score{question_id}"
+        if score_field not in original_values:
+            raise ValueError("按题批阅表单缺少当前题目的分数字段")
+        score = self._draft_scores.get(
+            self._score_draft_key(question), question.earned_score
+        )
+        if score is None:
+            try:
+                score = float(original_values[score_field])
+            except (TypeError, ValueError):
+                raise ValueError("当前题目尚无有效得分，不能提交") from None
+
+        score = float(score)
+        maximum_score = question.score
+        if maximum_score is None or not math.isfinite(maximum_score):
+            raise ValueError("当前题目缺少有效满分")
+        if (
+            not math.isfinite(score)
+            or score < 0
+            or score > maximum_score + 1e-6
+        ):
+            raise ValueError(
+                f"当前题目得分超出有效范围 0–{maximum_score:g}"
+            )
+
+        form_fields = self._set_submission_field(
+            form_fields, score_field, f"{score:g}", required=True
+        )
+        breakdown = self._ai_breakdowns.get(self._score_draft_key(question))
+        if breakdown is not None:
+            teacher_content_field = f"teacherContent{question_id}"
+            form_fields = self._set_submission_field(
+                form_fields,
+                teacher_content_field,
+                self._ai_teacher_content(breakdown),
+                required=True,
+            )
+
+        return (
+            submission.action,
+            submission.query_params,
             tuple(form_fields),
             submission.referer,
         )
@@ -1912,7 +1986,7 @@ class ExamAnswerDialog(QDialog):
                         'colspan="3">'
                         f'<img class="student-avatar" src="{avatar_uri}" '
                         'width="22" height="22" align="middle"/> '
-                        '<b>学生答案：</b><br>'
+                        '<b>学生答案：</b>&nbsp;'
                         f'{student_answer}</td></tr>'
                     )
                 if question.attachments:

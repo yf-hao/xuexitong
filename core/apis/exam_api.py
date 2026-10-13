@@ -18,6 +18,9 @@ from core.config import DATA_DIR
 EXAM_REVIEW_LIST_URL = (
     "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/markresult-new"
 )
+EXAM_SUBQUESTIONS_URL = (
+    "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/subquestions"
+)
 EXAM_RECEIVE_IP_URL = (
     "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/answers-receiveip"
 )
@@ -26,6 +29,9 @@ EXAM_MARK_PAPER_URL = (
 )
 EXAM_SUBMIT_MARK_URL = (
     "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/submitmark"
+)
+EXAM_SUBMIT_QUESTION_MARK_URL = (
+    "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/submit-markquestion"
 )
 EXAM_ATTACHMENT_STATUS_URL = (
     "https://mooc2-gray.chaoxing.com/ananas/status"
@@ -242,6 +248,156 @@ class ExamReviewPage:
     page_num: int
     page_size: int
     total_pages: int
+
+
+def fetch_exam_review_questions(session, context: ExamReviewContext):
+    if not context.course_id or not context.class_id or not context.cpi or not context.exam_id:
+        raise ValueError("课程、班级或考试参数缺失")
+
+    response = session.post(
+        EXAM_SUBQUESTIONS_URL,
+        data={
+            "courseid": context.course_id,
+            "clazzid": context.class_id,
+            "cpi": context.cpi,
+            "ut": "",
+            "id": context.exam_id,
+            "start": "0",
+            "markType": "0",
+            "groupIds": "",
+        },
+        headers={
+            "Accept": "*/*",
+            "Accept-Language": (
+                "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5"
+            ),
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Origin": "https://mooc2-gray.chaoxing.com",
+            "Pragma": "no-cache",
+            "Referer": context.marklist_url,
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/154.0.0.0 Safari/537.36"
+            ),
+            "X-Requested-With": "XMLHttpRequest",
+            "sec-ch-ua": (
+                '"Chromium";v="154", "Google Chrome";v="154", '
+                '"Not A(Brand";v="99"'
+            ),
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+        },
+        timeout=20,
+    )
+    if response.status_code == 403:
+        raise RuntimeError(
+            "按题批阅接口返回 HTTP 403：请确认登录状态和考试批阅权限"
+        )
+    response.raise_for_status()
+    response_url = str(getattr(response, "url", "") or "").lower()
+    if "passport2.chaoxing.com" in response_url:
+        raise RuntimeError("登录状态已失效，请重新登录")
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    questions = []
+    for row in soup.select("ul.dataBody_td"):
+        cells = row.find_all("li", recursive=False)
+        if len(cells) < 5:
+            continue
+
+        action = cells[4].select_one("a[onclick]")
+        onclick = str(action.get("onclick", "")) if action else ""
+        match = re.search(r"toMarkPaper\(\s*(['\"])(.*?)\1\s*\)", onclick)
+        mark_url = ""
+        question_id = ""
+        if match:
+            candidate_url = urljoin(EXAM_SUBQUESTIONS_URL, unescape(match.group(2)))
+            candidate = urlsplit(candidate_url)
+            expected = urlsplit(EXAM_SUBQUESTIONS_URL)
+            if (
+                candidate.scheme == expected.scheme
+                and candidate.netloc == expected.netloc
+                and candidate.path == (
+                    "/mooc2-ans/exam/test/markquestionnew"
+                )
+            ):
+                mark_url = candidate_url
+                question_id = dict(parse_qsl(urlsplit(mark_url).query)).get(
+                    "qid", ""
+                )
+
+        questions.append({
+            "question_type": cells[0].get_text(" ", strip=True),
+            "number": cells[1].get_text(" ", strip=True),
+            "content": cells[2].get_text(" ", strip=True),
+            "maximum_score": cells[3].get_text(" ", strip=True),
+            "question_id": question_id,
+            "mark_url": mark_url,
+        })
+    return questions
+
+
+def fetch_exam_question_mark_paper(session, context, mark_url):
+    if session is None:
+        raise ValueError("当前没有可用的学习通登录会话")
+    target_url = urljoin(EXAM_SUBQUESTIONS_URL, str(mark_url or ""))
+    target = urlsplit(target_url)
+    expected = urlsplit(EXAM_SUBQUESTIONS_URL)
+    if (
+        target.scheme != expected.scheme
+        or target.netloc != expected.netloc
+        or target.path != "/mooc2-ans/exam/test/markquestionnew"
+    ):
+        raise ValueError("题目批阅链接不是受信任的学习通页面")
+
+    response = session.get(
+        target_url,
+        headers={
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,image/apng,*/*;q=0.8,"
+                "application/signed-exchange;v=b3;q=0.7"
+            ),
+            "Accept-Language": (
+                "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,ckb;q=0.6,zh-TW;q=0.5"
+            ),
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": context.marklist_url,
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/154.0.0.0 Safari/537.36"
+            ),
+            "sec-ch-ua": (
+                '"Chromium";v="154", "Google Chrome";v="154", '
+                '"Not A(Brand";v="99"'
+            ),
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+        },
+        timeout=20,
+    )
+    if response.status_code == 403:
+        raise RuntimeError(
+            "按题批阅页面返回 HTTP 403：请确认登录状态和考试批阅权限"
+        )
+    response.raise_for_status()
+    response_url = str(getattr(response, "url", "") or "").lower()
+    if "passport2.chaoxing.com" in response_url:
+        raise RuntimeError("登录状态已失效，请重新登录")
+    return _embed_exam_answer_images(session, response.text, target_url)
 
 
 def fetch_exam_review_page(
@@ -495,16 +651,21 @@ def submit_exam_mark(session, action, query_params, form_fields, referer=""):
     target_url = urljoin(EXAM_MARK_PAPER_URL, str(action))
     target = urlsplit(target_url)
     expected = urlsplit(EXAM_SUBMIT_MARK_URL)
+    allowed_submit_paths = {
+        urlsplit(EXAM_SUBMIT_MARK_URL).path,
+        urlsplit(EXAM_SUBMIT_QUESTION_MARK_URL).path,
+    }
     if (
         target.scheme != expected.scheme
         or target.netloc != expected.netloc
-        or target.path != expected.path
+        or target.path not in allowed_submit_paths
     ):
         raise ValueError("批阅表单提交地址不是受信任的学习通接口")
     merged_query_params = dict(
         parse_qsl(target.query, keep_blank_values=True)
     )
     merged_query_params.update(dict(query_params))
+    submit_url = urlunsplit((target.scheme, target.netloc, target.path, "", ""))
 
     headers = {
         "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -520,7 +681,7 @@ def submit_exam_mark(session, action, query_params, form_fields, referer=""):
         "X-Requested-With": "XMLHttpRequest",
     }
     response = session.post(
-        EXAM_SUBMIT_MARK_URL,
+        submit_url,
         params=list(merged_query_params.items()),
         data=list(form_fields),
         headers=headers,

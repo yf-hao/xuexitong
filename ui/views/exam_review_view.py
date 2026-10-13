@@ -9,9 +9,12 @@ from PyQt6.QtWidgets import (
 
 from core.apis.exam_api import (
     ExamReviewContext, exam_mark_paper_referer, fetch_exam_mark_paper,
-    fetch_exam_review_page,
+    fetch_exam_question_mark_paper, fetch_exam_review_page,
+    fetch_exam_review_questions,
 )
-from core.utils.exam_mark_paper_parser import parse_exam_mark_paper
+from core.utils.exam_mark_paper_parser import (
+    parse_exam_mark_paper, parse_exam_question_mark_paper,
+)
 from ui.dialogs.exam_answer_dialog import ExamAnswerDialog
 from ui.dialogs.exam_ip_analysis_dialog import ExamIpAnalysisDialog
 from ui.theme import (
@@ -47,6 +50,24 @@ class ExamReviewLoadWorker(QThread):
             self.failed.emit(self.request_id, str(exc))
 
 
+class ExamQuestionLoadWorker(QThread):
+    loaded = pyqtSignal(int, object)
+    failed = pyqtSignal(int, str)
+
+    def __init__(self, session, context, request_id, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.context = context
+        self.request_id = request_id
+
+    def run(self):
+        try:
+            questions = fetch_exam_review_questions(self.session, self.context)
+            self.loaded.emit(self.request_id, questions)
+        except Exception as exc:
+            self.failed.emit(self.request_id, str(exc))
+
+
 class MarkPaperWorker(QThread):
     loaded = pyqtSignal(str, object)
     failed = pyqtSignal(str, str)
@@ -73,6 +94,30 @@ class MarkPaperWorker(QThread):
             self.failed.emit(self.record_id, str(exc))
 
 
+class QuestionMarkPaperWorker(QThread):
+    loaded = pyqtSignal(str, object)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, session, context, question_id, mark_url, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.context = context
+        self.question_id = str(question_id)
+        self.mark_url = mark_url
+
+    def run(self):
+        try:
+            html = fetch_exam_question_mark_paper(
+                self.session, self.context, self.mark_url
+            )
+            page = parse_exam_question_mark_paper(
+                html, referer=self.mark_url
+            )
+            self.loaded.emit(self.question_id, page)
+        except Exception as exc:
+            self.failed.emit(self.question_id, str(exc))
+
+
 class ContentWidthComboBox(QComboBox):
     def showPopup(self):
         self.view().setFixedWidth(self.width())
@@ -95,6 +140,8 @@ class ExamReviewView(QWidget):
         self.total_pages = 0
         self._request_id = 0
         self._workers = []
+        self._question_workers = []
+        self._question_markpaper_workers = []
         self._markpaper_workers = []
         self._active_answer_dialog = None
         self._state_totals = {0: None, 1: None}
@@ -247,12 +294,47 @@ class ExamReviewView(QWidget):
 
         self.question_panel = QWidget()
         question_layout = QVBoxLayout(self.question_panel)
-        question_layout.addStretch()
-        self.question_placeholder = QLabel("按题批阅界面已预留，接口暂未接入")
-        self.question_placeholder.setObjectName("review_placeholder")
-        self.question_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        question_layout.addWidget(self.question_placeholder)
-        question_layout.addStretch()
+        question_toolbar = QHBoxLayout()
+        self.question_status_label = QLabel("按题批阅列表尚未加载")
+        self.question_status_label.setObjectName("review_status")
+        question_toolbar.addWidget(self.question_status_label, 1)
+        self.question_refresh_button = QToolButton()
+        self.question_refresh_button.setObjectName("review_refresh_button")
+        self.question_refresh_button.setFixedSize(32, 30)
+        self.question_refresh_button.setIconSize(QSize(18, 18))
+        self.question_refresh_button.setAutoRaise(True)
+        self.question_refresh_button.setToolTip("刷新按题批阅列表")
+        self.question_refresh_button.setAccessibleName("刷新按题批阅列表")
+        self.question_refresh_button.clicked.connect(self._load_questions)
+        question_toolbar.addWidget(self.question_refresh_button)
+        question_layout.addLayout(question_toolbar)
+
+        self.questions_table = QTableWidget(0, 5)
+        self.questions_table.setHorizontalHeaderLabels(
+            ["题型", "题号", "题目内容", "满分", "操作"]
+        )
+        self.questions_table.verticalHeader().setVisible(False)
+        self.questions_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.questions_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.questions_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.questions_table.setWordWrap(True)
+        self.questions_table.setAlternatingRowColors(True)
+        question_header = self.questions_table.horizontalHeader()
+        question_header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        question_header.setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.questions_table.setColumnWidth(0, 120)
+        self.questions_table.setColumnWidth(1, 64)
+        self.questions_table.setColumnWidth(3, 64)
+        self.questions_table.setColumnWidth(4, 88)
+        question_layout.addWidget(self.questions_table, 1)
         self.question_panel.hide()
         layout.addWidget(self.question_panel, 1)
 
@@ -376,6 +458,7 @@ class ExamReviewView(QWidget):
 
     def _apply_runtime_theme(self, mode):
         self.refresh_button.setIcon(self._build_refresh_icon(mode))
+        self.question_refresh_button.setIcon(self._build_refresh_icon(mode))
         self._fit_page_size_combo()
 
     def _fit_page_size_combo(self):
@@ -450,6 +533,197 @@ class ExamReviewView(QWidget):
         self._request_id += 1
         self.person_panel.hide()
         self.question_panel.show()
+        self._load_questions()
+
+    def _load_questions(self):
+        if self.context is None or self.crawler is None:
+            return
+        self._request_id += 1
+        request_id = self._request_id
+        self.questions_table.setRowCount(0)
+        self.question_refresh_button.setEnabled(False)
+        self.question_status_label.setText("正在加载按题批阅列表…")
+
+        worker = ExamQuestionLoadWorker(
+            self.crawler.session, self.context, request_id, self
+        )
+        self._question_workers.append(worker)
+        worker.loaded.connect(self._on_questions_loaded)
+        worker.failed.connect(self._on_questions_failed)
+        worker.finished.connect(self._on_question_worker_finished)
+        worker.start()
+
+    def _on_questions_loaded(self, request_id, questions):
+        if request_id != self._request_id or self.mode != "question":
+            return
+        self.questions_table.setRowCount(len(questions))
+        for row, question in enumerate(questions):
+            values = (
+                question.get("question_type", ""),
+                question.get("number", ""),
+                question.get("content", ""),
+                question.get("maximum_score", ""),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value) if value not in (None, "") else "---")
+                item.setToolTip(item.text())
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignVCenter
+                    | (
+                        Qt.AlignmentFlag.AlignLeft
+                        if column in (0, 2)
+                        else Qt.AlignmentFlag.AlignCenter
+                    )
+                )
+                if column == 0:
+                    item.setData(
+                        Qt.ItemDataRole.UserRole,
+                        question.get("question_id", ""),
+                    )
+                self.questions_table.setItem(row, column, item)
+
+            mark_url = question.get("mark_url", "")
+            marking_button = QPushButton("批阅")
+            marking_button.setObjectName("review_mark_button")
+            marking_button.setMinimumHeight(36)
+            marking_button.setEnabled(bool(mark_url))
+            if mark_url:
+                marking_button.setToolTip("在应用内打开该题的批阅页面")
+                marking_button.clicked.connect(
+                    lambda checked=False, url=mark_url, item=question:
+                    self._request_question_mark_paper(item, url)
+                )
+            else:
+                marking_button.setToolTip("接口未返回有效的题目批阅链接")
+            self.questions_table.setCellWidget(row, 4, marking_button)
+            self.questions_table.setRowHeight(
+                row, max(self.questions_table.rowHeight(row), 44)
+            )
+
+        self.question_status_label.setText(
+            f"共 {len(questions)} 道题" if questions else "暂无题目"
+        )
+
+    def _on_questions_failed(self, request_id, message):
+        if request_id != self._request_id or self.mode != "question":
+            return
+        self.question_status_label.setText(f"按题批阅列表加载失败：{message}")
+
+    def _on_question_worker_finished(self):
+        worker = self.sender()
+        if worker in self._question_workers:
+            self._question_workers.remove(worker)
+            worker.deleteLater()
+        if worker is not None and worker.request_id == self._request_id:
+            self.question_refresh_button.setEnabled(True)
+
+    def _request_question_mark_paper(self, question, mark_url):
+        question_id = str(question.get("question_id") or "")
+        if not question_id or self.context is None or self.crawler is None:
+            return
+        button = self._find_question_mark_button(question_id)
+        if button is None or not button.isEnabled():
+            return
+
+        button.setEnabled(False)
+        self.question_status_label.setText(
+            f"正在加载第 {question.get('number', '')} 题的批阅页面…"
+        )
+        request_id = self._request_id
+        worker = QuestionMarkPaperWorker(
+            self.crawler.session,
+            self.context,
+            question_id,
+            mark_url,
+            self,
+        )
+        self._question_markpaper_workers.append(worker)
+        worker.loaded.connect(
+            lambda loaded_id, page, generation=request_id:
+            self._on_question_mark_paper_loaded(
+                generation, loaded_id, page
+            )
+        )
+        worker.failed.connect(
+            lambda failed_id, message, generation=request_id:
+            self._on_question_mark_paper_failed(
+                generation, failed_id, message
+            )
+        )
+        worker.finished.connect(self._on_question_mark_paper_worker_finished)
+        worker.start()
+
+    def _find_question_mark_button(self, question_id):
+        for row in range(self.questions_table.rowCount()):
+            item = self.questions_table.item(row, 0)
+            if (
+                item is not None
+                and str(item.data(Qt.ItemDataRole.UserRole)) == str(question_id)
+            ):
+                button = self.questions_table.cellWidget(row, 4)
+                if isinstance(button, QPushButton):
+                    return button
+        return None
+
+    def _on_question_mark_paper_loaded(self, request_id, question_id, page):
+        button = self._find_question_mark_button(question_id)
+        if button is not None:
+            button.setEnabled(True)
+        if request_id != self._request_id or self.mode != "question":
+            return
+
+        question_number = ""
+        for row in range(self.questions_table.rowCount()):
+            item = self.questions_table.item(row, 0)
+            if (
+                item is not None
+                and str(item.data(Qt.ItemDataRole.UserRole)) == str(question_id)
+            ):
+                number_item = self.questions_table.item(row, 1)
+                question_number = number_item.text() if number_item else ""
+                break
+        self.question_status_label.setText(
+            f"已加载第 {question_number} 题，学生："
+            f"{page.student_name or page.student_id or '未知'}"
+        )
+        dialog = ExamAnswerDialog(
+            self.context.exam_title,
+            page.student_name,
+            page.student_id,
+            page.content,
+            self,
+            exam_id=self.context.exam_id,
+            answer_id=page.answer_id or f"question-{question_id}",
+            session=self.crawler.session,
+        )
+        self._active_answer_dialog = dialog
+        dialog.finished.connect(
+            lambda _result, answer_dialog=dialog:
+            self._release_answer_dialog(answer_dialog)
+        )
+        dialog.submitted.connect(self._refresh_after_question_submission)
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dialog.show()
+
+    def _refresh_after_question_submission(self):
+        if self.mode == "question":
+            self._load_questions()
+
+    def _on_question_mark_paper_failed(self, request_id, question_id, message):
+        button = self._find_question_mark_button(question_id)
+        if button is not None:
+            button.setEnabled(True)
+        if request_id != self._request_id or self.mode != "question":
+            return
+        self.question_status_label.setText(
+            f"题目批阅页面请求失败：{message}"
+        )
+
+    def _on_question_mark_paper_worker_finished(self):
+        worker = self.sender()
+        if worker in self._question_markpaper_workers:
+            self._question_markpaper_workers.remove(worker)
+            worker.deleteLater()
 
     def _restore_page_size(self):
         settings = QSettings("HaoSoft", "XuexitongManager")

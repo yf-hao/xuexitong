@@ -1,9 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from core.utils.attachment_preview import (
+    extract_attachment_scoring_content,
     extract_attachment_text,
     render_attachment_preview,
 )
@@ -109,6 +112,32 @@ class AttachmentPreviewTests(unittest.TestCase):
         self.assertIn("DOCX preview text", extracted_text)
         self.assertEqual(result.title, "answer.docx")
         self.assertIsInstance(result.warnings, tuple)
+
+    def test_docx_scoring_extracts_text_and_embedded_images_together(self):
+        image_data_uri = (
+            "data:image/png;base64,"
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
+            "iZk9HQAAAABJRU5ErkJggg=="
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "answer.docx"
+            path.write_bytes(b"docx")
+            mammoth_result = SimpleNamespace(
+                value=(
+                    f"<p>前面的正文</p><img src=\"{image_data_uri}\">"
+                    "<p>后续正文</p>"
+                )
+            )
+            with patch(
+                "core.utils.attachment_preview.mammoth.convert_to_html",
+                return_value=mammoth_result,
+            ):
+                text, images = extract_attachment_scoring_content(path)
+
+        self.assertIn("前面的正文", text)
+        self.assertIn("[图片 1]", text)
+        self.assertIn("后续正文", text)
+        self.assertEqual(images, (image_data_uri,))
 
 
 if __name__ == "__main__":

@@ -3,13 +3,16 @@ import unittest
 import zlib
 
 from core.apis.exam_api import (
+    EXAM_SUBQUESTIONS_URL,
+    EXAM_SUBMIT_QUESTION_MARK_URL,
     ExamReviewContext,
     fetch_all_submitted_exam_records,
     fetch_exam_mark_paper,
+    fetch_exam_question_mark_paper,
     fetch_exam_review_page,
+    fetch_exam_review_questions,
     submit_exam_mark,
 )
-
 
 class FakeResponse:
     def __init__(self, payload):
@@ -66,6 +69,7 @@ class ExamReviewAPITests(unittest.TestCase):
         self.assertEqual(options["data"]["courseid"], "course-1")
         self.assertEqual(options["data"]["clazzid"], "class-1")
         self.assertEqual(options["data"]["id"], "exam-1")
+
         self.assertEqual(options["data"]["state"], "0")
         self.assertEqual(options["data"]["pages"], "2")
         self.assertEqual(options["data"]["size"], "50")
@@ -78,6 +82,56 @@ class ExamReviewAPITests(unittest.TestCase):
         self.assertEqual(page.class_size, 60)
         self.assertEqual(page.page_num, 2)
         self.assertEqual(page.records[0]["mark"], "未查看")
+
+    def test_fetches_and_parses_question_review_rows(self):
+        question_html = """
+        <ul class="dataBody_td">
+          <li>一、简答题</li><li>1</li>
+          <li class="contentblock"><p>学生信息录入与查询</p>&nbsp;</li>
+          <li>35</li>
+          <li><a onclick='toMarkPaper("/mooc2-ans/exam/test/markquestionnew?clazzid=class-1&amp;courseid=course-1&amp;ut=t&amp;cpi=cpi-1&amp;id=exam-1&amp;qid=q-1&amp;groupIds=")'>批阅</a></li>
+        </ul>
+        """
+
+        class HtmlResponse:
+            status_code = 200
+            url = EXAM_SUBQUESTIONS_URL
+            text = question_html
+
+            def raise_for_status(self):
+                pass
+
+        class PostSession:
+            def post(self, url, **kwargs):
+                self.url = url
+                self.options = kwargs
+                return HtmlResponse()
+
+        session = PostSession()
+        questions = fetch_exam_review_questions(session, self.context)
+
+        self.assertEqual(session.url, EXAM_SUBQUESTIONS_URL)
+        self.assertEqual(
+            session.options["data"],
+            {
+                "courseid": "course-1",
+                "clazzid": "class-1",
+                "cpi": "cpi-1",
+                "ut": "",
+                "id": "exam-1",
+                "start": "0",
+                "markType": "0",
+                "groupIds": "",
+            },
+        )
+        self.assertEqual(
+            session.options["headers"]["Referer"], self.context.marklist_url
+        )
+        self.assertEqual(questions[0]["number"], "1")
+        self.assertEqual(questions[0]["content"], "学生信息录入与查询")
+        self.assertEqual(questions[0]["maximum_score"], "35")
+        self.assertEqual(questions[0]["question_id"], "q-1")
+        self.assertTrue(questions[0]["mark_url"].endswith("qid=q-1&groupIds="))
 
     def test_first_page_matches_captured_form_defaults(self):
         session = FakeSession({
@@ -420,6 +474,76 @@ class ExamReviewAPITests(unittest.TestCase):
         self.assertEqual(len(external_session.calls), 2)
         self.assertNotIn("data:image/", page)
 
+
+    def test_fetches_question_mark_page_with_marklist_referer(self):
+        mark_url = (
+            "https://mooc2-gray.chaoxing.com/mooc2-ans/exam/test/"
+            "markquestionnew?clazzid=class-1&qid=q1"
+        )
+
+        class HtmlResponse:
+            status_code = 200
+            url = mark_url
+            text = "<html><body>question marking page</body></html>"
+
+            def raise_for_status(self):
+                pass
+
+        class GetSession:
+            def get(self, url, **kwargs):
+                self.url = url
+                self.options = kwargs
+                return HtmlResponse()
+
+        session = GetSession()
+        html = fetch_exam_question_mark_paper(
+            session, self.context, mark_url
+        )
+
+        self.assertIn("question marking page", html)
+        self.assertEqual(session.url, mark_url)
+        self.assertEqual(
+            session.options["headers"]["Referer"], self.context.marklist_url
+        )
+        self.assertEqual(session.options["headers"]["Sec-Fetch-Mode"], "navigate")
+
+    def test_question_mark_page_rejects_untrusted_url(self):
+        class GetSession:
+            calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("untrusted URL must not be requested")
+
+        session = GetSession()
+        with self.assertRaisesRegex(ValueError, "受信任"):
+            fetch_exam_question_mark_paper(
+                session, self.context, "https://outside.invalid/markquestionnew"
+            )
+        self.assertEqual(session.calls, 0)
+
+    def test_submits_question_mark_form_to_its_trusted_endpoint(self):
+        session = FakeSession({"status": "success", "msg": "批阅成功"})
+
+        result = submit_exam_mark(
+            session,
+            "/mooc2-ans/exam/test/submit-markquestion?clazzid=class-1&answerid=answer-1&qid=q1",
+            [],
+            [("scoreq1", "28"), ("teacherContentq1", "AI 评分理由")],
+            referer="https://example.test/markquestionnew",
+        )
+
+        self.assertEqual(result["status"], "success")
+        url, options = session.calls[0]
+        self.assertEqual(url, EXAM_SUBMIT_QUESTION_MARK_URL)
+        self.assertEqual(
+            dict(options["params"]),
+            {"clazzid": "class-1", "answerid": "answer-1", "qid": "q1"},
+        )
+        self.assertEqual(
+            options["data"],
+            [("scoreq1", "28"), ("teacherContentq1", "AI 评分理由")],
+        )
 
 if __name__ == "__main__":
     unittest.main()

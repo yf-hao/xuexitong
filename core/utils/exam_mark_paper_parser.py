@@ -1,12 +1,12 @@
 from copy import deepcopy
 import base64
-import binascii
 from dataclasses import dataclass
 import json
 import re
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from bs4 import Tag
+from core.utils.image_utils import validated_image_data_uri
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,14 @@ class ExamMarkPaperContent:
         )
 
 
+@dataclass(frozen=True)
+class ExamQuestionMarkPaper:
+    content: ExamMarkPaperContent
+    student_name: str
+    student_id: str
+    answer_id: str
+
+
 _REMOVED_TAGS = {
     "button", "embed", "form", "iframe", "input", "object", "script",
     "select", "style", "textarea",
@@ -102,7 +110,7 @@ def _safe_fragment(node):
         if child.name in _REMOVED_TAGS:
             child.decompose()
         elif child.name == "img":
-            image_src = _validated_image_data_uri(child.get("src", ""))
+            image_src = validated_image_data_uri(child.get("src", ""))
             if image_src is None:
                 child.replace_with("[附件或媒体内容]")
                 continue
@@ -130,37 +138,6 @@ def _safe_fragment(node):
 
     fragment.attrs = {}
     return "".join(str(child) for child in fragment.contents).strip()
-
-
-def _validated_image_data_uri(value):
-    match = re.fullmatch(
-        r"data:image/(png|jpeg|gif|webp|bmp);base64,([A-Za-z0-9+/]*={0,2})",
-        str(value or ""),
-        flags=re.IGNORECASE,
-    )
-    if match is None or len(match.group(2)) > 11_184_812:
-        return None
-    try:
-        image_bytes = base64.b64decode(match.group(2), validate=True)
-    except (binascii.Error, ValueError):
-        return None
-    if len(image_bytes) > 8 * 1024 * 1024:
-        return None
-
-    image_type = match.group(1).lower()
-    signatures = {
-        "png": image_bytes.startswith(b"\x89PNG\r\n\x1a\n"),
-        "jpeg": image_bytes.startswith(b"\xff\xd8\xff"),
-        "gif": image_bytes.startswith((b"GIF87a", b"GIF89a")),
-        "webp": (
-            image_bytes.startswith(b"RIFF")
-            and image_bytes[8:12] == b"WEBP"
-        ),
-        "bmp": image_bytes.startswith(b"BM"),
-    }
-    if not signatures[image_type]:
-        return None
-    return f"data:image/{image_type};base64,{match.group(2)}"
 
 
 def _question_score(question_node):
@@ -362,7 +339,10 @@ def _submission_template(soup, referer=""):
     form = soup.select_one("form#submitMarking")
     if form is None:
         form = soup.find(
-            "form", action=re.compile(r"/exam/test/submitmark(?:\?|$)")
+            "form",
+            action=re.compile(
+                r"/exam/test/submit(?:-)?mark(?:question)?(?:\?|$)"
+            ),
         )
     if form is None:
         return None
@@ -551,3 +531,89 @@ def parse_exam_mark_paper(html, referer=""):
         ))
 
     return ExamMarkPaperContent(tuple(groups), submission=submission)
+
+
+def parse_exam_question_mark_paper(html, referer=""):
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html or "", "lxml")
+    form = soup.select_one("form#submitMarking")
+    if form is None:
+        raise ValueError("按题批阅页面缺少提交表单")
+
+    question_id_node = form.select_one("input#qid[name='qid']")
+    if question_id_node is None:
+        question_id_node = form.select_one("input[name='qid']")
+    question_id = str(question_id_node.get("value") or "") if question_id_node else ""
+    if not question_id:
+        raise ValueError("按题批阅页面缺少题目 ID")
+
+    source_stem = soup.select_one(".stem")
+    hidden_title = source_stem.select_one(".hiddenTitle") if source_stem else None
+    stem_text = source_stem.get_text(" ", strip=True) if source_stem else ""
+    question_type_match = re.search(
+        r"[（(]\s*([^，,()（）]+?题)\s*[，,]", stem_text
+    )
+    question_type = question_type_match.group(1) if question_type_match else "题目"
+    number_node = soup.select_one(".changeTimu .timuNum")
+    number_text = number_node.get_text(" ", strip=True) if number_node else stem_text
+    number_match = re.search(r"\d+", number_text)
+    question_number = number_match.group(0) if number_match else "1"
+
+    question_node = soup.new_tag(
+        "div",
+        attrs={
+            "class": "questionWrap",
+            "index": question_number,
+            "name": question_type,
+        },
+    )
+    stem_node = soup.new_tag(
+        "h3",
+        attrs={"class": "mark_name", "id": f"questionStem_{question_id}"},
+    )
+    if hidden_title is not None:
+        stem_node.append(deepcopy(hidden_title))
+    elif source_stem is not None:
+        stem_node.append(deepcopy(source_stem))
+    question_node.append(stem_node)
+
+    for control in form.select(
+        f"input#fullScore{question_id}, input[name='score{question_id}']"
+    ):
+        question_node.append(deepcopy(control))
+
+    answer_source = soup.select_one(
+        f"#stuAnswer_{question_id} .answerCon.stuAnswerWords"
+    )
+    if answer_source is not None:
+        answer_node = soup.new_tag("div", attrs={"class": "topicStudentAnswer"})
+        answer_node.append(deepcopy(answer_source))
+        question_node.append(answer_node)
+
+    correct_source = soup.select_one(f"#correctanswer_{question_id}")
+    if correct_source is not None:
+        correct_node = soup.new_tag("div", attrs={"class": "topicRightAnswer"})
+        correct_node.append(deepcopy(correct_source))
+        question_node.append(correct_node)
+
+    body = soup.body or soup
+    body.append(question_node)
+    content = parse_exam_mark_paper(str(soup), referer=referer)
+
+    name_node = soup.select_one(".infoHead h2")
+    if name_node is not None:
+        for status in name_node.select(".markStatus"):
+            status.decompose()
+    student_name = name_node.get_text(" ", strip=True) if name_node else ""
+    student_id_node = soup.select_one(".infoHead .xuehao")
+    student_id = student_id_node.get_text(" ", strip=True) if student_id_node else ""
+    answer_id_node = form.select_one("input[name='answerid']")
+    answer_id = str(answer_id_node.get("value") or "") if answer_id_node else ""
+
+    return ExamQuestionMarkPaper(
+        content=content,
+        student_name=student_name,
+        student_id=student_id,
+        answer_id=answer_id,
+    )

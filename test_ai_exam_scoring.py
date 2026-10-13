@@ -119,7 +119,13 @@ class AIExamScoreResponseTests(unittest.TestCase):
             "question": "识别图中答案并评分",
             "maximum_score": 10,
             "student_answer": "答案文字",
-            "student_answer_images": image_data_uris,
+            "student_answer_images": [
+                image_data_uris[0],
+                {
+                    "data_uri": image_data_uris[1],
+                    "context": "DOCX 图片 1，对应正文标记 [图片 1]",
+                },
+            ],
         }
         reply = (
             '{"score": 10, "earned_points": [{"item":"正确",'
@@ -157,11 +163,10 @@ class AIExamScoreResponseTests(unittest.TestCase):
                         for item in user_content
                         if item["type"] == "input_image"
                     ]
-                    text_item = next(
-                        item for item in user_content
+                    prompt_text = "\n".join(
+                        item["text"] for item in user_content
                         if item["type"] == "input_text"
                     )
-                    prompt_text = text_item["text"]
                 else:
                     user_content = payload["messages"][1]["content"]
                     images = [
@@ -169,13 +174,14 @@ class AIExamScoreResponseTests(unittest.TestCase):
                         for item in user_content
                         if item["type"] == "image_url"
                     ]
-                    text_item = next(
-                        item for item in user_content if item["type"] == "text"
+                    prompt_text = "\n".join(
+                        item["text"] for item in user_content
+                        if item["type"] == "text"
                     )
-                    prompt_text = text_item["text"]
 
                 self.assertEqual(images, image_data_uris)
                 self.assertIn("答案文字", prompt_text)
+                self.assertIn("对应正文标记 [图片 1]", prompt_text)
                 self.assertNotIn(image_data_uris[0], prompt_text)
                 response.close.assert_called_once()
 

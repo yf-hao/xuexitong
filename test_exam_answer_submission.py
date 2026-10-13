@@ -1,6 +1,8 @@
 import os
 import unittest
 import base64
+from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -9,9 +11,11 @@ from PyQt6.QtGui import QImage, QTextDocument
 from PyQt6.QtWidgets import QApplication, QDialog
 
 from core.apis.exam_api import EXAM_SUBMIT_MARK_URL
-from core.utils.exam_mark_paper_parser import parse_exam_mark_paper
+from core.utils.exam_mark_paper_parser import (
+    parse_exam_mark_paper, parse_exam_question_mark_paper,
+)
 from ui.dialogs.exam_answer_dialog import (
-    ExamAnswerDialog, _ExamAnswerTextBrowser,
+    ExamAnswerDialog, _ExamAnswerTextBrowser, _ExamAIScoringWorker,
     _student_answer_image_data_uris,
 )
 
@@ -206,8 +210,12 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
         _APP.processEvents()
 
     def test_scoring_image_extraction_keeps_all_embedded_images_in_order(self):
-        first_image = "data:image/png;base64,aW1hZ2UtMQ=="
-        second_image = "data:image/jpeg;base64,aW1hZ2UtMg=="
+        first_image = (
+            "data:image/png;base64,"
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
+            "iZk9HQAAAABJRU5ErkJggg=="
+        )
+        second_image = "data:image/jpeg;base64,/9j/ZmFrZQ=="
         answer_html = (
             f'<img src="{first_image}"><span>答案文字</span>'
             f'<img src="{second_image}">'
@@ -218,6 +226,113 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
             _student_answer_image_data_uris(answer_html),
             [first_image, second_image],
         )
+
+    def test_scoring_worker_passes_docx_images_with_body_marker_to_ai(self):
+        image_data_uri = "data:image/png;base64,aW1hZ2UtMQ=="
+        attachment = SimpleNamespace(
+            object_id="docx-1", filename="answer.docx"
+        )
+        worker = _ExamAIScoringWorker(
+            "question-1",
+            {
+                "question": "题目",
+                "maximum_score": 10,
+                "student_answer": "直接作答",
+                "student_answer_images": [],
+            },
+            (attachment,),
+            session=object(),
+        )
+        outcomes = []
+        worker.completed.connect(lambda *result: outcomes.append(result))
+        with (
+            patch(
+                "ui.dialogs.exam_answer_dialog.exam_attachment_cache_path",
+                return_value="cached-answer.docx",
+            ),
+            patch(
+                "ui.dialogs.exam_answer_dialog.os.path.isfile",
+                return_value=True,
+            ),
+            patch(
+                "ui.dialogs.exam_answer_dialog.os.path.getsize",
+                return_value=10,
+            ),
+            patch(
+                "ui.dialogs.exam_answer_dialog.extract_attachment_scoring_content",
+                return_value=("正文前 [图片 1] 正文后", (image_data_uri,)),
+            ),
+            patch(
+                "ui.dialogs.exam_answer_dialog.DiscreteMathAIService"
+            ) as ai_service_class,
+        ):
+            worker.run()
+
+        self.assertTrue(outcomes[0][1], outcomes[0][2])
+        scoring_data = (
+            ai_service_class.return_value.generate_exam_score.call_args.args[0]
+        )
+        self.assertEqual(
+            scoring_data["student_attachments"],
+            [{"filename": "answer.docx", "text": "正文前 [图片 1] 正文后"}],
+        )
+        self.assertEqual(
+            scoring_data["student_answer_images"],
+            [{
+                "data_uri": image_data_uri,
+                "context": "附件 answer.docx 中的图片 1，对应正文标记 [图片 1]",
+            }],
+        )
+    def test_question_mark_dialog_builds_question_specific_submit_payload(self):
+        html = """
+        <form id="submitMarking"
+          action="/mooc2-ans/exam/test/submit-markquestion?clazzid=class-1&amp;id=exam-1&amp;answerid=answer-1&amp;qid=q1">
+          <input name="answerid" value="answer-1">
+          <input name="qid" id="qid" value="q1">
+          <input id="fullScoreq1" value="33.0">
+          <input name="scoreq1" value="">
+          <textarea name="teacherContentq1"></textarea>
+        </form>
+        <div class="changeTimu"><span class="timuNum">第1题</span></div>
+        <div class="stem">1.<span>(简答题，33.0分)</span>
+          <div class="hiddenTitle"><p>题目内容</p></div>
+        </div>
+        <div id="stuAnswer_q1"><div class="answerCon stuAnswerWords">
+          <p>学生答案</p>
+        </div></div>
+        """
+        page = parse_exam_question_mark_paper(html)
+        dialog = ExamAnswerDialog(
+            "考试", page.student_name, page.student_id, page.content,
+            exam_id="exam-1", answer_id=page.answer_id, session=object(),
+        )
+        question = page.content.questions[0]
+        draft_key = dialog._score_draft_key(question)
+        dialog._draft_scores[draft_key] = 28
+        dialog._ai_breakdowns[draft_key] = {
+            "score": 28,
+            "earned_points": [{
+                "item": "关键步骤", "points": 28, "evidence": "推导完整",
+            }],
+            "lost_points": [{
+                "item": "遗漏说明", "points": 5, "evidence": "缺少说明",
+            }],
+            "summary": "基本正确",
+        }
+
+        action, query_params, form_fields, referer = (
+            dialog._build_submission_payload()
+        )
+        values = dict(form_fields)
+
+        self.assertIn("/submit-markquestion?", action)
+        self.assertEqual(dict(query_params)["qid"], "q1")
+        self.assertEqual(values["scoreq1"], "28")
+        self.assertIn("基本正确", values["teacherContentq1"])
+        self.assertNotIn("sumScore", values)
+        self.assertEqual(referer, "")
+        dialog.deleteLater()
+        _APP.processEvents()
 
 
 if __name__ == "__main__":
