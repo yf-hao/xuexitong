@@ -362,7 +362,7 @@ def _submission_template(soup, referer=""):
                 "checkbox", "radio",
             } else ""))
         elif control.name == "textarea":
-            value = control.get_text()
+            value = control.decode_contents(formatter=None)
         else:
             options = control.select("option[selected]")
             if not options:

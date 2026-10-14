@@ -3,8 +3,11 @@ import json
 import unittest
 from urllib.parse import quote
 
+from bs4 import BeautifulSoup
+
 from core.utils.exam_mark_paper_parser import (
-    parse_exam_mark_paper, parse_exam_question_mark_paper,
+    _submission_template, parse_exam_mark_paper,
+    parse_exam_question_mark_paper,
 )
 
 
@@ -237,6 +240,22 @@ class ExamMarkPaperParserTests(unittest.TestCase):
         self.assertEqual(query_params["checkHiddenObjectQuestion"], "1")
         self.assertEqual(query_params["sorttype"], "0")
         self.assertEqual(content.questions[0].question_id, "42")
+
+    def test_preserves_textarea_html_across_html_parser_builders(self):
+        html = (
+            '<form id="submitMarking">'
+            '<textarea name="teacherContent42"><p>原评语</p></textarea>'
+            "</form>"
+        )
+
+        for parser in ("lxml", "html.parser"):
+            with self.subTest(parser=parser):
+                soup = BeautifulSoup(html, parser)
+                submission = _submission_template(soup)
+                self.assertEqual(
+                    dict(submission.fields)["teacherContent42"],
+                    "<p>原评语</p>",
+                )
 
     def test_extracts_student_answer_attachments_from_cloud_iframes(self):
         metadata = quote(
