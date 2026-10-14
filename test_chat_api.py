@@ -18,6 +18,7 @@ from core.apis.question_bank_api import QuestionBankAPI
 from core.apis.teacher_api import TeacherAPI
 from core.communication_manager import CommunicationManager
 from core.group_members_cache import build_group_members_cache_path, resolve_student_from_group_cache
+from core.group_members_cloud_cache import prepare_group_members_cache
 from core.rendering.katex_snapshot import KaTeXSnapshotRenderer
 from models.attendance_record import AttendanceDetail
 from core.msync_client import (
@@ -2134,6 +2135,163 @@ class ChatAPITests(unittest.TestCase):
 
             self.assertEqual(resolved["status"], "duplicate")
             self.assertEqual(len(resolved["matches"]), 2)
+
+    def test_group_members_cache_downloads_existing_backup_before_fetching_members(self):
+        course_name = "离散数学（2025-2026-2）"
+        class_name = "4.03计科2班"
+        filename = f"{course_name}-{class_name}.json"
+        members = [{"name": "张三", "tuid": "1001", "puid": "3001"}]
+
+        class _CloudCacheCrawler:
+            def get_cloud_drive_base_info(self):
+                return {
+                    "success": True,
+                    "token": "token",
+                    "cloud_info": {
+                        "rootdir": "root",
+                        "currentPuid": "puid",
+                        "encstr": "enc",
+                        "_token": "short-token",
+                    },
+                }
+
+            def get_file_list(self, puid, enc, parent_id, token):
+                if parent_id == "root":
+                    items = [{"id": "backup-id", "name": "backup", "isfile": 0}]
+                else:
+                    items = [{"id": "file-id", "encryptedId": "encrypted", "name": filename, "isfile": 1}]
+                return {"success": True, "list": items}
+
+            def download_file(self, file_id, encrypted_id, puid, current_folder_id, token, save_path):
+                path = Path(save_path) / filename
+                path.write_text(json.dumps(members), encoding="utf-8")
+                return {"success": True, "file_path": str(path)}
+
+            def get_message_list(self):
+                raise AssertionError("cloud cache hit must not load IM sessions")
+
+            def get_group_members(self, room_id):
+                raise AssertionError("cloud cache hit must not fetch group members")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            with patch("core.group_members_cloud_cache.GROUP_MEMBERS_CACHE_DIR", cache_dir):
+                result = prepare_group_members_cache(_CloudCacheCrawler(), course_name, class_name)
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["source"], "cloud")
+            self.assertEqual(result["members"][0]["name"], "张三")
+            self.assertTrue((cache_dir / filename).is_file())
+
+    def test_group_members_cache_uses_local_cache_without_cloud_requests(self):
+        course_name = "离散数学（2025-2026-2）"
+        class_name = "4.03计科2班"
+        members = [{"name": "张三", "tuid": "1001"}]
+
+        class _LocalCacheCrawler:
+            def get_cloud_drive_base_info(self):
+                raise AssertionError("local cache hit must not access cloud drive")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            cache_path = build_group_members_cache_path(
+                course_name, class_name, cache_dir=cache_dir
+            )
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(members), encoding="utf-8")
+            with patch("core.group_members_cloud_cache.GROUP_MEMBERS_CACHE_DIR", cache_dir):
+                result = prepare_group_members_cache(_LocalCacheCrawler(), course_name, class_name)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["source"], "local")
+        self.assertEqual(result["members"][0]["name"], "张三")
+
+    def test_group_members_cache_does_not_fetch_members_when_cloud_access_fails(self):
+        class _UnavailableCloudCrawler:
+            def get_cloud_drive_base_info(self):
+                return {"success": False, "error": "云盘不可用"}
+
+            def get_group_members(self, room_id):
+                raise AssertionError("cloud failure must not be treated as a cache miss")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            with patch("core.group_members_cloud_cache.GROUP_MEMBERS_CACHE_DIR", cache_dir):
+                result = prepare_group_members_cache(
+                    _UnavailableCloudCrawler(), "离散数学", "4.03计科2班"
+                )
+
+        self.assertFalse(result["success"])
+        self.assertIn("云盘不可用", result["error"])
+
+    def test_group_members_cache_fetches_and_uploads_when_backup_file_is_missing(self):
+        course_name = "离散数学（2025-2026-2）"
+        class_name = "4.03计科2班"
+        members = [{"name": "张三", "tuid": "1001", "puid": "3001"}]
+
+        class _CloudCacheCrawler:
+            def __init__(self):
+                self.root_items = []
+                self.backup_items = []
+                self.created_backup = False
+                self.uploaded_payload = None
+
+            def get_cloud_drive_base_info(self):
+                return {
+                    "success": True,
+                    "token": "token",
+                    "cloud_info": {
+                        "rootdir": "root",
+                        "currentPuid": "puid",
+                        "encstr": "enc",
+                        "_token": "short-token",
+                    },
+                }
+
+            def get_file_list(self, puid, enc, parent_id, token):
+                items = self.root_items if parent_id == "root" else self.backup_items
+                return {"success": True, "list": items}
+
+            def create_cloud_drive_folder(self, parent_id, folder_name, token):
+                self.created_backup = True
+                self.root_items = [{"id": "backup-id", "name": folder_name, "isfile": 0}]
+                return {"success": True}
+
+            def get_message_list(self):
+                return [{
+                    "isGroup": 1,
+                    "courseName": course_name,
+                    "subtitle": class_name,
+                    "chatId": "room-1",
+                }]
+
+            def get_group_members(self, room_id):
+                self.asserted_room_id = room_id
+                return members
+
+            def generate_upload_url(self, puid, folder_id, _token, p_auth_token):
+                self.asserted_upload_folder = folder_id
+                return {"success": True, "upload_url": "/upload"}
+
+            def upload_file_to_cloud(self, upload_url, file_path, token):
+                self.uploaded_payload = json.loads(Path(file_path).read_text(encoding="utf-8"))
+                return {"success": True}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "group_members"
+            crawler = _CloudCacheCrawler()
+            with patch("core.group_members_cloud_cache.GROUP_MEMBERS_CACHE_DIR", cache_dir):
+                result = prepare_group_members_cache(crawler, course_name, class_name)
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["source"], "fetched")
+            self.assertTrue(crawler.created_backup)
+            self.assertEqual(crawler.asserted_room_id, "room-1")
+            self.assertEqual(crawler.asserted_upload_folder, "backup-id")
+            self.assertEqual(crawler.uploaded_payload[0]["name"], "张三")
+            self.assertTrue(
+                build_group_members_cache_path(course_name, class_name, cache_dir=cache_dir).is_file()
+            )
 
     def test_group_members_cache_normalization_keeps_puid_separate_from_student_id(self):
         from core.group_members_cache import _normalize_members

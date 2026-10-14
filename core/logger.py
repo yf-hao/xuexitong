@@ -1,10 +1,12 @@
-"""统一日志配置，输出到 ~/Library/Application Support/XuexitongManager/xuexitong.log"""
+"""统一日志配置，输出到用户数据目录下的 xuexitong.log（Windows: %APPDATA%\\XuexitongManager）"""
 import logging
 import os
 import sys
 from logging.handlers import RotatingFileHandler
 
-LOG_DIR = os.path.expanduser("~/Library/Application Support/XuexitongManager")
+from core.config import get_user_data_dir
+
+LOG_DIR = get_user_data_dir()
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOG_DIR, "xuexitong.log")

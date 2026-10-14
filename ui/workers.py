@@ -1209,6 +1209,53 @@ class GroupMembersBatchWorker(QThread):
         self.finished_signal.emit(total, success)
 
 
+class GroupMembersCachePrepareWorker(QThread):
+    """后台准备学情页发送消息所需的群成员缓存。"""
+
+    progress = pyqtSignal(str)
+    finished_signal = pyqtSignal(object)
+
+    def __init__(self, crawler, course_name: str, class_name: str, course_id="", class_id=""):
+        super().__init__()
+        self.crawler = crawler
+        self.course_id = str(course_id or "").strip()
+        self.class_id = str(class_id or "").strip()
+        self.course_name = str(course_name or "").strip()
+        self.class_name = str(class_name or "").strip()
+
+    def run(self):
+        from core.group_members_cloud_cache import prepare_group_members_cache
+
+        self.progress.emit("正在准备群成员缓存...")
+        result = prepare_group_members_cache(
+            self.crawler,
+            self.course_name,
+            self.class_name,
+            progress_callback=self.progress.emit,
+            course_id=self.course_id,
+            class_id=self.class_id,
+        )
+        self.finished_signal.emit(result)
+
+
+class GroupMembersCacheUploadWorker(QThread):
+    """后台将已保存的群成员缓存同步到云盘 backup。"""
+
+    finished_signal = pyqtSignal(object)
+
+    def __init__(self, crawler, cache_path):
+        super().__init__()
+        self.crawler = crawler
+        self.cache_path = cache_path
+
+    def run(self):
+        from core.group_members_cloud_cache import sync_group_members_cache_to_backup
+
+        self.finished_signal.emit(
+            sync_group_members_cache_to_backup(self.crawler, self.cache_path)
+        )
+
+
 class HomeworkWorker(QThread):
     """Worker thread to fetch homework stats (作业情况)."""
     

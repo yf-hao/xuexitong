@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QApplication, QProgressDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QProgressDialog
 from PyQt6.QtGui import QFont, QColor
 from core.group_members_cache import resolve_student_from_group_cache
 from ui.styles import STAT_BUTTON_HIGHLIGHT_STYLE, STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE
@@ -11,7 +12,8 @@ from ui.dialogs.student_message_dialog import StudentMessageDialog
 from ui.dialogs.homework_reminder_dialog import DEFAULT_HOMEWORK_REMINDER_TEMPLATE, HomeworkReminderDialog
 from ui.workers import (
     AttendanceWorker, AttendanceDetailWorker, AbsenceStatsWorker, HomeworkWorker,
-    HomeworkStatsExportWorker,
+    HomeworkStatsExportWorker, GroupMembersCachePrepareWorker,
+    GroupMembersCacheUploadWorker,
 )
 from models.activity import Activity
 from core.communication_manager import CommunicationManager
@@ -56,6 +58,9 @@ class StudyStatusView(QWidget):
         self._absence_stats_loading = False
         self._absence_dialog_open = False
         self.homework_export_worker = None
+        self._group_members_cache_worker = None
+        self._group_cache_upload_workers = {}
+        self._group_cache_upload_attempted = set()
         self.btn_homework_export = None
         self.btn_homework_reminder = None
         self._homework_reminder_template = DEFAULT_HOMEWORK_REMINDER_TEMPLATE
@@ -257,6 +262,103 @@ class StudyStatusView(QWidget):
             return
 
         resolved = self._resolve_student_message_target(student_name)
+        if resolved["status"] == "cache_missing":
+            if not self.current_course_name or not self.current_class_name:
+                QMessageBox.warning(self, "发送失败", "无法确定当前课程和班级，请重新选择后重试")
+                return
+            worker = getattr(self, "_group_members_cache_worker", None)
+            if worker is not None and worker.isRunning():
+                QMessageBox.information(self, "正在准备", "群成员缓存正在准备中，请稍候")
+                return
+
+            self.status_update.emit("正在准备群成员缓存...")
+            worker = GroupMembersCachePrepareWorker(
+                self.crawler,
+                self.current_course_name,
+                self.current_class_name,
+                self.current_course_id,
+                self.current_class_id,
+            )
+            self._group_members_cache_worker = worker
+            dialog = QProgressDialog("正在准备群成员缓存...", "", 0, 0, self)
+            dialog.setWindowTitle("准备群成员缓存")
+            dialog.setCancelButton(None)
+            dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            dialog.setMinimumDuration(0)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.setMinimumWidth(360)
+            dialog.show()
+            self._group_cache_progress_dialog = dialog
+            worker.progress.connect(self.status_update.emit)
+            worker.progress.connect(dialog.setLabelText)
+            worker.finished_signal.connect(
+                lambda result, current_stats=stats, name=student_name, sid=student_id:
+                    StudyStatusView._on_homework_message_cache_prepared(
+                        self, current_stats, name, sid, result
+                    )
+            )
+            worker.start()
+            return
+
+        StudyStatusView._show_homework_student_message_dialog(
+            self, stats, student_name, student_id, resolved
+        )
+        StudyStatusView._ensure_homework_group_cache_uploaded(self, resolved)
+
+    def _on_homework_message_cache_prepared(self, stats, student_name: str, student_id: str, result: dict):
+        self._group_members_cache_worker = None
+        dialog = getattr(self, "_group_cache_progress_dialog", None)
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+            self._group_cache_progress_dialog = None
+        if not isinstance(result, dict) or not result.get("success"):
+            error = result.get("error", "准备群成员缓存失败") if isinstance(result, dict) else "准备群成员缓存失败"
+            self.status_update.emit("群成员缓存准备失败")
+            QMessageBox.warning(self, "发送失败", error)
+            return
+
+        warning = str(result.get("warning") or "").strip()
+        if warning:
+            QMessageBox.warning(self, "缓存同步提示", warning)
+
+        resolved = self._resolve_student_message_target(student_name)
+        StudyStatusView._show_homework_student_message_dialog(
+            self, stats, student_name, student_id, resolved
+        )
+
+    def _ensure_homework_group_cache_uploaded(self, resolved: dict):
+        cache_path = resolved.get("cache_path") if isinstance(resolved, dict) else None
+        if not cache_path:
+            return
+        cache_name = str(cache_path)
+        attempted = getattr(self, "_group_cache_upload_attempted", None)
+        workers = getattr(self, "_group_cache_upload_workers", None)
+        if not isinstance(attempted, set) or not isinstance(workers, dict):
+            return
+        if cache_name in attempted or cache_name in workers:
+            return
+
+        attempted.add(cache_name)
+        worker = GroupMembersCacheUploadWorker(self.crawler, cache_path)
+        workers[cache_name] = worker
+        worker.finished_signal.connect(
+            lambda result, name=cache_name:
+                StudyStatusView._on_homework_group_cache_uploaded(self, name, result)
+        )
+        worker.finished.connect(lambda name=cache_name: workers.pop(name, None))
+        worker.start()
+
+    def _on_homework_group_cache_uploaded(self, cache_name: str, result: dict):
+        if isinstance(result, dict) and result.get("success"):
+            self.status_update.emit("群成员缓存已同步到云盘 backup")
+            return
+        error = result.get("error", "未知错误") if isinstance(result, dict) else str(result)
+        self._group_cache_upload_attempted.discard(cache_name)
+        self.status_update.emit(f"群成员缓存上传到云盘 backup 失败：{error}")
+
+    def _show_homework_student_message_dialog(self, stats, student_name: str, student_id: str, resolved: dict):
         if resolved["status"] == "cache_missing":
             cache_name = f"{self.current_course_name}-{self.current_class_name}".strip("-")
             QMessageBox.warning(self, "未找到群成员缓存", f"未找到群成员缓存文件：\n{cache_name}.json")
