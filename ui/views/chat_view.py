@@ -21,6 +21,7 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkRepl
 
 from core.config import DATA_DIR
 from core.group_members_cache import build_group_members_cache_path, load_group_members_cache, sanitize_group_cache_filename
+from core.utils.image_utils import validated_image_data_uri
 from ui.workers import ChatMessageListWorker, ChatAvatarProfileWorker, ChatHistoryWorker, ChatGroupMembersWorker, GroupMembersBatchWorker, AIChatWorker
 from core.logger import get_logger
 from ui.theme import apply_theme_stylesheet, bind_theme_tree
@@ -486,7 +487,9 @@ class ChatView(QWidget):
         self.ai_draft_btn = QPushButton("🤖 AI 拟答")
         self.ai_draft_btn.setObjectName("ai_draft_btn")
         self.ai_draft_btn.setEnabled(False)
-        self.ai_draft_btn.setToolTip("根据学生最后一条消息，调用大模型生成答疑草稿")
+        self.ai_draft_btn.setToolTip(
+            "根据学生最后一条消息（支持图片）生成答疑草稿；图片分析需要视觉模型"
+        )
         self.ai_draft_btn.clicked.connect(self._on_ai_draft_requested)
         input_layout.addWidget(self.ai_draft_btn)
 
@@ -2039,6 +2042,19 @@ class ChatView(QWidget):
         url = content[6:].strip()
         return url if url.startswith(("http://", "https://")) else ""
 
+    @staticmethod
+    def _image_message_data_uri(message: dict):
+        image_html = str(message.get("image_html") or "")
+        source_marker = 'src="'
+        source_start = image_html.find(source_marker)
+        if source_start < 0:
+            return None
+        source_start += len(source_marker)
+        source_end = image_html.find('"', source_start)
+        if source_end < 0:
+            return None
+        return validated_image_data_uri(image_html[source_start:source_end])
+
     def _load_message_image(self, conversation_key: str, message: dict):
         url = ChatView._image_message_url(message.get("content", ""))
         if not url:
@@ -3206,9 +3222,41 @@ class ChatView(QWidget):
         """教师点击「AI 拟答」按钮，异步调用大模型生成答疑草稿"""
         # 首先尝试获取老师在输入框中主动输入的提示词
         question = self.msg_input.text().strip()
+        image_data_uris = []
+        conversation_key = self._conversation_key()
+        messages = sorted(
+            self._message_cache.get(conversation_key, []) or [],
+            key=self._message_sort_key,
+            reverse=True,
+        )
+        latest_student_message = next(
+            (message for message in messages if not message.get("is_self")),
+            None,
+        )
+        if latest_student_message:
+            image_url = ChatView._image_message_url(
+                latest_student_message.get("content", "")
+            )
+            image_data_uri = ChatView._image_message_data_uri(latest_student_message)
+            if image_data_uri:
+                image_data_uris.append(image_data_uri)
+            elif image_url:
+                if not latest_student_message.get("image_html"):
+                    ChatView._load_message_image(
+                        self, conversation_key, latest_student_message
+                    )
+                    message = "学生图片仍在加载，请稍后再次点击「AI 拟答」。"
+                else:
+                    message = "学生图片格式不受支持或超过 8 MB，无法用于 AI 拟答。"
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "AI 拟答提示", message)
+                return
+
         # 如果没有主动输入，则默认获取学生最后一条消息
         if not question:
             question = self._get_last_student_message()
+        if ChatView._image_message_url(question):
+            question = "请根据学生发送的图片识别题目内容，并给出详细、易懂的解答。"
             
         if not question:
             from PyQt6.QtWidgets import QMessageBox
@@ -3221,7 +3269,10 @@ class ChatView(QWidget):
         self.msg_input.setPlaceholderText("🤖 AI 正在为您生成答疑草稿，请稍候...")
         self._pending_ai_input_text = self.msg_input.text()
 
-        self._ai_worker = AIChatWorker(question)
+        self._ai_worker = AIChatWorker(
+            question,
+            image_data_uris=image_data_uris,
+        )
         self._ai_worker.draft_ready.connect(self._on_ai_draft_ready)
         self._ai_worker.start()
 

@@ -198,10 +198,31 @@ def extract_attachment_text(file_path):
 
 def extract_attachment_scoring_content(file_path):
     path = Path(file_path)
-    if path.suffix.lower() != ".docx":
-        return extract_attachment_text(path), ()
     if path.stat().st_size > MAX_PREVIEW_SIZE:
         raise ValueError("文件超过 20 MB，暂不支持 AI 评分")
+
+    image_mime_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+    }
+    image_mime_type = image_mime_types.get(path.suffix.lower())
+    if image_mime_type:
+        if path.stat().st_size > 8 * 1024 * 1024:
+            raise ValueError(f"图片附件 {path.name} 超过 8 MB，暂不支持 AI 评分")
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        image_data_uri = validated_image_data_uri(
+            f"data:{image_mime_type};base64,{encoded}"
+        )
+        if image_data_uri is None:
+            raise ValueError(f"图片附件 {path.name} 格式无效或不受支持")
+        return "", (image_data_uri,)
+
+    if path.suffix.lower() != ".docx":
+        return extract_attachment_text(path), ()
 
     with path.open("rb") as document_file:
         result = mammoth.convert_to_html(

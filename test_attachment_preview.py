@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -138,6 +139,30 @@ class AttachmentPreviewTests(unittest.TestCase):
         self.assertIn("[图片 1]", text)
         self.assertIn("后续正文", text)
         self.assertEqual(images, (image_data_uri,))
+
+    def test_scoring_accepts_standalone_image_attachments(self):
+        image_data_uri = (
+            "data:image/png;base64,"
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
+            "iZk9HQAAAABJRU5ErkJggg=="
+        )
+        encoded = image_data_uri.split(",", 1)[1]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "answer.png"
+            path.write_bytes(base64.b64decode(encoded))
+
+            text, images = extract_attachment_scoring_content(path)
+
+        self.assertEqual(text, "")
+        self.assertEqual(images, (image_data_uri,))
+
+    def test_scoring_rejects_invalid_standalone_image_attachments(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "answer.png"
+            path.write_bytes(b"not a png")
+
+            with self.assertRaisesRegex(ValueError, "格式无效或不受支持"):
+                extract_attachment_scoring_content(path)
 
 
 if __name__ == "__main__":

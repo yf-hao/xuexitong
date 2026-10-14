@@ -1,3 +1,5 @@
+import base64
+from io import BytesIO
 import os
 import json
 import math
@@ -5,8 +7,19 @@ import requests
 from requests.exceptions import ReadTimeout
 from core.config import AI_CONFIG_FILE, DEFAULT_AI_SYSTEM_PROMPT
 from core.logger import get_logger
+from core.utils.image_utils import validated_image_data_uri
 
 logger = get_logger()
+
+
+def _redact_image_data(value):
+    if isinstance(value, dict):
+        return {key: _redact_image_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_image_data(item) for item in value]
+    if isinstance(value, str) and value.startswith("data:image/"):
+        return "[图片数据已省略]"
+    return value
 
 
 def parse_exam_score_response(content, maximum_score):
@@ -173,10 +186,139 @@ class DiscreteMathAIService:
         except Exception:
             return False
 
-    def generate_reply_suggestion(self, student_question: str) -> str:
+    def _dify_upload_images(self, image_data_uris):
+        uploaded_files = []
+        upload_url = self._build_endpoint_url(
+            self.base_url.rstrip("/"), "files/upload"
+        )
+        headers = {"Authorization": self._dify_authorization_header()}
+        dify_user = "xuexitong-teacher-assistant"
+
+        for index, image_data_uri in enumerate(image_data_uris or [], 1):
+            validated = validated_image_data_uri(image_data_uri)
+            if validated is None:
+                raise ValueError(
+                    f"第 {index} 张图片格式无效或超过 8 MB，无法上传到 Dify"
+                )
+            mime_type, encoded = validated[5:].split(";base64,", 1)
+            extension = mime_type.split("/", 1)[1].replace("jpeg", "jpg")
+            image_bytes = base64.b64decode(encoded, validate=True)
+            response = requests.post(
+                upload_url,
+                headers=headers,
+                data={"user": dify_user},
+                files={
+                    "file": (
+                        f"answer-{index}.{extension}",
+                        BytesIO(image_bytes),
+                        mime_type,
+                    )
+                },
+                timeout=120,
+            )
+            try:
+                if response.status_code not in (200, 201):
+                    raise RuntimeError(
+                        f"Dify 图片上传失败 (HTTP {response.status_code}): "
+                        f"{response.text[:300]}"
+                    )
+                payload = response.json()
+                file_id = payload.get("id") if isinstance(payload, dict) else None
+                if not isinstance(file_id, str) or not file_id:
+                    raise ValueError("Dify 图片上传响应缺少文件 ID")
+            finally:
+                response.close()
+            uploaded_files.append({
+                "type": "image",
+                "transfer_method": "local_file",
+                "upload_file_id": file_id,
+            })
+        return uploaded_files
+
+    def _dify_authorization_header(self):
+        api_key = self.api_key.strip()
+        if api_key.lower().startswith("bearer "):
+            return api_key
+        return f"Bearer {api_key}"
+
+    def _dify_chat(
+        self,
+        query,
+        image_data_uris=None,
+        uploaded_files=None,
+        inputs=None,
+        timeout=120,
+    ):
+        dify_user = "xuexitong-teacher-assistant"
+        files = uploaded_files
+        if files is None:
+            files = self._dify_upload_images(image_data_uris or [])
+        request_inputs = dict(inputs or {})
+        if "system" not in request_inputs and self.system_prompt.strip():
+            request_inputs["system"] = self.system_prompt.strip()
+        model = getattr(self, "model", "").strip()
+        if model and "model" not in request_inputs:
+            request_inputs["model"] = model
+        url = self._build_endpoint_url(
+            self.base_url.rstrip("/"), "chat-messages"
+        )
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": self._dify_authorization_header(),
+                "Content-Type": "application/json",
+            },
+            json={
+                "inputs": request_inputs,
+                "query": query,
+                "response_mode": "blocking",
+                "user": dify_user,
+                "conversation_id": "",
+                **({"files": files} if files else {}),
+            },
+            timeout=timeout,
+        )
+        try:
+            if response.status_code not in (200, 201):
+                raise RuntimeError(
+                    f"Dify 聊天请求失败 (HTTP {response.status_code}): "
+                    f"{response.text[:500]}"
+                )
+            payload = response.json()
+            answer = payload.get("answer") if isinstance(payload, dict) else None
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError("Dify 未返回有效的 answer")
+            return answer.strip()
+        finally:
+            response.close()
+
+    def generate_reply_suggestion(
+        self, student_question: str, image_data_uris=None
+    ) -> str:
         """调用大模型为学生的提问生成答疑草稿"""
         if not self.api_key:
             return "错误：未配置 AI API Key，请点击顶部『AI设置』进行配置。"
+
+        validated_images = []
+        for index, image_data_uri in enumerate(image_data_uris or [], 1):
+            validated = validated_image_data_uri(image_data_uri)
+            if validated is None:
+                return f"错误：第 {index} 张图片格式不受支持或超过 8 MB。"
+            validated_images.append(validated)
+
+        if self.endpoint_type == "dify":
+            try:
+                query = (
+                    f"学生提问：'{student_question}'。请给出详细的启发式解答。"
+                )
+                return self._dify_chat(
+                    query,
+                    image_data_uris=validated_images,
+                    inputs={"system": self.system_prompt.strip()},
+                )
+            except Exception as e:
+                logger.error(f"Dify AI 请求异常: {str(e)}")
+                return f"错误：调用 Dify 服务发生异常：{str(e)}"
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -184,19 +326,31 @@ class DiscreteMathAIService:
         }
 
         try:
-            stream_url, stream_data = self._build_chat_completions_payload(student_question, for_test=False)
+            stream_url, stream_data = self._build_chat_completions_payload(
+                student_question,
+                for_test=False,
+                image_data_uris=validated_images,
+            )
             stream_content = self._send_streaming_chat_request(stream_url, stream_data, headers)
             if stream_content is not None:
                 return stream_content
 
-            url, data = self._build_request_payload(student_question, for_test=False)
+            url, data = self._build_request_payload(
+                student_question,
+                for_test=False,
+                image_data_uris=validated_images,
+            )
             content = self._send_generation_request(url, data, headers)
             if content is not None:
                 return content
 
             # /responses 已完成但没有正文时，再回退到更兼容的非流式 chat/completions
             if self.endpoint_type == "responses":
-                fallback_url, fallback_data = self._build_chat_completions_payload(student_question, for_test=False)
+                fallback_url, fallback_data = self._build_chat_completions_payload(
+                    student_question,
+                    for_test=False,
+                    image_data_uris=validated_images,
+                )
                 logger.warning("AI API /responses 返回空正文，自动回退到非流式 /chat/completions")
                 fallback_content = self._send_generation_request(fallback_url, fallback_data, headers)
                 if fallback_content is not None:
@@ -270,6 +424,11 @@ class DiscreteMathAIService:
         }
         user_prompt = json.dumps(prompt_data, ensure_ascii=False)
         base_url = self.base_url.rstrip("/")
+        dify_uploaded_files = None
+        if self.endpoint_type == "dify":
+            dify_uploaded_files = self._dify_upload_images(
+                [image_data_uri for _, image_data_uri in student_answer_images]
+            )
 
         def build_payload(current_user_prompt):
             if self.endpoint_type == "responses":
@@ -328,6 +487,22 @@ class DiscreteMathAIService:
             return url, payload
 
         def request_reply(current_user_prompt):
+            if self.endpoint_type == "dify":
+                image_context = "\n".join(
+                    f"图片 {index}：{context}"
+                    for index, (context, _) in enumerate(
+                        student_answer_images, 1
+                    )
+                )
+                query = f"评分输入：\n{current_user_prompt}"
+                if image_context:
+                    query += f"\n\n已附加图片说明：\n{image_context}"
+                return self._dify_chat(
+                    query,
+                    uploaded_files=dify_uploaded_files,
+                    inputs={"system": system_prompt},
+                )
+
             url, payload = build_payload(current_user_prompt)
             response = requests.post(
                 url,
@@ -414,7 +589,9 @@ class DiscreteMathAIService:
 
         return None
 
-    def _build_request_payload(self, student_question: str, for_test: bool = False):
+    def _build_request_payload(
+        self, student_question: str, for_test: bool = False, image_data_uris=None
+    ):
         """根据接口类型构造 URL 和请求体。"""
         user_prompt = "ping" if for_test else f"学生提问：'{student_question}'。请给出详细的启发式解答。"
         base_url = self.base_url.rstrip("/")
@@ -427,26 +604,52 @@ class DiscreteMathAIService:
                     "input": user_prompt
                 }
             else:
+                user_content = [{"type": "input_text", "text": user_prompt}]
+                for image_index, image_data_uri in enumerate(image_data_uris or [], 1):
+                    user_content.extend((
+                        {
+                            "type": "input_text",
+                            "text": f"学生消息图片 {image_index}",
+                        },
+                        {"type": "input_image", "image_url": image_data_uri},
+                    ))
                 data = {
                     "model": self.model,
                     "input": [
                         {"role": "system", "content": [{"type": "input_text", "text": self.system_prompt}]},
-                        {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}
+                        {"role": "user", "content": user_content}
                     ],
                     "temperature": 0.3
                 }
             return url, data
 
-        return self._build_chat_completions_payload(student_question, for_test=for_test)
+        return self._build_chat_completions_payload(
+            student_question,
+            for_test=for_test,
+            image_data_uris=image_data_uris,
+        )
 
-    def _build_chat_completions_payload(self, student_question: str, for_test: bool = False):
+    def _build_chat_completions_payload(
+        self,
+        student_question: str,
+        for_test: bool = False,
+        image_data_uris=None,
+    ):
         user_prompt = "ping" if for_test else f"学生提问：'{student_question}'。请给出详细的启发式解答。"
         base_url = self.base_url.rstrip("/")
         url = self._build_endpoint_url(base_url, "chat/completions")
+        user_content = user_prompt
+        if not for_test and image_data_uris:
+            user_content = [{"type": "text", "text": user_prompt}]
+            for image_index, image_data_uri in enumerate(image_data_uris, 1):
+                user_content.extend((
+                    {"type": "text", "text": f"学生消息图片 {image_index}"},
+                    {"type": "image_url", "image_url": {"url": image_data_uri}},
+                ))
         data = {
             "model": self.model,
             "messages": [
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": user_content}
             ]
         }
         if not for_test:
@@ -464,7 +667,9 @@ class DiscreteMathAIService:
     def _send_generation_request(self, url: str, data: dict, headers: dict) -> str | None:
         logger.info("========== AI API 发起请求 ==========")
         logger.info(f"URL: {url}")
-        logger.info(f"Payload: {json.dumps(data, ensure_ascii=False, indent=2)}")
+        logger.info(
+            f"Payload: {json.dumps(_redact_image_data(data), ensure_ascii=False, indent=2)}"
+        )
         logger.info("=====================================")
 
         response = requests.post(url, headers=headers, json=data, timeout=120)
@@ -483,7 +688,9 @@ class DiscreteMathAIService:
 
         logger.info("========== AI API 流式回退请求 ==========")
         logger.info(f"URL: {url}")
-        logger.info(f"Payload: {json.dumps(stream_data, ensure_ascii=False, indent=2)}")
+        logger.info(
+            f"Payload: {json.dumps(_redact_image_data(stream_data), ensure_ascii=False, indent=2)}"
+        )
         logger.info("=======================================")
 
         response = requests.post(url, headers=headers, json=stream_data, timeout=120, stream=True)
@@ -545,6 +752,15 @@ class DiscreteMathAIService:
         """测试连接大模型接口"""
         if not self.api_key:
             return False, "API Key 不能为空"
+
+        if self.endpoint_type == "dify":
+            try:
+                self._dify_chat("ping", timeout=(10, 30))
+                return True, "Dify 连接测试成功！应用 API 能正常通信。"
+            except ReadTimeout:
+                return False, "网络请求超时：Dify 在 30 秒内未返回。"
+            except Exception as e:
+                return False, f"Dify 连接测试失败: {str(e)}"
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

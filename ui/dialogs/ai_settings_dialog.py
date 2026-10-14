@@ -148,7 +148,9 @@ class AISettingsDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
 
-        title_label = QLabel("配置大模型 AI 接口（支持 DeepSeek / OpenAI / 聚合接口）")
+        title_label = QLabel(
+            "配置大模型 AI 接口（支持 Dify / OpenAI 兼容 / 聚合接口）"
+        )
         apply_theme_stylesheet(
             title_label,
             lambda palette: f"font-weight: bold; font-size: 14px; color: {palette.accent};",
@@ -161,7 +163,9 @@ class AISettingsDialog(QDialog):
 
         # Base URL
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("例如: https://api.deepseek.com/v1")
+        self.url_input.setPlaceholderText(
+            "例如: https://api.deepseek.com/v1 或 Dify 服务地址/v1"
+        )
         form_layout.addRow("接口地址 (Base URL):", self.url_input)
 
         # API Key
@@ -185,8 +189,12 @@ class AISettingsDialog(QDialog):
         form_layout.addRow("大模型名称 (Model):", self.model_input)
 
         self.endpoint_combo = QComboBox()
+        self.endpoint_combo.addItem("/v1/chat-messages (Dify)", "dify")
         self.endpoint_combo.addItem("/v1/chat/completions", "chat_completions")
         self.endpoint_combo.addItem("/v1/responses", "responses")
+        self.endpoint_combo.currentIndexChanged.connect(
+            self._on_endpoint_type_changed
+        )
         form_layout.addRow("接口类型:", self.endpoint_combo)
 
         # Prompt
@@ -235,6 +243,14 @@ class AISettingsDialog(QDialog):
         index = self.endpoint_combo.findData(self.service.endpoint_type)
         self.endpoint_combo.setCurrentIndex(index if index >= 0 else 0)
         self.prompt_input.setPlainText(self.service.system_prompt)
+        self._on_endpoint_type_changed()
+
+    def _on_endpoint_type_changed(self):
+        is_dify = self.endpoint_combo.currentData() == "dify"
+        self.model_input.setPlaceholderText(
+            "可选：传入 Dify 应用的 model 输入变量"
+            if is_dify else "例如: deepseek-chat"
+        )
 
     def _toggle_key_visibility(self):
         """显示/隐藏 API Key"""
