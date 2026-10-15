@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QButtonGroup, QComboBox, QGridLayout,
     QHeaderView, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget,
     QTableWidgetItem,
-    QMessageBox, QToolButton, QSizePolicy, QVBoxLayout, QWidget,
+    QMessageBox, QProgressDialog, QToolButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 from threading import Event
 
@@ -232,6 +232,10 @@ class ExamReviewView(QWidget):
         self._question_advance_dialogs = {}
         self._question_mark_urls = {}
         self._markpaper_workers = []
+        self._markpaper_cache = {}
+        self._markpaper_prefetching = set()
+        self._loading_dialog = None
+        self._review_loading = False
         self._active_answer_dialog = None
         self._bulk_grading_worker = None
         self._ai_grading_job_store = ExamAIGradingJobStore()
@@ -730,7 +734,7 @@ class ExamReviewView(QWidget):
             marking_button = QPushButton("批阅")
             marking_button.setObjectName("review_mark_button")
             marking_button.setMinimumHeight(36)
-            marking_button.setEnabled(bool(mark_url))
+            self._init_review_button(marking_button, bool(mark_url))
             if mark_url:
                 marking_button.setToolTip("在应用内打开该题的批阅页面")
                 marking_button.clicked.connect(
@@ -766,12 +770,19 @@ class ExamReviewView(QWidget):
         if not question_id or self.context is None or self.crawler is None:
             return
         button = self._find_question_mark_button(question_id)
-        if button is None or not button.isEnabled():
+        if (
+            self._review_loading
+            or button is None
+            or not button.property("review_allowed")
+        ):
             return
 
-        button.setEnabled(False)
+        self._set_review_loading(True)
         self.question_status_label.setText(
             f"正在加载第 {question.get('number', '')} 题的批阅页面…"
+        )
+        self._show_loading(
+            f"正在加载第 {question.get('number', '')} 题的批阅页面…\n含图片的答卷可能需要几秒"
         )
         request_id = self._request_id
         worker = QuestionMarkPaperWorker(
@@ -810,9 +821,8 @@ class ExamReviewView(QWidget):
         return None
 
     def _on_question_mark_paper_loaded(self, request_id, question_id, page):
-        button = self._find_question_mark_button(question_id)
-        if button is not None:
-            button.setEnabled(True)
+        self._hide_loading()
+        self._set_review_loading(False)
         if request_id != self._request_id or self.mode != "question":
             return
 
@@ -953,9 +963,8 @@ class ExamReviewView(QWidget):
             self._load_questions()
 
     def _on_question_mark_paper_failed(self, request_id, question_id, message):
-        button = self._find_question_mark_button(question_id)
-        if button is not None:
-            button.setEnabled(True)
+        self._hide_loading()
+        self._set_review_loading(False)
         if request_id != self._request_id or self.mode != "question":
             return
         self.question_status_label.setText(
@@ -1081,7 +1090,9 @@ class ExamReviewView(QWidget):
             marking_button = QPushButton("批阅")
             marking_button.setObjectName("review_mark_button")
             marking_button.setMinimumHeight(36)
-            marking_button.setEnabled(self.state == 1 and record_id not in (None, ""))
+            self._init_review_button(
+                marking_button, self.state == 1 and record_id not in (None, "")
+            )
             if self.state != 1:
                 marking_button.setToolTip("未交学生暂无可批阅的答卷")
             elif record_id in (None, ""):
@@ -1341,16 +1352,78 @@ class ExamReviewView(QWidget):
             worker.request_stop()
             worker.wait()
 
+    def _init_review_button(self, button, allowed):
+        button.setProperty("review_allowed", bool(allowed))
+        button.setEnabled(bool(allowed) and not self._review_loading)
+
+    def _review_buttons(self):
+        for row in range(self.records_table.rowCount()):
+            widget = self.records_table.cellWidget(row, 7)
+            if isinstance(widget, QPushButton):
+                yield widget
+        for row in range(self.questions_table.rowCount()):
+            widget = self.questions_table.cellWidget(row, 4)
+            if isinstance(widget, QPushButton):
+                yield widget
+
+    def _set_review_loading(self, loading):
+        self._review_loading = bool(loading)
+        for button in self._review_buttons():
+            allowed = bool(button.property("review_allowed"))
+            button.setEnabled(allowed and not self._review_loading)
+
+    def _show_loading(self, text):
+        dialog = self._loading_dialog
+        if dialog is None:
+            dialog = QProgressDialog(text, "", 0, 0, self)
+            dialog.setWindowTitle("正在加载")
+            dialog.setCancelButton(None)
+            dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            dialog.setMinimumDuration(0)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.setMinimumWidth(320)
+            self._loading_dialog = dialog
+        dialog.setLabelText(text)
+        dialog.show()
+
+    def _hide_loading(self):
+        dialog = self._loading_dialog
+        if dialog is not None:
+            self._loading_dialog = None
+            dialog.close()
+            dialog.deleteLater()
+
+    def _record_student_label(self, record_id):
+        row = self._find_mark_paper_row(record_id)
+        if row is None:
+            return ""
+        name_item = self.records_table.item(row, 0)
+        return name_item.text() if name_item is not None else ""
+
     def _request_mark_paper(self, record_id):
         if self.context is None or self.crawler is None:
             return
         button = self._find_mark_paper_button(record_id)
-        if button is None or not button.isEnabled():
+        if (
+            self._review_loading
+            or button is None
+            or not button.property("review_allowed")
+        ):
             return
 
-        button.setEnabled(False)
+        cached = self._markpaper_cache.pop((self._request_id, str(record_id)), None)
+        if cached is not None:
+            self._on_mark_paper_loaded(self._request_id, str(record_id), cached)
+            return
+
+        self._set_review_loading(True)
         self.status_label.show()
         self.status_label.setText("正在请求该学生的批阅页面...")
+        name = self._record_student_label(record_id)
+        self._show_loading(
+            f"正在加载{name + ' ' if name else ''}的答卷…\n含图片的答卷可能需要几秒"
+        )
         request_id = self._request_id
         worker = MarkPaperWorker(
             self.crawler.session, self.context, record_id, self
@@ -1379,10 +1452,57 @@ class ExamReviewView(QWidget):
                 return button
         return None
 
+    def _prefetch_next_mark_paper(self, record_id):
+        if self.context is None or self.crawler is None:
+            return
+        found = False
+        for row in range(self.records_table.rowCount()):
+            item = self.records_table.item(row, 0)
+            if item is None:
+                continue
+            current_id = str(item.data(Qt.ItemDataRole.UserRole))
+            if not found:
+                found = current_id == str(record_id)
+                continue
+            button = self.records_table.cellWidget(row, 7)
+            if (
+                self.records_table.isRowHidden(row)
+                or not isinstance(button, QPushButton)
+                or not button.isEnabled()
+            ):
+                continue
+            key = (self._request_id, current_id)
+            if key in self._markpaper_cache or key in self._markpaper_prefetching:
+                return
+            self._markpaper_prefetching.add(key)
+            worker = MarkPaperWorker(
+                self.crawler.session, self.context, current_id, self
+            )
+            self._markpaper_workers.append(worker)
+            worker.loaded.connect(
+                lambda answer_id, content, cache_key=key:
+                self._on_mark_paper_prefetched(cache_key, content)
+            )
+            worker.failed.connect(
+                lambda answer_id, message, cache_key=key:
+                self._markpaper_prefetching.discard(cache_key)
+            )
+            worker.finished.connect(self._on_mark_paper_worker_finished)
+            worker.start()
+            return
+
+    def _on_mark_paper_prefetched(self, key, content):
+        self._markpaper_prefetching.discard(key)
+        if key[0] != self._request_id:
+            return
+        self._markpaper_cache = {
+            k: v for k, v in self._markpaper_cache.items() if k[0] == self._request_id
+        }
+        self._markpaper_cache[key] = content
+
     def _on_mark_paper_loaded(self, request_id, record_id, content):
-        button = self._find_mark_paper_button(record_id)
-        if button is not None:
-            button.setEnabled(True)
+        self._hide_loading()
+        self._set_review_loading(False)
         if request_id != self._request_id or self.mode != "person":
             return
         row = self._find_mark_paper_row(record_id)
@@ -1413,6 +1533,7 @@ class ExamReviewView(QWidget):
         dialog.submitted.connect(self._refresh_current_page)
         dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
         dialog.show()
+        self._prefetch_next_mark_paper(record_id)
 
     def _release_answer_dialog(self, dialog):
         if self._active_answer_dialog is dialog:
@@ -1427,9 +1548,8 @@ class ExamReviewView(QWidget):
         return None
 
     def _on_mark_paper_failed(self, request_id, record_id, message):
-        button = self._find_mark_paper_button(record_id)
-        if button is not None:
-            button.setEnabled(True)
+        self._hide_loading()
+        self._set_review_loading(False)
         if request_id != self._request_id:
             return
         self.status_label.show()

@@ -1,3 +1,4 @@
+import os
 import sys
 import threading
 from core.logger import get_logger
@@ -15,6 +16,24 @@ def _setup_early_logging():
         pass
 
 _setup_early_logging()
+
+
+def _configure_linux_software_rendering():
+    """Linux 上 GLX 不可用时 WebEngine 会崩溃，默认改用软件渲染（需在 QApplication 之前设置）。"""
+    if not sys.platform.startswith("linux"):
+        return
+    if os.environ.get("XUEXITONG_ENABLE_GPU") == "1":
+        return
+    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+    os.environ.setdefault("QT_OPENGL", "software")
+    flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    for flag in ("--disable-gpu", "--disable-gpu-compositing"):
+        if flag not in flags:
+            flags = f"{flags} {flag}".strip()
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = flags
+
+
+_configure_linux_software_rendering()
 
 from PyQt6.QtWidgets import QApplication
 from ui.theme import apply_application_theme, theme_manager
@@ -42,7 +61,10 @@ class AppController:
     def start(self):
         # QtWebEngineWidgets 必须在 QApplication 创建之前导入
         from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-        
+        from PyQt6.QtCore import Qt, QCoreApplication
+        if sys.platform.startswith("linux") and os.environ.get("XUEXITONG_ENABLE_GPU") != "1":
+            QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
+
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)  # 防止登录窗口关闭时程序意外退出
         app.setStyle("Fusion")

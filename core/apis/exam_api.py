@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from html import unescape
 import os
@@ -44,6 +45,7 @@ EXAM_ATTACHMENT_IFRAME_URL = (
 )
 _MAX_EXAM_ANSWER_IMAGE_BYTES = 8 * 1024 * 1024
 _MAX_EXAM_ANSWER_IMAGES_PER_PAGE = 30
+_EXAM_ANSWER_IMAGE_WORKERS = 6
 _MAX_EXAM_ANSWER_IMAGES_PAGE_BYTES = 32 * 1024 * 1024
 
 
@@ -142,30 +144,43 @@ def _embed_exam_answer_images(session, html, referer):
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"macOS"',
     }
+    targets = []
     for image_node in image_nodes[:_MAX_EXAM_ANSWER_IMAGES_PER_PAGE]:
         image_url = urljoin(referer, str(image_node.get("src") or ""))
-        if not _is_trusted_chaoxing_url(image_url):
-            continue
+        if _is_trusted_chaoxing_url(image_url):
+            targets.append((image_node, image_url))
+
+    def fetch(image_url):
         try:
-            image_bytes = _fetch_trusted_answer_image(
+            return _fetch_trusted_answer_image(
                 session, image_url, request_headers
             )
-            if (
-                not isinstance(image_bytes, bytes)
-                or not image_bytes
-                or len(image_bytes) > _MAX_EXAM_ANSWER_IMAGE_BYTES
-                or page_bytes + len(image_bytes)
-                > _MAX_EXAM_ANSWER_IMAGES_PAGE_BYTES
-            ):
-                continue
-            mime_type = _raster_image_mime_type(image_bytes)
-            if not mime_type:
-                continue
-            encoded = base64.b64encode(image_bytes).decode("ascii")
-            image_node["src"] = f"data:{mime_type};base64,{encoded}"
-            page_bytes += len(image_bytes)
         except Exception:
+            return b""
+
+    if len(targets) > 1:
+        with ThreadPoolExecutor(
+            max_workers=min(_EXAM_ANSWER_IMAGE_WORKERS, len(targets))
+        ) as executor:
+            fetched = list(executor.map(fetch, [url for _, url in targets]))
+    else:
+        fetched = [fetch(url) for _, url in targets]
+
+    for (image_node, _), image_bytes in zip(targets, fetched):
+        if (
+            not isinstance(image_bytes, bytes)
+            or not image_bytes
+            or len(image_bytes) > _MAX_EXAM_ANSWER_IMAGE_BYTES
+            or page_bytes + len(image_bytes)
+            > _MAX_EXAM_ANSWER_IMAGES_PAGE_BYTES
+        ):
             continue
+        mime_type = _raster_image_mime_type(image_bytes)
+        if not mime_type:
+            continue
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        image_node["src"] = f"data:{mime_type};base64,{encoded}"
+        page_bytes += len(image_bytes)
     return str(soup)
 
 
