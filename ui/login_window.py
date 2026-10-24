@@ -4,8 +4,9 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
     QCheckBox, QWidget, QSizePolicy,
 )
-from PyQt6.QtCore import QCoreApplication, QThread, Qt, QSettings, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtCore import QByteArray, QCoreApplication, QSize, QThread, Qt, QSettings, pyqtSignal
+from PyQt6.QtGui import QIcon, QImage, QPainter, QPixmap
+from PyQt6.QtSvg import QSvgRenderer
 from core.config import APP_TITLE
 from ui.theme import (
     apply_theme_stylesheet,
@@ -62,7 +63,7 @@ class QRCodeLoginWorker(QThread):
 
 
 class LoginWindow(QDialog):
-    WINDOW_SIZE = (380, 420)
+    WINDOW_SIZE = (380, 380)
 
     def __init__(self, crawler):
         super().__init__()
@@ -71,6 +72,7 @@ class LoginWindow(QDialog):
         self._qr_worker = None
         self._password_login_success = False
         self._qrcode_login_success = False
+        self._is_qrcode_mode = False
         self.setWindowTitle(APP_TITLE)
         self.setMinimumSize(380, 360)
         
@@ -147,12 +149,14 @@ class LoginWindow(QDialog):
         self.theme_toggle_btn = QPushButton("☀️")
         self.theme_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.theme_toggle_btn.clicked.connect(self._toggle_theme)
-        self.mode_switch_btn = QPushButton("扫码登录")
+        self.mode_switch_btn = QPushButton()
         self.mode_switch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mode_switch_btn.setFlat(True)
         self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
+        self.mode_switch_btn.setFixedSize(32, 32)
+        self.mode_switch_btn.setIconSize(QSize(24, 24))
         theme_row = QHBoxLayout()
         theme_row.addStretch()
+        theme_row.addWidget(self.mode_switch_btn)
         theme_row.addWidget(self.theme_toggle_btn)
         layout.addLayout(theme_row)
         layout.addStretch()
@@ -253,7 +257,6 @@ class LoginWindow(QDialog):
         content_layout.addWidget(self.login_btn)
         layout.addWidget(content_panel)
         layout.addStretch()
-        layout.addWidget(self.mode_switch_btn, alignment=Qt.AlignmentFlag.AlignRight)
         
         self.setLayout(layout)
         # 根据内容计算初始尺寸并锁定，模式切换时会重新计算。
@@ -268,39 +271,91 @@ class LoginWindow(QDialog):
 
     def _apply_theme(self, mode):
         if mode == "light":
-            self.theme_toggle_btn.setText("🌙")
+            svg = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+                <path d="M9.72 4.09A9 9 0 1 0 19.91 14.28A7.4 7.4 0 0 1 9.72 4.09z" fill="#d19a00" stroke="#d19a00" stroke-width="0.6" stroke-linejoin="round"/>
+            </svg>"""
             self.theme_toggle_btn.setToolTip("切换到暗色主题")
         else:
-            self.theme_toggle_btn.setText("☀️")
+            svg = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="4.2" fill="#f5b301"/>
+                <path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8" stroke="#f5b301" stroke-width="2" stroke-linecap="round"/>
+            </svg>"""
             self.theme_toggle_btn.setToolTip("切换到亮色主题")
+        self.theme_toggle_btn.setText("")
+        self.theme_toggle_btn.setIconSize(QSize(24, 24))
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(48, 48)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        self.theme_toggle_btn.setIcon(QIcon(pixmap))
         refresh_theme_styles(self, mode)
+        self._update_mode_switch_icon()
         self._apply_mode_button_style()
+
+    def _update_mode_switch_icon(self):
+        palette = get_theme_palette(theme_manager().mode)
+        icon_color = "#d19a00" if theme_manager().mode == "light" else "#f5b301"
+        if self._is_qrcode_mode:
+            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="8" r="3.5" stroke="{icon_color}" stroke-width="2.1"/>
+                <path d="M5 20c.7-3.6 3.2-5.5 7-5.5s6.3 1.9 7 5.5" stroke="{icon_color}" stroke-width="2.1" stroke-linecap="round"/>
+            </svg>"""
+            self.mode_switch_btn.setToolTip("切换到账号密码登录")
+        else:
+            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+                <g stroke="{icon_color}" stroke-width="1.8" stroke-linejoin="round">
+                    <rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1.2"/>
+                    <rect x="14" y="3.5" width="6.5" height="6.5" rx="1.2"/>
+                    <rect x="3.5" y="14" width="6.5" height="6.5" rx="1.2"/>
+                </g>
+                <g fill="{icon_color}">
+                    <rect x="5.7" y="5.7" width="2.1" height="2.1"/>
+                    <rect x="16.2" y="5.7" width="2.1" height="2.1"/>
+                    <rect x="5.7" y="16.2" width="2.1" height="2.1"/>
+                    <rect x="14" y="14" width="2.6" height="2.6"/>
+                    <rect x="18" y="14" width="2.5" height="2.6"/>
+                    <rect x="16" y="18" width="2.6" height="2.5"/>
+                    <rect x="14" y="19" width="1.5" height="1.5"/>
+                    <rect x="18.5" y="18.5" width="2" height="2"/>
+                </g>
+            </svg>"""
+            self.mode_switch_btn.setToolTip("切换到扫码登录")
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(48, 48)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        self.mode_switch_btn.setIcon(QIcon(pixmap))
 
     def _apply_mode_button_style(self):
         palette = get_theme_palette(theme_manager().mode)
-        apply_theme_stylesheet(self.theme_toggle_btn, f"""
+        icon_button_style = f"""
             QPushButton {{
-                background-color: {palette.panel_alt_bg};
+                background-color: transparent;
                 color: {palette.text_muted};
-                border: 1px solid {palette.border_strong};
+                border: none;
                 border-radius: 16px;
                 padding: 0;
                 min-width: 32px;
                 max-width: 32px;
                 min-height: 32px;
                 max-height: 32px;
-                font-size: 15px;
+                font-size: 18px;
                 font-weight: normal;
                 margin-top: 0;
             }}
             QPushButton:hover {{
                 background-color: {palette.hover_bg};
                 color: {palette.text};
-                border: 1px solid {palette.accent};
+                border: none;
             }}
-        """)
-        for button in (self.mode_switch_btn, self.qr_refresh_btn):
-            apply_theme_stylesheet(button, f"""
+        """
+        for button in (self.theme_toggle_btn, self.mode_switch_btn):
+            apply_theme_stylesheet(button, icon_button_style)
+        apply_theme_stylesheet(self.qr_refresh_btn, f"""
                 QPushButton {{
                     background: transparent;
                     color: {palette.accent};
@@ -321,7 +376,8 @@ class LoginWindow(QDialog):
         self.password_panel.hide()
         self.login_btn.hide()
         self.status_label.hide()
-        self.mode_switch_btn.setText("账号密码登录")
+        self._is_qrcode_mode = True
+        self._update_mode_switch_icon()
         self.mode_switch_btn.clicked.disconnect()
         self.mode_switch_btn.clicked.connect(self._show_password_login)
         self.qrcode_panel.show()
@@ -334,7 +390,8 @@ class LoginWindow(QDialog):
         self.password_panel.show()
         self.login_btn.show()
         self.status_label.setVisible(bool(self.status_label.text()))
-        self.mode_switch_btn.setText("扫码登录")
+        self._is_qrcode_mode = False
+        self._update_mode_switch_icon()
         self.mode_switch_btn.clicked.disconnect()
         self.mode_switch_btn.clicked.connect(self._show_qrcode_login)
         self.status_label.clear()

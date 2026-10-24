@@ -4109,6 +4109,12 @@ class ChatAPITests(unittest.TestCase):
         self.assertIn('def _toggle_theme(self):', main_source)
         self.assertIn('theme_manager().theme_changed.connect(self._apply_theme)', main_source)
         self.assertIn('self.theme_toggle_btn = QPushButton("☀️")', login_source)
+        self.assertIn('self.mode_switch_btn = QPushButton()', login_source)
+        self.assertIn('self.mode_switch_btn.setIcon(QIcon(pixmap))', login_source)
+        self.assertLess(
+            login_source.index("theme_row.addWidget(self.mode_switch_btn)"),
+            login_source.index("theme_row.addWidget(self.theme_toggle_btn)"),
+        )
         self.assertIn('def _toggle_theme(self):', login_source)
         self.assertIn('theme_manager().theme_changed.connect(self._apply_theme)', login_source)
         self.assertIn('self.theme_toggle_btn.setToolTip("切换到暗色主题")', main_source)
