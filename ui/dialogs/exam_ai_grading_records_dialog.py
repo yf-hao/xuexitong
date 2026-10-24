@@ -10,6 +10,8 @@ class ExamAIGradingRecordsDialog(QDialog):
     retry_requested = pyqtSignal(str)
 
     STATUS_LABELS = {
+        "checking_rubric": "检查评分要求",
+        "processing": "处理中",
         "pending": "待处理",
         "grading": "评分中",
         "ready_to_submit": "待提交",

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from core.apis.exam_api import ExamReviewContext
 from core.services.exam_ai_bulk_grading_service import ExamAIBulkGradingService
+from core.services.exam_ai_scoring_service import ExamAIScoringService
 from core.utils.exam_ai_grading_jobs import ExamAIGradingJobStore
 from core.utils.exam_mark_paper_parser import parse_exam_mark_paper
 from core.utils.exam_score_drafts import ExamScoreDraftStore
@@ -111,10 +112,20 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
     def test_scores_only_subjective_questions_and_preserves_objective_score(self):
         scorer = FakeScoringService()
         service = self.make_service(scorer)
+        progress = []
 
-        result = service.run()
+        result = service.run(
+            progress_callback=lambda current, total, outcome: progress.append(
+                (current, total, outcome)
+            )
+        )
 
         self.assertEqual(result["outcomes"][0]["status"], "submitted")
+        self.assertEqual(
+            [item[2]["status"] for item in progress],
+            ["processing", "submitted"],
+        )
+        self.assertEqual(progress[0][2]["student_name"], "学生甲")
         self.assertEqual(scorer.scored_questions, ["q1"])
         self.assertEqual(len(self.submissions), 1)
         form_fields = dict(self.submissions[0][0][3])
@@ -202,8 +213,15 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
         self.assertEqual(len(self.submissions), 1)
 
     def test_already_submitted_answer_is_not_scored_or_submitted_again(self):
+        result = FakeScoringService().result
+        rubric_fingerprint = ExamAIScoringService.rubric_fingerprint("")
         self.job_store.update_record(
-            "exam-1", "answer-1", "submitted", student_name="学生甲"
+            "exam-1",
+            "answer-1",
+            "submitted",
+            student_name="学生甲",
+            score_results={"q1": result},
+            rubric_fingerprints={"q1": rubric_fingerprint},
         )
         scorer = FakeScoringService()
         service = self.make_service(scorer)
@@ -213,6 +231,80 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
         self.assertEqual(result["outcomes"][0]["status"], "submitted")
         self.assertEqual(scorer.scored_questions, [])
         self.assertEqual(self.submissions, [])
+
+    def test_changed_rubric_regrades_submitted_answer_after_confirmation(self):
+        old_result = FakeScoringService().result
+        old_fingerprint = ExamAIScoringService.rubric_fingerprint("旧要求")
+        new_fingerprint = ExamAIScoringService.rubric_fingerprint("新要求")
+        self.job_store.update_record(
+            "exam-1",
+            "answer-1",
+            "submitted",
+            student_name="学生甲",
+            student_id="1001",
+            score_results={"q1": old_result},
+            rubric_fingerprints={"q1": old_fingerprint},
+        )
+        scorer = FakeScoringService()
+        service = self.make_service(scorer)
+        service.rubric_provider = lambda _question: "新要求"
+        confirmations = []
+
+        result = service.run(
+            regrade_confirmation_callback=lambda submissions: (
+                confirmations.append(submissions) or True
+            )
+        )
+
+        self.assertEqual(confirmations[0][0]["student_name"], "学生甲")
+        self.assertEqual(
+            confirmations[0][0]["changed_questions"], ["1"]
+        )
+        self.assertEqual(scorer.scored_questions, ["q1"])
+        self.assertEqual(result["outcomes"][0]["status"], "submitted")
+        self.assertEqual(len(self.submissions), 1)
+        saved_job = self.job_store.get_record("exam-1", "answer-1")
+        self.assertEqual(
+            saved_job["rubric_fingerprints"]["q1"], new_fingerprint
+        )
+
+    def test_declining_changed_rubric_confirmation_leaves_submission_untouched(self):
+        self.job_store.update_record(
+            "exam-1",
+            "answer-1",
+            "submitted",
+            student_name="学生甲",
+            student_id="1001",
+            score_results={"q1": FakeScoringService().result},
+            rubric_fingerprints={
+                "q1": ExamAIScoringService.rubric_fingerprint("旧要求")
+            },
+        )
+        scorer = FakeScoringService()
+        service = self.make_service(scorer)
+        service.rubric_provider = lambda _question: "新要求"
+        self.score_store.save_score(
+            self.score_store.make_key(
+                "exam-1", "answer-1", "1001", "q1", "1", "简答题"
+            ),
+            8,
+            ai_score_breakdown=FakeScoringService().result,
+            rubric_fingerprint=ExamAIScoringService.rubric_fingerprint(
+                "新要求"
+            ),
+        )
+
+        result = service.run(
+            regrade_confirmation_callback=lambda _submissions: False
+        )
+
+        self.assertTrue(result["regrade_cancelled"])
+        self.assertEqual(scorer.scored_questions, [])
+        self.assertEqual(self.submissions, [])
+        self.assertEqual(
+            self.job_store.get_record("exam-1", "answer-1")["status"],
+            "submitted",
+        )
 
     def test_reuses_single_question_ai_score_draft(self):
         question = parse_exam_mark_paper(PAPER_HTML).questions[0]
@@ -233,6 +325,7 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
             draft_key,
             8,
             ai_score_breakdown=saved_breakdown,
+            rubric_fingerprint=ExamAIScoringService.rubric_fingerprint(""),
         )
         scorer = FakeScoringService(
             error=AssertionError("应复用答卷中的 AI 评分草稿")

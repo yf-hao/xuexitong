@@ -24,6 +24,9 @@ from core.utils.exam_mark_paper_parser import (
     parse_exam_mark_paper, parse_exam_question_mark_paper,
 )
 from ui.dialogs.exam_answer_dialog import ExamAnswerDialog
+from ui.dialogs.exam_ai_grading_progress_dialog import (
+    ExamAIBulkGradingProgressDialog,
+)
 from ui.dialogs.exam_ai_grading_records_dialog import ExamAIGradingRecordsDialog
 from ui.theme import (
     apply_theme_stylesheet, bind_theme_tree, get_theme_palette, theme_manager,
@@ -104,6 +107,7 @@ class MarkPaperWorker(QThread):
 
 class ExamAIBulkGradingWorker(QThread):
     progress = pyqtSignal(int, int, object)
+    regrade_confirmation_required = pyqtSignal(object)
     completed = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -112,9 +116,23 @@ class ExamAIBulkGradingWorker(QThread):
         self.service = service
         self.answer_ids = answer_ids
         self._stop_event = Event()
+        self._confirmation_event = Event()
+        self._confirmation_result = False
 
     def request_stop(self):
         self._stop_event.set()
+        self.confirm_regrade(False)
+
+    def confirm_regrade(self, confirmed):
+        self._confirmation_result = bool(confirmed)
+        self._confirmation_event.set()
+
+    def _request_regrade_confirmation(self, submissions):
+        self._confirmation_result = False
+        self._confirmation_event.clear()
+        self.regrade_confirmation_required.emit(submissions)
+        self._confirmation_event.wait()
+        return self._confirmation_result
 
     def run(self):
         try:
@@ -124,6 +142,9 @@ class ExamAIBulkGradingWorker(QThread):
                 ),
                 stop_requested=self._stop_event.is_set,
                 answer_ids=self.answer_ids,
+                regrade_confirmation_callback=(
+                    self._request_regrade_confirmation
+                ),
             )
             self.completed.emit(result)
         except Exception as exc:
@@ -238,6 +259,9 @@ class ExamReviewView(QWidget):
         self._review_loading = False
         self._active_answer_dialog = None
         self._bulk_grading_worker = None
+        self._bulk_grading_progress_dialog = None
+        self._bulk_grading_progress_text = ""
+        self._bulk_grading_dialog_dismissed = False
         self._ai_grading_job_store = ExamAIGradingJobStore()
         self._state_totals = {0: None, 1: None}
         self._setup_ui()
@@ -1217,12 +1241,25 @@ class ExamReviewView(QWidget):
         )
         self.back_button.setEnabled(False)
         self.status_label.show()
-        self.status_label.setText("正在读取本场考试已交答卷名单…")
+        self._bulk_grading_progress_text = "正在读取本场考试已交答卷名单…"
+        self._bulk_grading_dialog_dismissed = False
+        self.status_label.setText(self._bulk_grading_progress_text)
+        self._bulk_grading_progress_dialog = ExamAIBulkGradingProgressDialog(
+            self
+        )
+        self._bulk_grading_progress_dialog.dismissed.connect(
+            self._on_ai_bulk_grading_progress_dialog_dismissed
+        )
+        self._bulk_grading_progress_dialog.show()
+        self.status_label.hide()
         self._refresh_ai_grading_records_button()
         worker = ExamAIBulkGradingWorker(
             self._create_ai_bulk_grading_service(), answer_ids, self
         )
         worker.progress.connect(self._on_ai_bulk_grading_progress)
+        worker.regrade_confirmation_required.connect(
+            self._confirm_ai_bulk_regrade
+        )
         worker.completed.connect(self._on_ai_bulk_grading_completed)
         worker.failed.connect(self._on_ai_bulk_grading_failed)
         worker.finished.connect(worker.deleteLater)
@@ -1230,22 +1267,73 @@ class ExamReviewView(QWidget):
         worker.start()
         self._refresh_ai_grading_records_button()
 
+    def _confirm_ai_bulk_regrade(self, submissions):
+        names = [
+            str(item.get("student_name") or item.get("answer_id") or "")
+            for item in submissions
+        ]
+        question_numbers = sorted({
+            str(number)
+            for item in submissions
+            for number in item.get("changed_questions", [])
+        })
+        preview = "\n".join(names[:8])
+        if len(names) > 8:
+            preview += f"\n另有 {len(names) - 8} 份答卷"
+        changed_question_text = (
+            "涉及题目：" + "、".join(f"第{number}题" for number in question_numbers)
+            if question_numbers else ""
+        )
+        answer = QMessageBox.question(
+            self,
+            "评分要求已改变",
+            f"检测到 {len(names)} 份已提交答卷的 AI 评分要求已改变。\n"
+            "继续会重新评分并提交更新后的成绩，是否继续？\n\n"
+            f"{changed_question_text}\n"
+            f"{preview}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        worker = self._bulk_grading_worker
+        if worker is not None:
+            worker.confirm_regrade(
+                answer == QMessageBox.StandardButton.Yes
+            )
+
     def _on_ai_bulk_grading_progress(self, current, total, outcome):
         name = outcome.get("student_name") or outcome.get("answer_id", "")
         status = ExamAIGradingRecordsDialog.STATUS_LABELS.get(
             outcome.get("status"), outcome.get("status", "处理中")
         )
-        self.status_label.show()
-        self.status_label.setText(
+        self._bulk_grading_progress_text = (
             f"AI改卷进度：{current}/{total}，{name}：{status}"
         )
+        dialog = self._bulk_grading_progress_dialog
+        if dialog is not None and not self._bulk_grading_dialog_dismissed:
+            dialog.set_progress(
+                current, total, self._bulk_grading_progress_text
+            )
+        else:
+            self.status_label.show()
+            self.status_label.setText(self._bulk_grading_progress_text)
         self._refresh_ai_grading_records_button()
+
+    def _on_ai_bulk_grading_progress_dialog_dismissed(self):
+        self._bulk_grading_dialog_dismissed = True
+        self.status_label.setText(self._bulk_grading_progress_text)
+        self.status_label.show()
 
     def _on_ai_bulk_grading_completed(self, result):
         self._bulk_grading_worker = None
         self.ai_grade_button.setText("AI改卷")
         self.ai_grade_button.setEnabled(True)
         self.back_button.setEnabled(True)
+        if result.get("regrade_cancelled"):
+            summary = "已取消重新批改，原有已提交成绩未更改"
+            self._bulk_grading_progress_text = summary
+            self._finish_ai_bulk_grading_progress(summary)
+            self._refresh_ai_grading_records_button()
+            return
         outcomes = result.get("outcomes", [])
         try:
             issues = self._ai_grading_job_store.get_exam_issues(
@@ -1267,8 +1355,8 @@ class ExamReviewView(QWidget):
         )
         if stopped:
             summary = f"AI改卷已停止；{summary}"
-        self.status_label.show()
-        self.status_label.setText(summary)
+        self._bulk_grading_progress_text = summary
+        self._finish_ai_bulk_grading_progress(summary)
         self._refresh_ai_grading_records_button()
         if issues:
             details = "\n".join(
@@ -1289,10 +1377,20 @@ class ExamReviewView(QWidget):
         self.ai_grade_button.setText("AI改卷")
         self.ai_grade_button.setEnabled(True)
         self.back_button.setEnabled(True)
-        self.status_label.show()
-        self.status_label.setText(f"AI改卷任务启动失败：{message}")
+        summary = f"AI改卷任务启动失败：{message}"
+        self._bulk_grading_progress_text = summary
+        self._finish_ai_bulk_grading_progress(summary)
         self._refresh_ai_grading_records_button()
         QMessageBox.warning(self, "AI改卷失败", message)
+
+    def _finish_ai_bulk_grading_progress(self, text):
+        dialog = self._bulk_grading_progress_dialog
+        if dialog is not None and not self._bulk_grading_dialog_dismissed:
+            dialog.set_finished(text)
+        else:
+            self.status_label.setText(text)
+            self.status_label.show()
+        self._bulk_grading_progress_dialog = None
 
     def _refresh_ai_grading_records_button(self):
         if self.context is None:

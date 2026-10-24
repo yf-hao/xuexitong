@@ -9,6 +9,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication, QTableWidgetItem
 
 from ui.views.exam_review_view import ExamReviewView
+from ui.dialogs.exam_ai_grading_progress_dialog import (
+    ExamAIBulkGradingProgressDialog,
+)
 from core.utils.exam_ai_grading_jobs import ExamAIGradingJobStore
 
 
@@ -112,6 +115,26 @@ class ExamReviewSearchTests(unittest.TestCase):
             )
             self.view._refresh_ai_grading_records_button()
             self.assertTrue(self.view.grading_records_button.isHidden())
+
+    def test_closing_progress_dialog_falls_back_to_inline_status(self):
+        self.view._bulk_grading_progress_text = (
+            "AI改卷进度：7/40，学生甲：处理中"
+        )
+        self.view._bulk_grading_worker = SimpleNamespace(isRunning=lambda: True)
+        dialog = ExamAIBulkGradingProgressDialog(self.view)
+        self.view._bulk_grading_progress_dialog = dialog
+        dialog.dismissed.connect(
+            self.view._on_ai_bulk_grading_progress_dialog_dismissed
+        )
+
+        dialog.close()
+
+        self.assertTrue(self.view._bulk_grading_dialog_dismissed)
+        self.assertFalse(self.view.status_label.isHidden())
+        self.assertEqual(
+            self.view.status_label.text(),
+            "AI改卷进度：7/40，学生甲：处理中",
+        )
 
 
 if __name__ == "__main__":

@@ -48,6 +48,11 @@ class ExamAIScoringService:
         return f"exam_ai_rubrics/{cls.question_key(exam_id, question)}"
 
     @staticmethod
+    def rubric_fingerprint(rubric):
+        normalized = str(rubric or "").strip()
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def is_subjective_question(question):
         return question.question_type not in OBJECTIVE_QUESTION_TYPES
 

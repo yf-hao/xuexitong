@@ -45,7 +45,8 @@ class ExamAIBulkGradingService:
         )
 
     def run(
-        self, progress_callback=None, stop_requested=None, answer_ids=None
+        self, progress_callback=None, stop_requested=None, answer_ids=None,
+        regrade_confirmation_callback=None,
     ):
         stop_requested = stop_requested or (lambda: False)
         records = self.record_fetcher(self.session, self.context)
@@ -57,10 +58,81 @@ class ExamAIBulkGradingService:
             ]
         outcomes = []
         total = len(records)
+        preloaded_contents = {}
+        stale_submitted_ids = set()
+        stale_questions_by_answer = {}
+        for index, record in enumerate(records, 1):
+            answer_id = str(record.get("id") or "")
+            if not answer_id:
+                continue
+            job = self.job_store.get_record(
+                self.context.exam_id, answer_id
+            ) or {}
+            if job.get("status") != "submitted":
+                continue
+            if progress_callback is not None:
+                progress_callback(index, total, {
+                    "answer_id": answer_id,
+                    "student_name": str(
+                        record.get("createUserName") or ""
+                    ),
+                    "status": "checking_rubric",
+                })
+            content = self._fetch_content(answer_id)
+            preloaded_contents[answer_id] = content
+            stale_questions = self._stale_rubric_questions(
+                answer_id,
+                str(record.get("loginName") or ""),
+                content,
+                job,
+            )
+            if stale_questions:
+                stale_submitted_ids.add(answer_id)
+                stale_questions_by_answer[answer_id] = stale_questions
+
+        stale_submissions = [
+            {
+                "answer_id": str(record.get("id") or ""),
+                "student_name": str(record.get("createUserName") or ""),
+                "changed_questions": stale_questions_by_answer.get(
+                    str(record.get("id") or ""), []
+                ),
+            }
+            for record in records
+            if str(record.get("id") or "") in stale_submitted_ids
+        ]
+        if (
+            stale_submissions
+            and regrade_confirmation_callback is not None
+            and not regrade_confirmation_callback(stale_submissions)
+        ):
+            return {
+                "total": total,
+                "processed": 0,
+                "stopped": False,
+                "regrade_cancelled": True,
+                "outcomes": [],
+            }
+
         for index, record in enumerate(records, 1):
             if stop_requested():
                 break
-            outcome = self._process_record(record, stop_requested)
+            if progress_callback is not None:
+                progress_callback(index, total, {
+                    "answer_id": str(record.get("id") or ""),
+                    "student_name": str(record.get("createUserName") or ""),
+                    "status": "processing",
+                })
+            outcome = self._process_record(
+                record,
+                stop_requested,
+                preloaded_content=preloaded_contents.get(
+                    str(record.get("id") or "")
+                ),
+                force_submitted_regrade=(
+                    str(record.get("id") or "") in stale_submitted_ids
+                ),
+            )
             outcomes.append(outcome)
             if progress_callback is not None:
                 progress_callback(index, total, outcome)
@@ -71,7 +143,64 @@ class ExamAIBulkGradingService:
             "outcomes": outcomes,
         }
 
-    def _process_record(self, record, stop_requested):
+    def _fetch_content(self, answer_id):
+        html = self.mark_paper_fetcher(
+            self.session, self.context, answer_id
+        )
+        return self.paper_parser(
+            html,
+            referer=exam_mark_paper_referer(self.context, answer_id),
+        )
+
+    def _current_rubric(self, question):
+        rubric = str(self.rubric_provider(question) or "").strip()
+        if len(rubric) > 5000:
+            raise ValueError("追加评分要求不能超过 5000 字符")
+        return rubric, ExamAIScoringService.rubric_fingerprint(rubric)
+
+    def _has_stale_rubric(
+        self, answer_id, student_id, content, job
+    ):
+        return bool(
+            self._stale_rubric_questions(
+                answer_id, student_id, content, job
+            )
+        )
+
+    def _stale_rubric_questions(
+        self, answer_id, student_id, content, job
+    ):
+        score_results = dict(job.get("score_results") or {})
+        rubric_fingerprints = dict(job.get("rubric_fingerprints") or {})
+        stale_questions = []
+        for question in content.questions:
+            if not self.scoring_service.is_subjective_question(question):
+                continue
+            question_id = str(question.question_id or "")
+            if not question_id:
+                stale_questions.append(str(question.number))
+                continue
+            _, fingerprint = self._current_rubric(question)
+            if self._saved_result(
+                answer_id,
+                student_id,
+                question,
+                score_results,
+                rubric_fingerprints,
+                fingerprint,
+                allow_draft=False,
+            ) is None:
+                stale_questions.append(str(question.number))
+        return stale_questions
+
+    def _process_record(
+        self,
+        record,
+        stop_requested,
+        *,
+        preloaded_content=None,
+        force_submitted_regrade=False,
+    ):
         answer_id = str(record.get("id") or "")
         student_name = str(record.get("createUserName") or "")
         student_id = str(record.get("loginName") or "")
@@ -84,27 +213,13 @@ class ExamAIBulkGradingService:
             }
 
         job = self.job_store.get_record(self.context.exam_id, answer_id) or {}
-        if job.get("status") in self.job_store.TERMINAL_STATUSES:
+        if job.get("status") in {"no_subjective", "resolved"}:
             return self._outcome(answer_id, student_name, job)
 
         score_results = dict(job.get("score_results") or {})
+        rubric_fingerprints = dict(job.get("rubric_fingerprints") or {})
         try:
-            self.job_store.update_record(
-                self.context.exam_id,
-                answer_id,
-                "grading",
-                student_name=student_name,
-                student_id=student_id,
-                stage="读取答卷",
-                score_results=score_results,
-            )
-            html = self.mark_paper_fetcher(
-                self.session, self.context, answer_id
-            )
-            content = self.paper_parser(
-                html,
-                referer=exam_mark_paper_referer(self.context, answer_id),
-            )
+            content = preloaded_content or self._fetch_content(answer_id)
         except Exception as exc:
             return self._fail(
                 answer_id, student_name, student_id, "grading_failed",
@@ -127,6 +242,26 @@ class ExamAIBulkGradingService:
             )
             return self._outcome(answer_id, student_name, job)
 
+        if (
+            job.get("status") == "submitted"
+            and not force_submitted_regrade
+            and not self._has_stale_rubric(
+                answer_id, student_id, content, job
+            )
+        ):
+            return self._outcome(answer_id, student_name, job)
+
+        self.job_store.update_record(
+            self.context.exam_id,
+            answer_id,
+            "grading",
+            student_name=student_name,
+            student_id=student_id,
+            stage="读取答卷",
+            score_results=score_results,
+            rubric_fingerprints=rubric_fingerprints,
+        )
+
         for question in subjective_questions:
             question_id = str(question.question_id or "")
             if not question_id:
@@ -135,8 +270,21 @@ class ExamAIBulkGradingService:
                     f"读取第 {question.number} 题", "主观题缺少题目 ID",
                     score_results,
                 )
+            try:
+                rubric, rubric_fingerprint = self._current_rubric(question)
+            except Exception as exc:
+                return self._fail(
+                    answer_id, student_name, student_id, "grading_failed",
+                    f"读取第 {question.number} 题评分要求", str(exc),
+                    score_results,
+                )
             result = self._saved_result(
-                answer_id, student_id, question, score_results
+                answer_id,
+                student_id,
+                question,
+                score_results,
+                rubric_fingerprints,
+                rubric_fingerprint,
             )
             if result is None:
                 if stop_requested():
@@ -155,9 +303,6 @@ class ExamAIBulkGradingService:
                         "status": "stopped",
                     }
                 try:
-                    rubric = str(self.rubric_provider(question) or "").strip()
-                    if len(rubric) > 5000:
-                        raise ValueError("追加评分要求不能超过 5000 字符")
                     if question.score is None or question.score <= 0:
                         raise ValueError("该题缺少有效满分，无法校验 AI 返回的分数")
                     scoring_data = self.scoring_service.build_scoring_data(
@@ -187,6 +332,7 @@ class ExamAIBulkGradingService:
                         question_number=question.number,
                         question_type=question.question_type,
                         ai_score_breakdown=result,
+                        rubric_fingerprint=rubric_fingerprint,
                     )
                 except Exception as exc:
                     return self._fail(
@@ -199,6 +345,7 @@ class ExamAIBulkGradingService:
                         score_results,
                     )
                 score_results[question_id] = result
+                rubric_fingerprints[question_id] = rubric_fingerprint
                 self.job_store.update_record(
                     self.context.exam_id,
                     answer_id,
@@ -207,9 +354,11 @@ class ExamAIBulkGradingService:
                     student_id=student_id,
                     stage=f"已完成第 {question.number} 题评分",
                     score_results=score_results,
+                    rubric_fingerprints=rubric_fingerprints,
                 )
             else:
                 score_results[question_id] = result
+                rubric_fingerprints[question_id] = rubric_fingerprint
 
         if stop_requested():
             self.job_store.update_record(
@@ -220,6 +369,7 @@ class ExamAIBulkGradingService:
                 student_id=student_id,
                 stage="评分已完成，等待提交",
                 score_results=score_results,
+                rubric_fingerprints=rubric_fingerprints,
             )
             return {
                 "answer_id": answer_id,
@@ -235,6 +385,7 @@ class ExamAIBulkGradingService:
             student_id=student_id,
             stage="评分完成，正在提交",
             score_results=score_results,
+            rubric_fingerprints=rubric_fingerprints,
         )
         score_overrides = {
             question_id: result["score"]
@@ -274,13 +425,29 @@ class ExamAIBulkGradingService:
             student_id=student_id,
             stage="已提交",
             score_results=score_results,
+            rubric_fingerprints=rubric_fingerprints,
         )
         return self._outcome(answer_id, student_name, job)
 
-    def _saved_result(self, answer_id, student_id, question, score_results):
+    def _saved_result(
+        self,
+        answer_id,
+        student_id,
+        question,
+        score_results,
+        rubric_fingerprints,
+        current_fingerprint,
+        *,
+        allow_draft=True,
+    ):
         question_id = str(question.question_id or "")
         result = score_results.get(question_id)
-        if result is None:
+        if (
+            result is not None
+            and rubric_fingerprints.get(question_id) != current_fingerprint
+        ):
+            result = None
+        if result is None and allow_draft:
             draft_key = self.score_draft_store.make_key(
                 self.context.exam_id,
                 answer_id,
@@ -293,7 +460,11 @@ class ExamAIBulkGradingService:
                 entry = self.score_draft_store.get_entry(draft_key)
             except (OSError, ValueError):
                 entry = None
-            result = entry.get("ai_score_breakdown") if entry else None
+            if (
+                entry is not None
+                and entry.get("rubric_fingerprint") == current_fingerprint
+            ):
+                result = entry.get("ai_score_breakdown")
         if not isinstance(result, dict):
             return None
         if question.score is None or question.score <= 0:

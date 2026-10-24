@@ -274,6 +274,8 @@ class ExamAnswerDialog(QDialog):
         self._ai_questions = {}
         self._ai_score_workers = {}
         self._ai_breakdowns = {}
+        self._ai_rubric_fingerprints = {}
+        self._ai_scoring_rubric_fingerprints = {}
         self._expanded_ai_rationales = set()
         self._ai_batch_active = False
         self._ai_batch_queue = []
@@ -579,10 +581,20 @@ class ExamAnswerDialog(QDialog):
                 entry = self._score_draft_store.get_entry(key)
             except (OSError, ValueError):
                 entry = None
+            breakdown = entry.get("ai_score_breakdown") if entry else None
+            current_fingerprint = self._current_ai_rubric_fingerprint(
+                question
+            )
+            if isinstance(breakdown, dict):
+                saved_fingerprint = entry.get("rubric_fingerprint")
+                if saved_fingerprint != current_fingerprint:
+                    continue
+                self._ai_rubric_fingerprints[
+                    self._ai_question_key(question)
+                ] = saved_fingerprint
             saved_score = entry.get("score") if entry else None
             if saved_score is not None:
                 self._draft_scores[key] = float(saved_score)
-            breakdown = entry.get("ai_score_breakdown") if entry else None
             if isinstance(breakdown, dict):
                 self._ai_breakdowns[key] = breakdown
 
@@ -593,6 +605,13 @@ class ExamAnswerDialog(QDialog):
         return ExamAIScoringService.rubric_settings_key(
             self._exam_id, question
         )
+
+    def _current_ai_rubric_fingerprint(self, question):
+        settings = QSettings("HaoSoft", "XuexitongManager")
+        rubric = settings.value(
+            self._ai_rubric_settings_key(question), "", str
+        )
+        return ExamAIScoringService.rubric_fingerprint(rubric)
 
     def _on_paper_link_clicked(self, url):
         if url.scheme() == "exam-attachment":
@@ -657,7 +676,19 @@ class ExamAnswerDialog(QDialog):
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         if accepted:
             rubric = dialog.textValue()
-            settings.setValue(settings_key, rubric.strip())
+            normalized_rubric = rubric.strip()
+            settings.setValue(settings_key, normalized_rubric)
+            question_key = self._ai_question_key(question)
+            old_fingerprint = self._ai_rubric_fingerprints.get(question_key)
+            new_fingerprint = ExamAIScoringService.rubric_fingerprint(
+                normalized_rubric
+            )
+            if old_fingerprint is not None and old_fingerprint != new_fingerprint:
+                draft_key = self._score_draft_key(question)
+                self._ai_breakdowns.pop(draft_key, None)
+                self._ai_rubric_fingerprints.pop(question_key, None)
+                self._draft_scores.pop(draft_key, None)
+                self._refresh_paper_theme(None)
             self.read_only_note.setText(
                 f"第 {question.number} 题的 AI 评分要求已保存"
             )
@@ -678,9 +709,22 @@ class ExamAnswerDialog(QDialog):
         skipped_count = 0
         for question in all_questions:
             draft_key = self._score_draft_key(question)
-            if draft_key in self._ai_breakdowns:
+            question_key = self._ai_question_key(question)
+            saved_fingerprint = self._ai_rubric_fingerprints.get(
+                question_key
+            )
+            current_fingerprint = self._current_ai_rubric_fingerprint(
+                question
+            )
+            if (
+                draft_key in self._ai_breakdowns
+                and saved_fingerprint == current_fingerprint
+            ):
                 skipped_count += 1
             else:
+                self._ai_breakdowns.pop(draft_key, None)
+                self._ai_rubric_fingerprints.pop(question_key, None)
+                self._draft_scores.pop(draft_key, None)
                 questions.append(question)
         if not questions:
             if skipped_count:
@@ -793,6 +837,9 @@ class ExamAnswerDialog(QDialog):
         rubric = settings.value(
             self._ai_rubric_settings_key(question), "", str
         ).strip()
+        rubric_fingerprint = ExamAIScoringService.rubric_fingerprint(
+            rubric
+        )
         if not error_message and len(rubric) > 5000:
             error_title = "评分要求过长"
             error_message = "追加评分要求不能超过 5000 字符。"
@@ -818,6 +865,9 @@ class ExamAnswerDialog(QDialog):
             self.read_only_note.setText(
                 f"正在 AI 评分：第 {question.number} 题…"
             )
+        self._ai_scoring_rubric_fingerprints[question_key] = (
+            rubric_fingerprint
+        )
         self._refresh_paper_theme(None)
         worker.start()
         return True, ""
@@ -827,6 +877,9 @@ class ExamAnswerDialog(QDialog):
         question = self._ai_questions.get(question_key)
         if question is None:
             return
+        rubric_fingerprint = self._ai_scoring_rubric_fingerprints.pop(
+            question_key, None
+        )
         if not succeeded:
             if self._ai_batch_active:
                 self._record_ai_batch_result(question, False, result)
@@ -846,6 +899,7 @@ class ExamAnswerDialog(QDialog):
             question,
             result["score"],
             ai_breakdown=result,
+            rubric_fingerprint=rubric_fingerprint,
             show_warning=not self._ai_batch_active,
         ):
             if previous_breakdown is None:
@@ -859,7 +913,9 @@ class ExamAnswerDialog(QDialog):
             return
         if self._ai_batch_active:
             self._record_ai_batch_result(question, True)
-        else:
+        if rubric_fingerprint is not None:
+            self._ai_rubric_fingerprints[question_key] = rubric_fingerprint
+        if not self._ai_batch_active:
             self.read_only_note.setText(
                 f"第 {question.number} 题 AI 评分已写入本地草稿"
             )
@@ -1245,7 +1301,8 @@ class ExamAnswerDialog(QDialog):
             )
 
     def _save_score_draft(
-        self, key, question, score, ai_breakdown=None, show_warning=True
+        self, key, question, score, ai_breakdown=None,
+        rubric_fingerprint=None, show_warning=True,
     ):
         metadata = {
             "exam_id": self._exam_id,
@@ -1257,6 +1314,7 @@ class ExamAnswerDialog(QDialog):
         }
         if ai_breakdown is not None:
             metadata["ai_score_breakdown"] = ai_breakdown
+            metadata["rubric_fingerprint"] = rubric_fingerprint
         try:
             self._score_draft_store.save_score(
                 key,
@@ -1281,6 +1339,9 @@ class ExamAnswerDialog(QDialog):
             self._ai_breakdowns[key] = ai_breakdown
         else:
             self._ai_breakdowns.pop(key, None)
+            self._ai_rubric_fingerprints.pop(
+                self._ai_question_key(question), None
+            )
         self.read_only_note.setText("分数已保存到本地草稿，不会提交成绩")
         self._refresh_group_score_buttons()
         self._refresh_navigation_summaries()

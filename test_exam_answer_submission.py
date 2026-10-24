@@ -206,6 +206,39 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
         self.assertEqual(dict(query_params)["sumScore"], "15")
         self.assertEqual(referer, "")
 
+    def test_ai_draft_with_changed_rubric_is_not_loaded_for_reuse(self):
+        question = self.content.questions[0]
+        key = self.dialog._score_draft_key(question)
+        question_key = self.dialog._ai_question_key(question)
+        self.dialog._draft_scores.clear()
+        self.dialog._ai_breakdowns.clear()
+        self.dialog._ai_rubric_fingerprints.clear()
+
+        with (
+            patch.object(
+                self.dialog,
+                "_current_ai_rubric_fingerprint",
+                return_value="new-fingerprint",
+            ),
+            patch.object(
+                self.dialog._score_draft_store,
+                "get_entry",
+                side_effect=lambda requested_key: (
+                    {
+                        "score": 8,
+                        "ai_score_breakdown": {"score": 8},
+                        "rubric_fingerprint": "old-fingerprint",
+                    }
+                    if requested_key == key else None
+                ),
+            ),
+        ):
+            self.dialog._load_score_drafts(self.content)
+
+        self.assertNotIn(key, self.dialog._draft_scores)
+        self.assertNotIn(key, self.dialog._ai_breakdowns)
+        self.assertNotIn(question_key, self.dialog._ai_rubric_fingerprints)
+
     def test_ai_rubric_dialog_has_larger_resizable_multiline_editor(self):
         question = self.content.questions[0]
         settings = unittest.mock.Mock()
