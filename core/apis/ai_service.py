@@ -3,6 +3,7 @@ from io import BytesIO
 import os
 import json
 import math
+import time
 import requests
 from requests.exceptions import ReadTimeout
 from core.config import AI_CONFIG_FILE, DEFAULT_AI_SYSTEM_PROMPT
@@ -262,21 +263,40 @@ class DiscreteMathAIService:
         url = self._build_endpoint_url(
             self.base_url.rstrip("/"), "chat-messages"
         )
+        body = {
+            "inputs": request_inputs,
+            "query": query,
+            "response_mode": "streaming",
+            "user": dify_user,
+            "conversation_id": "",
+            **({"files": files} if files else {}),
+        }
+        headers = {
+            "Authorization": self._dify_authorization_header(),
+            "Content-Type": "application/json",
+        }
+        last_error = None
+        for attempt in range(3):
+            try:
+                return self._dify_chat_stream(url, headers, body, timeout)
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+            ) as exc:
+                last_error = exc
+                logger.warning(f"Dify 连接中断，第 {attempt + 1} 次尝试: {exc}")
+                time.sleep(1 + attempt)
+        raise last_error
+
+    @staticmethod
+    def _dify_chat_stream(url, headers, body, timeout):
+        # 流式接收可避免长时间无数据导致网关/服务端断开空闲连接
         response = requests.post(
             url,
-            headers={
-                "Authorization": self._dify_authorization_header(),
-                "Content-Type": "application/json",
-            },
-            json={
-                "inputs": request_inputs,
-                "query": query,
-                "response_mode": "blocking",
-                "user": dify_user,
-                "conversation_id": "",
-                **({"files": files} if files else {}),
-            },
+            headers={**headers, "Connection": "close"},
+            json=body,
             timeout=timeout,
+            stream=True,
         )
         try:
             if response.status_code not in (200, 201):
@@ -284,11 +304,34 @@ class DiscreteMathAIService:
                     f"Dify 聊天请求失败 (HTTP {response.status_code}): "
                     f"{response.text[:500]}"
                 )
-            payload = response.json()
-            answer = payload.get("answer") if isinstance(payload, dict) else None
-            if not isinstance(answer, str) or not answer.strip():
+            chunks = []
+            for raw_line in response.iter_lines(decode_unicode=False):
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event_type = event.get("event")
+                if event_type == "error":
+                    raise RuntimeError(
+                        f"Dify 返回错误: {event.get('message') or event}"
+                    )
+                if event_type in ("message", "agent_message"):
+                    answer = event.get("answer")
+                    if isinstance(answer, str):
+                        chunks.append(answer)
+                elif event_type == "message_end":
+                    break
+            answer = "".join(chunks).strip()
+            if not answer:
                 raise ValueError("Dify 未返回有效的 answer")
-            return answer.strip()
+            return answer
         finally:
             response.close()
 

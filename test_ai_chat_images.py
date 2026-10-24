@@ -111,7 +111,12 @@ class AIChatImageRequestTests(unittest.TestCase):
             (),
             {
                 "status_code": 200,
-                "json": lambda self: {"answer": "图中内容"},
+                "iter_lines": lambda self, decode_unicode=False: iter([
+                    'data: {"event": "message", "answer": "图中"}'.encode(),
+                    b"",
+                    'data: {"event": "message", "answer": "内容"}'.encode(),
+                    b'data: {"event": "message_end"}',
+                ]),
                 "close": lambda self: None,
             },
         )()
@@ -153,6 +158,27 @@ class AIChatImageRequestTests(unittest.TestCase):
             chat_call.kwargs["json"]["inputs"],
             {"system": "请帮助教师解答学生问题。", "model": "vision-model"},
         )
+        self.assertEqual(chat_call.kwargs["json"]["response_mode"], "streaming")
+
+    def test_dify_chat_retries_when_connection_is_closed(self):
+        import requests
+
+        service = self.create_service("dify")
+        ok = type("Response", (), {
+            "status_code": 200,
+            "iter_lines": lambda self, decode_unicode=False: iter([
+                'data: {"event": "message", "answer": "好"}'.encode(),
+            ]),
+            "close": lambda self: None,
+        })()
+        with patch("core.apis.ai_service.time.sleep"), patch(
+            "core.apis.ai_service.requests.post",
+            side_effect=[requests.exceptions.ConnectionError("closed"), ok],
+        ) as post:
+            answer = service._dify_chat("hi", uploaded_files=[])
+
+        self.assertEqual(answer, "好")
+        self.assertEqual(post.call_count, 2)
 
     def test_dify_connection_test_uses_native_chat_endpoint(self):
         service = self.create_service("dify")
