@@ -3,6 +3,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from core.config import DATA_DIR
 
@@ -18,6 +19,7 @@ class ExamAIGradingJobStore:
         self.filepath = Path(
             filepath or Path(DATA_DIR) / "exam_ai_grading_jobs.json"
         )
+        self._active_attempts = {}
 
     @staticmethod
     def make_key(exam_id, answer_id):
@@ -57,18 +59,139 @@ class ExamAIGradingJobStore:
         ]
 
     def get_exam_visible_records(self, exam_id):
-        visible_statuses = self.ISSUE_STATUSES | {
-            "pending", "grading", "ready_to_submit", "stopped",
-        }
-        records = [
-            record for record in self.get_exam_records(exam_id)
-            if record.get("status") in visible_statuses
-        ]
+        records = []
+        for job in self.get_exam_records(exam_id):
+            history = job.get("history")
+            if isinstance(history, list):
+                records.extend(
+                    dict(attempt) for attempt in history
+                    if isinstance(attempt, dict)
+                    and attempt.get("status") in self.visible_statuses()
+                )
+            elif job.get("status") in self.visible_statuses():
+                records.append(job)
         return sorted(
             records,
             key=lambda record: record.get("updated_at", ""),
             reverse=True,
         )
+
+    @classmethod
+    def visible_statuses(cls):
+        return cls.ISSUE_STATUSES | {
+            "pending", "grading", "ready_to_submit", "stopped",
+        }
+
+    def start_attempt(self, exam_id, answer_id, *, student_name="", student_id=""):
+        key = self.make_key(exam_id, answer_id)
+        data = self._load()
+        job = data["jobs"].get(key, {})
+        if not isinstance(job, dict):
+            job = {}
+        history = job.get("history")
+        if not isinstance(history, list):
+            history = []
+        attempt_id = uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        attempt = {
+            "attempt_id": attempt_id,
+            "attempt_number": len(history) + 1,
+            "exam_id": str(exam_id),
+            "answer_id": str(answer_id),
+            "student_name": str(student_name or job.get("student_name", "")),
+            "student_id": str(student_id or job.get("student_id", "")),
+            "status": "pending",
+            "stage": "本轮开始",
+            "error": "",
+            "started_at": now,
+            "updated_at": now,
+        }
+        history.append(attempt)
+        job["history"] = history
+        data["jobs"][key] = job
+        self._save(data)
+        self._active_attempts[(str(exam_id), str(answer_id))] = attempt_id
+        return attempt_id
+
+    def _update_attempt(self, exam_id, answer_id, attempt_id, details):
+        key = self.make_key(exam_id, answer_id)
+        data = self._load()
+        job = data["jobs"].get(key, {})
+        if not isinstance(job, dict):
+            return
+        history = job.get("history")
+        if not isinstance(history, list):
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        for attempt in history:
+            if attempt.get("attempt_id") == attempt_id:
+                attempt.update(details)
+                attempt["updated_at"] = now
+                self._save(data)
+                return
+
+    def finish_attempt(self, exam_id, answer_id, outcome, *, stage=""):
+        attempt_id = self._active_attempts.pop(
+            (str(exam_id), str(answer_id)), None
+        )
+        if attempt_id is None:
+            return
+        details = {
+            "status": str(outcome.get("status", "unknown")),
+            "error": str(outcome.get("error", "")),
+        }
+        final_stage = stage or outcome.get("stage", "")
+        if final_stage:
+            details["stage"] = str(final_stage)
+        self._update_attempt(exam_id, answer_id, attempt_id, details)
+        if outcome.get("status") in {"submitted", "no_subjective"}:
+            self._resolve_previous_attempts(exam_id, answer_id, attempt_id)
+
+    def _resolve_previous_attempts(self, exam_id, answer_id, current_attempt_id):
+        key = self.make_key(exam_id, answer_id)
+        data = self._load()
+        job = data["jobs"].get(key, {})
+        if not isinstance(job, dict) or not isinstance(job.get("history"), list):
+            return
+        changed = False
+        for attempt in job["history"]:
+            if (
+                attempt.get("attempt_id") != current_attempt_id
+                and attempt.get("status") in self.visible_statuses()
+            ):
+                attempt["status"] = "resolved"
+                attempt["stage"] = "后续重试成功，异常已解除"
+                attempt["updated_at"] = datetime.now(timezone.utc).isoformat()
+                changed = True
+        if changed:
+            self._save(data)
+
+    def resolve_attempt(self, exam_id, attempt_id):
+        for job in self.get_exam_records(exam_id):
+            for attempt in job.get("history", []):
+                if attempt.get("attempt_id") != attempt_id:
+                    continue
+                if (
+                    job.get("status") in self.ISSUE_STATUSES
+                    and job.get("history")
+                    and job["history"][-1].get("attempt_id") == attempt_id
+                ):
+                    self.update_record(
+                        exam_id,
+                        attempt["answer_id"],
+                        "resolved",
+                        student_name=job.get("student_name", ""),
+                        student_id=job.get("student_id", ""),
+                        stage="已由教师标记处理",
+                    )
+                self._update_attempt(
+                    exam_id,
+                    attempt["answer_id"],
+                    attempt_id,
+                    {"status": "resolved", "stage": "已由教师标记处理"},
+                )
+                return True
+        return False
 
     def update_record(
         self, exam_id, answer_id, status, *, student_name="", student_id="",
@@ -94,6 +217,24 @@ class ExamAIGradingJobStore:
         }
         record.update(details)
         data["jobs"][key] = record
+        attempt_id = self._active_attempts.get(
+            (str(exam_id), str(answer_id))
+        )
+        if attempt_id:
+            history = record.get("history")
+            if isinstance(history, list):
+                now = record["updated_at"]
+                for attempt in history:
+                    if attempt.get("attempt_id") == attempt_id:
+                        attempt.update({
+                            "student_name": record["student_name"],
+                            "student_id": record["student_id"],
+                            "status": status,
+                            "stage": str(stage),
+                            "error": str(error),
+                            "updated_at": now,
+                        })
+                        break
         self._save(data)
         return dict(record)
 

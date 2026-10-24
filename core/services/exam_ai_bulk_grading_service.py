@@ -50,12 +50,26 @@ class ExamAIBulkGradingService:
     ):
         stop_requested = stop_requested or (lambda: False)
         records = self.record_fetcher(self.session, self.context)
+        skipped_existing_issues = 0
         if answer_ids is not None:
             answer_ids = {str(answer_id) for answer_id in answer_ids}
             records = [
                 record for record in records
                 if str(record.get("id") or "") in answer_ids
             ]
+        else:
+            filtered_records = []
+            for record in records:
+                answer_id = str(record.get("id") or "")
+                job = (
+                    self.job_store.get_record(self.context.exam_id, answer_id)
+                    if answer_id else None
+                )
+                if job and job.get("status") in self.job_store.ISSUE_STATUSES:
+                    skipped_existing_issues += 1
+                    continue
+                filtered_records.append(record)
+            records = filtered_records
         outcomes = []
         total = len(records)
         preloaded_contents = {}
@@ -70,16 +84,22 @@ class ExamAIBulkGradingService:
             ) or {}
             if job.get("status") != "submitted":
                 continue
-            if progress_callback is not None:
-                progress_callback(index, total, {
-                    "answer_id": answer_id,
-                    "student_name": str(
-                        record.get("createUserName") or ""
-                    ),
-                    "status": "checking_rubric",
-                })
+            def report_precheck(stage, answer_id=answer_id, record=record,
+                                index=index):
+                if progress_callback is not None:
+                    progress_callback(index, total, {
+                        "answer_id": answer_id,
+                        "student_name": str(
+                            record.get("createUserName") or ""
+                        ),
+                        "status": "checking_rubric",
+                        "stage": stage,
+                    })
+
+            report_precheck("读取试卷")
             content = self._fetch_content(answer_id)
             preloaded_contents[answer_id] = content
+            report_precheck("检查评分要求")
             stale_questions = self._stale_rubric_questions(
                 answer_id,
                 str(record.get("loginName") or ""),
@@ -117,21 +137,49 @@ class ExamAIBulkGradingService:
         for index, record in enumerate(records, 1):
             if stop_requested():
                 break
-            if progress_callback is not None:
-                progress_callback(index, total, {
-                    "answer_id": str(record.get("id") or ""),
-                    "student_name": str(record.get("createUserName") or ""),
-                    "status": "processing",
-                })
+            answer_id = str(record.get("id") or "")
+            if answer_id:
+                self.job_store.start_attempt(
+                    self.context.exam_id,
+                    answer_id,
+                    student_name=str(record.get("createUserName") or ""),
+                    student_id=str(record.get("loginName") or ""),
+                )
+            def report_stage(stage, record=record, index=index):
+                if progress_callback is not None:
+                    progress_callback(index, total, {
+                        "answer_id": str(record.get("id") or ""),
+                        "student_name": str(
+                            record.get("createUserName") or ""
+                        ),
+                        "status": "processing",
+                        "stage": stage,
+                    })
+
+            report_stage("准备处理")
             outcome = self._process_record(
                 record,
                 stop_requested,
+                stage_callback=report_stage,
                 preloaded_content=preloaded_contents.get(
                     str(record.get("id") or "")
                 ),
                 force_submitted_regrade=(
                     str(record.get("id") or "") in stale_submitted_ids
                 ),
+            )
+            attempt_stage = outcome.get("stage", "")
+            if outcome.get("status") == "submitted" and not attempt_stage:
+                attempt_stage = (
+                    "已提交，本轮跳过（评分要求未变）"
+                    if answer_id not in stale_submitted_ids
+                    else "已提交"
+                )
+            self.job_store.finish_attempt(
+                self.context.exam_id,
+                answer_id,
+                outcome,
+                stage=attempt_stage,
             )
             outcomes.append(outcome)
             if progress_callback is not None:
@@ -140,6 +188,7 @@ class ExamAIBulkGradingService:
             "total": total,
             "processed": len(outcomes),
             "stopped": stop_requested(),
+            "skipped_existing_issues": skipped_existing_issues,
             "outcomes": outcomes,
         }
 
@@ -154,7 +203,7 @@ class ExamAIBulkGradingService:
 
     def _current_rubric(self, question):
         rubric = str(self.rubric_provider(question) or "").strip()
-        if len(rubric) > 5000:
+        if len(rubric) > ExamAIScoringService.MAX_RUBRIC_CHARS:
             raise ValueError("追加评分要求不能超过 5000 字符")
         return rubric, ExamAIScoringService.rubric_fingerprint(rubric)
 
@@ -200,7 +249,9 @@ class ExamAIBulkGradingService:
         *,
         preloaded_content=None,
         force_submitted_regrade=False,
+        stage_callback=None,
     ):
+        report = stage_callback or (lambda _stage: None)
         answer_id = str(record.get("id") or "")
         student_name = str(record.get("createUserName") or "")
         student_id = str(record.get("loginName") or "")
@@ -219,6 +270,8 @@ class ExamAIBulkGradingService:
         score_results = dict(job.get("score_results") or {})
         rubric_fingerprints = dict(job.get("rubric_fingerprints") or {})
         try:
+            if preloaded_content is None:
+                report("读取试卷")
             content = preloaded_content or self._fetch_content(answer_id)
         except Exception as exc:
             return self._fail(
@@ -242,6 +295,7 @@ class ExamAIBulkGradingService:
             )
             return self._outcome(answer_id, student_name, job)
 
+        report("检查评分要求")
         if (
             job.get("status") == "submitted"
             and not force_submitted_regrade
@@ -262,7 +316,7 @@ class ExamAIBulkGradingService:
             rubric_fingerprints=rubric_fingerprints,
         )
 
-        for question in subjective_questions:
+        for question_index, question in enumerate(subjective_questions, 1):
             question_id = str(question.question_id or "")
             if not question_id:
                 return self._fail(
@@ -302,6 +356,10 @@ class ExamAIBulkGradingService:
                         "student_name": student_name,
                         "status": "stopped",
                     }
+                report(
+                    f"AI评分第 {question.number} 题"
+                    f"（{question_index}/{len(subjective_questions)}）"
+                )
                 try:
                     if question.score is None or question.score <= 0:
                         raise ValueError("该题缺少有效满分，无法校验 AI 返回的分数")
@@ -387,6 +445,7 @@ class ExamAIBulkGradingService:
             score_results=score_results,
             rubric_fingerprints=rubric_fingerprints,
         )
+        report("提交成绩")
         score_overrides = {
             question_id: result["score"]
             for question_id, result in score_results.items()

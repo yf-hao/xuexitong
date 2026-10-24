@@ -47,6 +47,34 @@ class ExamAIScoringService:
     def rubric_settings_key(cls, exam_id, question):
         return f"exam_ai_rubrics/{cls.question_key(exam_id, question)}"
 
+    MAX_RUBRIC_CHARS = 5000
+
+    @classmethod
+    def course_question_rubric_key(cls, course_id, question):
+        if not course_id or not question.question_id:
+            return ""
+        return f"exam_ai_course_question_rubrics/{course_id}/{question.question_id}"
+
+    @classmethod
+    def resolve_rubric(cls, settings, course_id, exam_id, question):
+        shared_key = cls.course_question_rubric_key(course_id, question)
+        if shared_key:
+            shared = str(settings.value(shared_key, "", str) or "")
+            if shared.strip():
+                return shared
+        # 兼容旧版本仅按考试保存的评分要求
+        return str(
+            settings.value(cls.rubric_settings_key(exam_id, question), "", str)
+            or ""
+        )
+
+    @classmethod
+    def save_rubric(cls, settings, course_id, exam_id, question, rubric):
+        key = cls.course_question_rubric_key(course_id, question) or (
+            cls.rubric_settings_key(exam_id, question)
+        )
+        settings.setValue(key, str(rubric or "").strip())
+
     @staticmethod
     def rubric_fingerprint(rubric):
         normalized = str(rubric or "").strip()

@@ -107,7 +107,7 @@ class ExamReviewSearchTests(unittest.TestCase):
             self.view._refresh_ai_grading_records_button()
             self.assertFalse(self.view.grading_records_button.isHidden())
             self.assertEqual(
-                self.view.grading_records_button.text(), "批改记录 (1)"
+                self.view.grading_records_button.text(), "异常记录 (1)"
             )
 
             self.view._ai_grading_job_store.resolve_issue(
@@ -127,9 +127,24 @@ class ExamReviewSearchTests(unittest.TestCase):
             self.view._on_ai_bulk_grading_progress_dialog_dismissed
         )
 
+        emitted = []
+        self.view.bulk_grading_status.connect(
+            lambda text, clickable: emitted.append((text, clickable))
+        )
         dialog.close()
 
         self.assertTrue(self.view._bulk_grading_dialog_dismissed)
+        self.assertEqual(emitted[-1], ("AI改卷进度：7/40，学生甲：处理中", True))
+        self.view._bulk_grading_progress_value = (7, 40)
+        self.view._show_ai_bulk_grading_progress_dialog()
+        reopened = self.view._bulk_grading_progress_dialog
+        self.assertIsNot(reopened, dialog)
+        self.assertFalse(self.view._bulk_grading_dialog_dismissed)
+        self.assertEqual(emitted[-1], ("", False))
+        self.assertEqual(reopened.progress_bar.maximum(), 40)
+        self.assertEqual(reopened.progress_bar.value(), 7)
+        reopened.close()
+        self.view._bulk_grading_worker = None
         self.assertFalse(self.view.status_label.isHidden())
         self.assertEqual(
             self.view.status_label.text(),

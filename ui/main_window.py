@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QTreeWidget, QTreeWidgetItem,
                              QHeaderView, QPushButton, QLabel, QSplitter, QFrame, QListView,
                              QStackedWidget, QMessageBox, QFileDialog)
-from PyQt6.QtCore import QByteArray, QSize, Qt, QSettings, QCoreApplication
+from PyQt6.QtCore import QByteArray, QSize, Qt, QSettings, QCoreApplication, pyqtSignal
 from ui.workers import (CourseWorker, DetailsWorker, ClassWorker, MaterialWorker, DownloadWorker)
 from ui.styles import MAIN_STYLE
 from ui.theme import apply_theme_stylesheet, get_theme_palette, refresh_theme_styles, theme_manager
@@ -29,6 +29,18 @@ from core.logger import get_logger
 
 logger = get_logger()
 NAV_GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def mouseReleaseEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.cursor().shape() == Qt.CursorShape.PointingHandCursor
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
 
 class MainWindow(QMainWindow):
     SELECTOR_MAX_WIDTH = 640
@@ -266,6 +278,9 @@ class MainWindow(QMainWindow):
 
         self.exam_review_view = ExamReviewView(self.crawler, parent=self)
         self.exam_review_view.back_requested.connect(self._return_to_exam_list)
+        self.exam_review_view.bulk_grading_status.connect(
+            self._on_bulk_grading_status
+        )
         self.stacked_widget.addWidget(self.exam_review_view)
 
         content_layout.addWidget(self.stacked_widget)
@@ -281,7 +296,8 @@ class MainWindow(QMainWindow):
         apply_theme_stylesheet(self.bottom_widget, lambda palette: f"background: transparent; border-top: 1px solid {palette.border};")
         bottom_bar = QHBoxLayout(self.bottom_widget)
         
-        self.status_label = QLabel("正在初始化...")
+        self.status_label = ClickableLabel("正在初始化...")
+        self.status_label.clicked.connect(self._on_status_label_clicked)
         apply_theme_stylesheet(self.status_label, lambda palette: f"font-weight: normal; color: {palette.accent}; font-size: 12px; border: none;")
         self.retry_startup_btn = QPushButton("重试")
         self.retry_startup_btn.setToolTip("重新加载失败的课程、班级或目录")
@@ -339,6 +355,27 @@ class MainWindow(QMainWindow):
 
     def _update_status(self, message):
         self.status_label.setText(message)
+        self._set_status_clickable(False)
+
+    def _set_status_clickable(self, clickable):
+        self.status_label.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if clickable else Qt.CursorShape.ArrowCursor
+        )
+        self.status_label.setToolTip("点击查看改卷进度" if clickable else "")
+
+    def _on_bulk_grading_status(self, text, clickable):
+        if not text:
+            self._update_status(
+                f"已进入: {self.exam_review_view.context.exam_title} - 批阅"
+                if self.exam_review_view.context is not None else ""
+            )
+            return
+        self.status_label.setText(text)
+        self._set_status_clickable(clickable)
+
+    def _on_status_label_clicked(self):
+        self.exam_review_view.show_ai_bulk_grading_progress_dialog()
 
     def _open_exam_review(self, exam):
         context = ExamReviewContext(

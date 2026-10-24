@@ -245,6 +245,7 @@ class ExamAnswerDialog(QDialog):
         question_review_mode: bool = False,
         pending_count: int | None = None,
         submitted_count: int | None = None,
+        course_id: str = "",
     ):
         super().__init__(parent)
         self.setWindowTitle(f"答卷查看 - {student_name or student_id}")
@@ -252,6 +253,7 @@ class ExamAnswerDialog(QDialog):
         self._content = content
         self._selected_navigation_button = None
         self._exam_id = str(exam_id or exam_title or "")
+        self._course_id = str(course_id or "")
         self._answer_id = str(answer_id or student_id or "")
         self._student_id = str(student_id or student_name or "")
         self._session = session
@@ -607,11 +609,15 @@ class ExamAnswerDialog(QDialog):
         )
 
     def _current_ai_rubric_fingerprint(self, question):
-        settings = QSettings("HaoSoft", "XuexitongManager")
-        rubric = settings.value(
-            self._ai_rubric_settings_key(question), "", str
+        return ExamAIScoringService.rubric_fingerprint(
+            self._effective_ai_rubric(question)
         )
-        return ExamAIScoringService.rubric_fingerprint(rubric)
+
+    def _effective_ai_rubric(self, question):
+        settings = QSettings("HaoSoft", "XuexitongManager")
+        return ExamAIScoringService.resolve_rubric(
+            settings, self._course_id, self._exam_id, question
+        )
 
     def _on_paper_link_clicked(self, url):
         if url.scheme() == "exam-attachment":
@@ -659,11 +665,14 @@ class ExamAnswerDialog(QDialog):
 
     def _edit_ai_rubric(self, question):
         settings = QSettings("HaoSoft", "XuexitongManager")
-        settings_key = self._ai_rubric_settings_key(question)
-        current_rubric = settings.value(settings_key, "", str)
+        current_rubric = ExamAIScoringService.resolve_rubric(
+            settings, self._course_id, self._exam_id, question
+        )
         dialog = QInputDialog(self)
         dialog.setWindowTitle(f"第 {question.number} 题的追加评分要求")
-        dialog.setLabelText("同一道题的要求会应用于不同学生：")
+        dialog.setLabelText(
+            "该要求会应用于本课程所有班级、所有学生的这道题："
+        )
         dialog.setInputMode(QInputDialog.InputMode.TextInput)
         dialog.setOption(
             QInputDialog.InputDialogOption.UsePlainTextEditForTextInput,
@@ -677,7 +686,10 @@ class ExamAnswerDialog(QDialog):
         if accepted:
             rubric = dialog.textValue()
             normalized_rubric = rubric.strip()
-            settings.setValue(settings_key, normalized_rubric)
+            ExamAIScoringService.save_rubric(
+                settings, self._course_id, self._exam_id, question,
+                normalized_rubric,
+            )
             question_key = self._ai_question_key(question)
             old_fingerprint = self._ai_rubric_fingerprints.get(question_key)
             new_fingerprint = ExamAIScoringService.rubric_fingerprint(
@@ -833,14 +845,14 @@ class ExamAnswerDialog(QDialog):
         if question.score is None or question.score <= 0:
             error_message = "该题缺少有效满分，无法校验 AI 返回的分数。"
 
-        settings = QSettings("HaoSoft", "XuexitongManager")
-        rubric = settings.value(
-            self._ai_rubric_settings_key(question), "", str
-        ).strip()
+        rubric = self._effective_ai_rubric(question).strip()
         rubric_fingerprint = ExamAIScoringService.rubric_fingerprint(
             rubric
         )
-        if not error_message and len(rubric) > 5000:
+        if (
+            not error_message
+            and len(rubric) > ExamAIScoringService.MAX_RUBRIC_CHARS
+        ):
             error_title = "评分要求过长"
             error_message = "追加评分要求不能超过 5000 字符。"
         if error_message:

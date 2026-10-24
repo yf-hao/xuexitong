@@ -233,6 +233,7 @@ class ContentWidthComboBox(QComboBox):
 
 class ExamReviewView(QWidget):
     back_requested = pyqtSignal()
+    bulk_grading_status = pyqtSignal(str, bool)
     PAGE_SIZE_OPTIONS = (20, 50, 100)
     PAGE_SIZE_SETTINGS_PREFIX = "exam_review/page_size"
 
@@ -261,6 +262,7 @@ class ExamReviewView(QWidget):
         self._bulk_grading_worker = None
         self._bulk_grading_progress_dialog = None
         self._bulk_grading_progress_text = ""
+        self._bulk_grading_progress_value = (0, 0)
         self._bulk_grading_dialog_dismissed = False
         self._ai_grading_job_store = ExamAIGradingJobStore()
         self._state_totals = {0: None, 1: None}
@@ -417,7 +419,7 @@ class ExamReviewView(QWidget):
         action_buttons_layout = QHBoxLayout(action_buttons)
         action_buttons_layout.setContentsMargins(0, 0, 0, 0)
         action_buttons_layout.setSpacing(6)
-        self.grading_records_button = QPushButton("批改记录")
+        self.grading_records_button = QPushButton("异常记录")
         self.grading_records_button.clicked.connect(
             self._open_ai_grading_records
         )
@@ -802,9 +804,6 @@ class ExamReviewView(QWidget):
             return
 
         self._set_review_loading(True)
-        self.question_status_label.setText(
-            f"正在加载第 {question.get('number', '')} 题的批阅页面…"
-        )
         self._show_loading(
             f"正在加载第 {question.get('number', '')} 题的批阅页面…\n含图片的答卷可能需要几秒"
         )
@@ -860,10 +859,6 @@ class ExamReviewView(QWidget):
                 number_item = self.questions_table.item(row, 1)
                 question_number = number_item.text() if number_item else ""
                 break
-        self.question_status_label.setText(
-            f"已加载第 {question_number} 题，学生："
-            f"{page.student_name or page.student_id or '未知'}"
-        )
         active_dialog = self._active_answer_dialog
         if (
             active_dialog is not None
@@ -871,10 +866,6 @@ class ExamReviewView(QWidget):
         ):
             active_dialog.load_question_page(
                 self.context.exam_title, page
-            )
-            self.question_status_label.setText(
-                f"已加载第 {question_number} 题，下一份："
-                f"{page.student_name or page.student_id or '未知'}"
             )
             return
 
@@ -885,6 +876,7 @@ class ExamReviewView(QWidget):
             page.content,
             self,
             exam_id=self.context.exam_id,
+            course_id=self.context.course_id,
             answer_id=page.answer_id or f"question-{question_id}",
             session=self.crawler.session,
             show_question_navigation=False,
@@ -1210,10 +1202,12 @@ class ExamReviewView(QWidget):
     def _create_ai_bulk_grading_service(self):
         def rubric_provider(question):
             settings = QSettings("HaoSoft", "XuexitongManager")
-            key = ExamAIScoringService.rubric_settings_key(
-                self.context.exam_id, question
-            )
-            return settings.value(key, "", str).strip()
+            return ExamAIScoringService.resolve_rubric(
+                settings,
+                self.context.course_id,
+                self.context.exam_id,
+                question,
+            ).strip()
 
         return ExamAIBulkGradingService(
             self.crawler.session,
@@ -1244,13 +1238,8 @@ class ExamReviewView(QWidget):
         self._bulk_grading_progress_text = "正在读取本场考试已交答卷名单…"
         self._bulk_grading_dialog_dismissed = False
         self.status_label.setText(self._bulk_grading_progress_text)
-        self._bulk_grading_progress_dialog = ExamAIBulkGradingProgressDialog(
-            self
-        )
-        self._bulk_grading_progress_dialog.dismissed.connect(
-            self._on_ai_bulk_grading_progress_dialog_dismissed
-        )
-        self._bulk_grading_progress_dialog.show()
+        self._bulk_grading_progress_value = (0, 0)
+        self._show_ai_bulk_grading_progress_dialog()
         self.status_label.hide()
         self._refresh_ai_grading_records_button()
         worker = ExamAIBulkGradingWorker(
@@ -1305,9 +1294,15 @@ class ExamReviewView(QWidget):
         status = ExamAIGradingRecordsDialog.STATUS_LABELS.get(
             outcome.get("status"), outcome.get("status", "处理中")
         )
-        self._bulk_grading_progress_text = (
-            f"AI改卷进度：{current}/{total}，{name}：{status}"
+        in_progress = outcome.get("status") in {"processing", "checking_rubric"}
+        detail = (
+            outcome.get("stage") or status if in_progress else status
         )
+        self._bulk_grading_progress_text = (
+            f"AI改卷进度：{current}/{total}，{name}："
+            f"{detail}"
+        )
+        self._bulk_grading_progress_value = (current, total)
         dialog = self._bulk_grading_progress_dialog
         if dialog is not None and not self._bulk_grading_dialog_dismissed:
             dialog.set_progress(
@@ -1316,12 +1311,42 @@ class ExamReviewView(QWidget):
         else:
             self.status_label.show()
             self.status_label.setText(self._bulk_grading_progress_text)
+            self.bulk_grading_status.emit(
+                self._bulk_grading_progress_text, True
+            )
         self._refresh_ai_grading_records_button()
+
+    def _show_ai_bulk_grading_progress_dialog(self):
+        existing = self._bulk_grading_progress_dialog
+        if existing is not None and not self._bulk_grading_dialog_dismissed:
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = ExamAIBulkGradingProgressDialog(self)
+        dialog.dismissed.connect(
+            self._on_ai_bulk_grading_progress_dialog_dismissed
+        )
+        current, total = self._bulk_grading_progress_value
+        if self._bulk_grading_progress_text:
+            dialog.set_progress(current, total, self._bulk_grading_progress_text)
+        self._bulk_grading_progress_dialog = dialog
+        self._bulk_grading_dialog_dismissed = False
+        self.status_label.hide()
+        dialog.show()
+        self.bulk_grading_status.emit("", False)
+
+    def show_ai_bulk_grading_progress_dialog(self):
+        if self._bulk_grading_worker is not None:
+            self._show_ai_bulk_grading_progress_dialog()
 
     def _on_ai_bulk_grading_progress_dialog_dismissed(self):
         self._bulk_grading_dialog_dismissed = True
         self.status_label.setText(self._bulk_grading_progress_text)
         self.status_label.show()
+        if self._bulk_grading_worker is not None:
+            self.bulk_grading_status.emit(
+                self._bulk_grading_progress_text, True
+            )
 
     def _on_ai_bulk_grading_completed(self, result):
         self._bulk_grading_worker = None
@@ -1353,6 +1378,9 @@ class ExamReviewView(QWidget):
         summary = (
             f"AI改卷完成：已提交 {submitted} 份，异常 {len(issues)} 份"
         )
+        skipped = int(result.get("skipped_existing_issues", 0) or 0)
+        if skipped:
+            summary += f"，跳过异常记录 {skipped} 份"
         if stopped:
             summary = f"AI改卷已停止；{summary}"
         self._bulk_grading_progress_text = summary
@@ -1391,6 +1419,7 @@ class ExamReviewView(QWidget):
             self.status_label.setText(text)
             self.status_label.show()
         self._bulk_grading_progress_dialog = None
+        self.bulk_grading_status.emit(text, False)
 
     def _refresh_ai_grading_records_button(self):
         if self.context is None:
@@ -1415,7 +1444,7 @@ class ExamReviewView(QWidget):
             and self._bulk_grading_worker.isRunning()
         )
         self.grading_records_button.setText(
-            f"批改记录 ({issue_count})" if issue_count else "批改记录"
+            f"异常记录 ({issue_count})" if issue_count else "异常记录"
         )
         self.grading_records_button.setVisible(bool(records) or worker_active)
 
@@ -1434,12 +1463,15 @@ class ExamReviewView(QWidget):
         dialog.exec()
         self._refresh_ai_grading_records_button()
 
-    def _resolve_ai_grading_issue(self, answer_id):
+    def _resolve_ai_grading_issue(self, attempt_id):
         if self.context is None:
             return
-        self._ai_grading_job_store.resolve_issue(
-            self.context.exam_id, answer_id
-        )
+        if not self._ai_grading_job_store.resolve_attempt(
+            self.context.exam_id, attempt_id
+        ):
+            self._ai_grading_job_store.resolve_issue(
+                self.context.exam_id, attempt_id
+            )
 
     def _retry_ai_grading_issue(self, answer_id):
         self._start_ai_bulk_grading([answer_id])
@@ -1516,8 +1548,6 @@ class ExamReviewView(QWidget):
             return
 
         self._set_review_loading(True)
-        self.status_label.show()
-        self.status_label.setText("正在请求该学生的批阅页面...")
         name = self._record_student_label(record_id)
         self._show_loading(
             f"正在加载{name + ' ' if name else ''}的答卷…\n含图片的答卷可能需要几秒"
@@ -1611,8 +1641,6 @@ class ExamReviewView(QWidget):
             id_item = self.records_table.item(row, 1)
             student_name = name_item.text() if name_item is not None else ""
             student_id = id_item.text() if id_item is not None else ""
-        self.status_label.show()
-        self.status_label.setText(f"已加载 {student_name or student_id} 的答卷（只读）")
         dialog = ExamAnswerDialog(
             self.context.exam_title,
             student_name,
@@ -1620,6 +1648,7 @@ class ExamReviewView(QWidget):
             content,
             self,
             exam_id=self.context.exam_id,
+            course_id=self.context.course_id,
             answer_id=record_id,
             session=self.crawler.session,
         )

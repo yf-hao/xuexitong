@@ -18,16 +18,19 @@ class ExamAIGradingRecordsDialog(QDialog):
         "grading_failed": "评分异常",
         "submission_failed": "提交异常",
         "stopped": "已暂停",
+        "submitted": "已提交",
+        "no_subjective": "无主观题",
+        "resolved": "已处理",
     }
 
     def __init__(self, records, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("AI改卷记录")
+        self.setWindowTitle("AI改卷异常记录")
         self.resize(820, 420)
         layout = QVBoxLayout(self)
-        self.records_table = QTableWidget(len(records), 5, self)
+        self.records_table = QTableWidget(len(records), 6, self)
         self.records_table.setHorizontalHeaderLabels(
-            ["姓名", "学号", "状态", "处理阶段", "异常原因"]
+            ["批次", "姓名", "学号", "状态", "处理阶段", "异常原因"]
         )
         self.records_table.verticalHeader().setVisible(False)
         self.records_table.setEditTriggers(
@@ -43,12 +46,16 @@ class ExamAIGradingRecordsDialog(QDialog):
             QHeaderView.ResizeMode.ResizeToContents
         )
         self.records_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.Stretch
+            5, QHeaderView.ResizeMode.Stretch
         )
         self._answer_ids = []
+        self._attempt_ids = []
         for row, record in enumerate(records):
             self._answer_ids.append(str(record.get("answer_id", "")))
+            self._attempt_ids.append(str(record.get("attempt_id", "")))
             values = (
+                f"第 {record['attempt_number']} 轮"
+                if record.get("attempt_number") else "历史记录",
                 record.get("student_name", ""),
                 record.get("student_id", ""),
                 self.STATUS_LABELS.get(
@@ -88,7 +95,7 @@ class ExamAIGradingRecordsDialog(QDialog):
         row = self.records_table.currentRow()
         self.resolve_button.setEnabled(
             row >= 0
-            and self.records_table.item(row, 2).text()
+            and self.records_table.item(row, 3).text()
             in {"评分异常", "提交异常"}
         )
         self.retry_button.setEnabled(self.resolve_button.isEnabled())
@@ -104,7 +111,8 @@ class ExamAIGradingRecordsDialog(QDialog):
         row = self.records_table.currentRow()
         if row < 0 or row >= len(self._answer_ids):
             return
-        self.resolve_requested.emit(self._answer_ids[row])
+        attempt_id = self._attempt_ids[row] or self._answer_ids[row]
+        self.resolve_requested.emit(attempt_id)
         self.records_table.removeRow(row)
         self._answer_ids.pop(row)
         self._update_resolve_enabled()

@@ -121,9 +121,20 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(result["outcomes"][0]["status"], "submitted")
-        self.assertEqual(
-            [item[2]["status"] for item in progress],
-            ["processing", "submitted"],
+        self.assertEqual(progress[-1][2]["status"], "submitted")
+        self.assertTrue(
+            all(item[2]["status"] == "processing" for item in progress[:-1])
+        )
+        stages = [item[2]["stage"] for item in progress[:-1]]
+        self.assertEqual(stages[0], "准备处理")
+        for expected in ("读取试卷", "检查评分要求", "提交成绩"):
+            self.assertIn(expected, stages)
+        self.assertTrue(any(stage.startswith("AI评分第") for stage in stages))
+        self.assertLess(
+            stages.index("读取试卷"), stages.index("检查评分要求")
+        )
+        self.assertLess(
+            stages.index("检查评分要求"), stages.index("提交成绩")
         )
         self.assertEqual(progress[0][2]["student_name"], "学生甲")
         self.assertEqual(scorer.scored_questions, ["q1"])
@@ -133,6 +144,25 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
         self.assertEqual(form_fields["scoreq2"], "3")
         self.assertEqual(form_fields["sumScore"], "11")
         self.assertIn("基本正确", form_fields["teacherContentq1"])
+
+    def test_rerun_appends_a_record_for_the_already_submitted_student(self):
+        scorer = FakeScoringService()
+        service = self.make_service(scorer)
+
+        first_result = service.run()
+        second_result = service.run()
+
+        records = self.job_store.get_exam_visible_records("exam-1")
+        job = self.job_store.get_record("exam-1", "answer-1")
+        self.assertEqual(first_result["outcomes"][0]["status"], "submitted")
+        self.assertEqual(second_result["outcomes"][0]["status"], "submitted")
+        self.assertEqual(records, [])
+        self.assertEqual(len(job["history"]), 2)
+        self.assertTrue(
+            all(record["status"] == "submitted" for record in job["history"])
+        )
+        self.assertEqual(scorer.scored_questions, ["q1"])
+        self.assertEqual(len(self.submissions), 1)
 
     def test_scoring_failure_is_persisted_and_does_not_submit(self):
         service = self.make_service(
@@ -146,6 +176,54 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
         saved = self.job_store.get_record("exam-1", "answer-1")
         self.assertEqual(saved["error"], "AI 返回的评分无效")
         self.assertEqual(saved["student_id"], "1001")
+
+    def test_full_run_skips_existing_scoring_exception_without_new_attempt(self):
+        scorer = FakeScoringService(error=ValueError("评分失败"))
+        service = self.make_service(scorer)
+
+        failed = service.run()
+        visible_before = self.job_store.get_exam_visible_records("exam-1")
+        rerun = service.run()
+        visible_after = self.job_store.get_exam_visible_records("exam-1")
+
+        self.assertEqual(failed["outcomes"][0]["status"], "grading_failed")
+        self.assertEqual(rerun["outcomes"], [])
+        self.assertEqual(rerun["skipped_existing_issues"], 1)
+        self.assertEqual(len(scorer.scored_questions), 1)
+        self.assertEqual(len(visible_after), len(visible_before))
+
+    def test_full_run_resumes_partially_graded_student_after_stop(self):
+        first_scorer = FakeScoringService()
+        first_service = self.make_service(first_scorer)
+        stopped = first_service.run(
+            stop_requested=lambda: bool(first_scorer.scored_questions)
+        )
+        self.assertEqual(stopped["outcomes"][0]["status"], "ready_to_submit")
+
+        resumed = self.make_service(FakeScoringService()).run()
+
+        self.assertEqual(resumed["skipped_existing_issues"], 0)
+        self.assertEqual(resumed["outcomes"][0]["status"], "submitted")
+        self.assertEqual(self.job_store.get_exam_visible_records("exam-1"), [])
+
+    def test_explicit_retry_includes_student_with_existing_exception(self):
+        service = self.make_service(
+            FakeScoringService(error=ValueError("评分失败"))
+        )
+        service.run()
+        retry_service = self.make_service(FakeScoringService())
+
+        result = retry_service.run(answer_ids=["answer-1"])
+
+        self.assertEqual(result["outcomes"][0]["status"], "submitted")
+        self.assertEqual(result["skipped_existing_issues"], 0)
+        self.assertEqual(len(retry_service.scoring_service.scored_questions), 1)
+        job = self.job_store.get_record("exam-1", "answer-1")
+        self.assertEqual(job["history"][0]["status"], "resolved")
+        self.assertEqual(job["history"][1]["status"], "submitted")
+        self.assertEqual(
+            self.job_store.get_exam_visible_records("exam-1"), []
+        )
 
     def test_inconsistent_ai_breakdown_is_persisted_without_submission(self):
         scorer = FakeScoringService(result={
@@ -206,7 +284,11 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
         )
         resumed_service = self.make_service(retry_scorer)
 
-        resumed = resumed_service.run()
+        skipped = resumed_service.run()
+        self.assertEqual(skipped["outcomes"], [])
+        self.assertEqual(skipped["skipped_existing_issues"], 1)
+
+        resumed = resumed_service.run(answer_ids=["answer-1"])
 
         self.assertEqual(resumed["outcomes"][0]["status"], "submitted")
         self.assertEqual(retry_scorer.scored_questions, [])

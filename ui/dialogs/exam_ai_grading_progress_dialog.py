@@ -1,6 +1,6 @@
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog, QLabel, QPushButton, QProgressBar, QVBoxLayout,
+    QDialog, QLabel, QProgressBar, QVBoxLayout,
 )
 
 from ui.theme import apply_theme_stylesheet, bind_theme_tree
@@ -26,10 +26,6 @@ class ExamAIBulkGradingProgressDialog(QDialog):
         self.progress_bar.setRange(0, 0)
         layout.addWidget(self.progress_bar)
 
-        close_button = QPushButton("关闭进度窗口")
-        close_button.clicked.connect(self.close)
-        layout.addWidget(close_button)
-
         apply_theme_stylesheet(self, lambda palette: f"""
             QDialog {{
                 background-color: {palette.panel_bg};
@@ -47,9 +43,6 @@ class ExamAIBulkGradingProgressDialog(QDialog):
             QProgressBar::chunk {{
                 border-radius: 4px;
                 background-color: {palette.accent};
-            }}
-            QPushButton {{
-                min-height: 30px;
             }}
         """)
         bind_theme_tree(self)

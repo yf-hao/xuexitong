@@ -602,5 +602,46 @@ class ExamAnswerSubmissionTests(unittest.TestCase):
         _APP.processEvents()
 
 
+class CourseQuestionRubricTests(unittest.TestCase):
+    def test_question_rubric_is_shared_across_classes_and_exams_in_course(self):
+        from core.services.exam_ai_scoring_service import ExamAIScoringService
+
+        question = SimpleNamespace(
+            question_id="q1", question_type="简答题", number="1"
+        )
+        values = {}
+        settings = SimpleNamespace(
+            value=lambda key, default="", _type=None: values.get(key, default),
+            setValue=lambda key, value: values.__setitem__(key, value),
+        )
+
+        ExamAIScoringService.save_rubric(settings, "c1", "e1", question, " 按要点给分 ")
+
+        self.assertEqual(
+            ExamAIScoringService.resolve_rubric(settings, "c1", "e2", question),
+            "按要点给分",
+        )
+        self.assertEqual(
+            ExamAIScoringService.resolve_rubric(settings, "c2", "e1", question), ""
+        )
+
+    def test_legacy_exam_scoped_rubric_is_still_used(self):
+        from core.services.exam_ai_scoring_service import ExamAIScoringService
+
+        question = SimpleNamespace(
+            question_id="q1", question_type="简答题", number="1"
+        )
+        legacy_key = ExamAIScoringService.rubric_settings_key("e1", question)
+        settings = SimpleNamespace(
+            value=lambda key, default="", _type=None: (
+                "旧要求" if key == legacy_key else default
+            )
+        )
+        self.assertEqual(
+            ExamAIScoringService.resolve_rubric(settings, "c1", "e1", question),
+            "旧要求",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
