@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import fitz
 import base64
 from pathlib import Path
 from types import SimpleNamespace
@@ -163,6 +164,59 @@ class AttachmentPreviewTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "格式无效或不受支持"):
                 extract_attachment_scoring_content(path)
+
+
+class PdfAttachmentTests(unittest.TestCase):
+    @staticmethod
+    def make_pdf(path, text=None, pages=1, password=None):
+        document = fitz.open()
+        for _ in range(pages):
+            page = document.new_page()
+            if text:
+                page.insert_text((72, 72), text)
+            else:
+                page.draw_rect(fitz.Rect(50, 50, 200, 200), fill=(0, 0, 0))
+        if password:
+            document.save(
+                str(path), encryption=fitz.PDF_ENCRYPT_AES_256,
+                user_pw=password, owner_pw=password,
+            )
+        else:
+            document.save(str(path))
+        document.close()
+
+    def test_text_pdf_is_scored_as_text(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "a.pdf"
+            self.make_pdf(path, "Answer: the quick brown fox jumps over it")
+            text, images = extract_attachment_scoring_content(path)
+            self.assertIn("第 1 页", text)
+            self.assertIn("quick brown fox", text)
+            self.assertEqual(images, ())
+            self.assertIn("quick brown fox", render_attachment_preview(path).html)
+
+    def test_scanned_pdf_is_scored_as_images_and_page_limited(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "scan.pdf"
+            self.make_pdf(path, pages=12)
+            text, images = extract_attachment_scoring_content(path)
+            self.assertEqual(len(images), 10)
+            self.assertIn("共 12 页", text)
+            self.assertTrue(images[0].startswith("data:image/png;base64,"))
+            preview = render_attachment_preview(path)
+            self.assertIn("<img", preview.html)
+            self.assertTrue(preview.warnings)
+
+    def test_encrypted_and_broken_pdf_are_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            encrypted = Path(folder) / "enc.pdf"
+            self.make_pdf(encrypted, "secret text here", password="pw")
+            with self.assertRaisesRegex(ValueError, "加密"):
+                extract_attachment_scoring_content(encrypted)
+            broken = Path(folder) / "bad.pdf"
+            broken.write_bytes(b"not a pdf")
+            with self.assertRaisesRegex(ValueError, "无法打开"):
+                render_attachment_preview(broken)
 
 
 if __name__ == "__main__":

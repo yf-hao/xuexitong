@@ -4,6 +4,7 @@ from html import escape
 from pathlib import Path
 
 from bs4 import BeautifulSoup
+import fitz
 import mammoth
 import markdown
 import nh3
@@ -19,6 +20,9 @@ from core.utils.image_utils import validated_image_data_uri
 
 
 MAX_PREVIEW_SIZE = 20 * 1024 * 1024
+PDF_MAX_PAGES = 10
+PDF_MIN_TEXT_CHARS_PER_PAGE = 30
+PDF_RENDER_MAX_EDGE = 2000
 PLAIN_TEXT_EXTENSIONS = {
     ".conf", ".config", ".csv", ".diff", ".env", ".ini", ".lock",
     ".log", ".out", ".patch", ".properties", ".txt",
@@ -160,9 +164,93 @@ def _docx_document(path):
     )
 
 
+def _open_pdf(path):
+    try:
+        document = fitz.open(str(path))
+    except Exception as error:
+        raise ValueError(f"PDF {path.name} 无法打开或已损坏") from error
+    if document.needs_pass or document.is_encrypted:
+        document.close()
+        raise ValueError(f"PDF {path.name} 已加密，无法读取")
+    return document
+
+
+def _pdf_page_png_data_uri(page):
+    longest = max(page.rect.width, page.rect.height) or 1
+    zoom = min(150 / 72, PDF_RENDER_MAX_EDGE / longest)
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    encoded = base64.b64encode(pixmap.tobytes("png")).decode("ascii")
+    return validated_image_data_uri(f"data:image/png;base64,{encoded}")
+
+
+def _pdf_content(path):
+    """Return (page_texts, scanned, page_count, image_data_uris)."""
+    if path.stat().st_size > MAX_PREVIEW_SIZE:
+        raise ValueError("文件超过 20 MB，暂不支持 AI 评分")
+    document = _open_pdf(path)
+    try:
+        page_count = document.page_count
+        pages = [document[i] for i in range(min(page_count, PDF_MAX_PAGES))]
+        texts = [page.get_text("text").strip() for page in pages]
+        total_chars = sum(len(text) for text in texts)
+        scanned = total_chars < PDF_MIN_TEXT_CHARS_PER_PAGE * max(len(pages), 1)
+        images = []
+        if scanned:
+            for page in pages:
+                data_uri = _pdf_page_png_data_uri(page)
+                if data_uri is None:
+                    raise ValueError(f"PDF {path.name} 页面渲染失败或超过 8 MB")
+                images.append(data_uri)
+        return texts, scanned, page_count, tuple(images)
+    finally:
+        document.close()
+
+
+def _pdf_scoring_content(path):
+    texts, scanned, page_count, images = _pdf_content(path)
+    notice = (
+        f"（仅评前 {PDF_MAX_PAGES} 页，共 {page_count} 页）"
+        if page_count > PDF_MAX_PAGES else ""
+    )
+    if scanned:
+        if not images:
+            raise ValueError(f"PDF {path.name} 中没有可评分内容")
+        return notice, images
+    body = "\n\n".join(
+        f"--- 第 {index} 页 ---\n{text}"
+        for index, text in enumerate(texts, 1) if text
+    )
+    return f"{notice}\n{body}".strip(), ()
+
+
+def _pdf_document(path):
+    texts, scanned, page_count, images = _pdf_content(path)
+    if scanned:
+        if not images:
+            raise ValueError(f"PDF {path.name} 中没有可预览内容")
+        content = "".join(
+            f'<img alt="第 {index} 页" src="{src}">'
+            f'<hr>' for index, src in enumerate(images, 1)
+        )
+    else:
+        content = "<hr>".join(
+            f"<pre>{escape(text)}</pre>" for text in texts if text
+        )
+    warnings = ()
+    if page_count > PDF_MAX_PAGES:
+        warnings = (f"仅预览前 {PDF_MAX_PAGES} 页，共 {page_count} 页",)
+    return AttachmentPreviewDocument(
+        title=path.name,
+        html=_page(path.name, content),
+        warnings=warnings,
+    )
+
+
 def render_attachment_preview(file_path):
     path = Path(file_path)
     suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return _pdf_document(path)
     if suffix == ".docx":
         return _docx_document(path)
     if suffix in {".md", ".markdown", ".mdown"}:
@@ -220,6 +308,9 @@ def extract_attachment_scoring_content(file_path):
         if image_data_uri is None:
             raise ValueError(f"图片附件 {path.name} 格式无效或不受支持")
         return "", (image_data_uri,)
+
+    if path.suffix.lower() == ".pdf":
+        return _pdf_scoring_content(path)
 
     if path.suffix.lower() != ".docx":
         return extract_attachment_text(path), ()
