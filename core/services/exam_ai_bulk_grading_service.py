@@ -134,6 +134,23 @@ class ExamAIBulkGradingService:
                 "outcomes": [],
             }
 
+        already_completed = 0
+        pending_records = []
+        for record in records:
+            answer_id = str(record.get("id") or "")
+            job = self.job_store.get_record(
+                self.context.exam_id, answer_id
+            ) or {}
+            if (
+                job.get("status") == "submitted"
+                and answer_id not in stale_submitted_ids
+            ):
+                already_completed += 1
+                continue
+            pending_records.append(record)
+        records = pending_records
+        total = len(records)
+
         for index, record in enumerate(records, 1):
             if stop_requested():
                 break
@@ -189,6 +206,7 @@ class ExamAIBulkGradingService:
             "processed": len(outcomes),
             "stopped": stop_requested(),
             "skipped_existing_issues": skipped_existing_issues,
+            "already_completed": already_completed,
             "outcomes": outcomes,
         }
 

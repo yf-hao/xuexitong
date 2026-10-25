@@ -145,7 +145,7 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
         self.assertEqual(form_fields["sumScore"], "11")
         self.assertIn("基本正确", form_fields["teacherContentq1"])
 
-    def test_rerun_appends_a_record_for_the_already_submitted_student(self):
+    def test_rerun_excludes_already_submitted_student_from_total(self):
         scorer = FakeScoringService()
         service = self.make_service(scorer)
 
@@ -155,9 +155,11 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
         records = self.job_store.get_exam_visible_records("exam-1")
         job = self.job_store.get_record("exam-1", "answer-1")
         self.assertEqual(first_result["outcomes"][0]["status"], "submitted")
-        self.assertEqual(second_result["outcomes"][0]["status"], "submitted")
+        self.assertEqual(second_result["outcomes"], [])
+        self.assertEqual(second_result["total"], 0)
+        self.assertEqual(second_result["already_completed"], 1)
         self.assertEqual(records, [])
-        self.assertEqual(len(job["history"]), 2)
+        self.assertEqual(len(job["history"]), 1)
         self.assertTrue(
             all(record["status"] == "submitted" for record in job["history"])
         )
@@ -310,7 +312,9 @@ class ExamAIBulkGradingServiceTests(unittest.TestCase):
 
         result = service.run()
 
-        self.assertEqual(result["outcomes"][0]["status"], "submitted")
+        self.assertEqual(result["outcomes"], [])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["already_completed"], 1)
         self.assertEqual(scorer.scored_questions, [])
         self.assertEqual(self.submissions, [])
 

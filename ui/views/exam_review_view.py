@@ -262,6 +262,7 @@ class ExamReviewView(QWidget):
         self._bulk_grading_worker = None
         self._bulk_grading_progress_dialog = None
         self._bulk_grading_progress_text = ""
+        self._bulk_grading_progress_detail = ("", "")
         self._bulk_grading_progress_value = (0, 0)
         self._bulk_grading_dialog_dismissed = False
         self._ai_grading_job_store = ExamAIGradingJobStore()
@@ -1303,10 +1304,12 @@ class ExamReviewView(QWidget):
             f"{detail}"
         )
         self._bulk_grading_progress_value = (current, total)
+        self._bulk_grading_progress_detail = (name, detail)
         dialog = self._bulk_grading_progress_dialog
         if dialog is not None and not self._bulk_grading_dialog_dismissed:
             dialog.set_progress(
-                current, total, self._bulk_grading_progress_text
+                current, total, self._bulk_grading_progress_text,
+                name, detail,
             )
         else:
             self.status_label.show()
@@ -1328,7 +1331,13 @@ class ExamReviewView(QWidget):
         )
         current, total = self._bulk_grading_progress_value
         if self._bulk_grading_progress_text:
-            dialog.set_progress(current, total, self._bulk_grading_progress_text)
+            student, stage = getattr(
+                self, "_bulk_grading_progress_detail", ("", "")
+            )
+            dialog.set_progress(
+                current, total, self._bulk_grading_progress_text,
+                student, stage,
+            )
         self._bulk_grading_progress_dialog = dialog
         self._bulk_grading_dialog_dismissed = False
         self.status_label.hide()
@@ -1381,6 +1390,9 @@ class ExamReviewView(QWidget):
         skipped = int(result.get("skipped_existing_issues", 0) or 0)
         if skipped:
             summary += f"，跳过异常记录 {skipped} 份"
+        completed = int(result.get("already_completed", 0) or 0)
+        if completed:
+            summary += f"，此前已完成 {completed} 份"
         if stopped:
             summary = f"AI改卷已停止；{summary}"
         self._bulk_grading_progress_text = summary
