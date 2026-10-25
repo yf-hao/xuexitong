@@ -1,6 +1,7 @@
 import os
 import sys
 import threading
+import time
 from core.logger import get_logger
 
 # 1. 启动日志，仅记录 ERROR 级别
@@ -57,11 +58,13 @@ class AppController:
     def __init__(self):
         self.crawler = None
         self.main_win = None
+        self._idle_heartbeat_timer = None
+        self._idle_heartbeat_at = 0.0
 
     def start(self):
         # QtWebEngineWidgets 必须在 QApplication 创建之前导入
         from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-        from PyQt6.QtCore import Qt, QCoreApplication
+        from PyQt6.QtCore import Qt, QCoreApplication, QTimer
         if sys.platform.startswith("linux") and os.environ.get("XUEXITONG_ENABLE_GPU") != "1":
             QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
@@ -69,6 +72,13 @@ class AppController:
         app.setQuitOnLastWindowClosed(False)  # 防止登录窗口关闭时程序意外退出
         app.setStyle("Fusion")
         apply_application_theme(app, theme_manager().mode)
+
+        if sys.platform == "win32":
+            self._idle_heartbeat_timer = QTimer(app)
+            self._idle_heartbeat_timer.setInterval(60_000)
+            self._idle_heartbeat_timer.timeout.connect(self._record_idle_heartbeat)
+            self._idle_heartbeat_at = time.monotonic()
+            self._idle_heartbeat_timer.start()
         
         # 启动后台预加载
         preload_thread = threading.Thread(target=_preload_modules, daemon=True)
@@ -112,6 +122,9 @@ class AppController:
                 sys.exit(1)
         else:
             sys.exit()
+
+    def _record_idle_heartbeat(self):
+        self._idle_heartbeat_at = time.monotonic()
 
     def handle_login_success(self, phone, password):
         # In a real app, this would be handled asynchronously
