@@ -1,5 +1,6 @@
 """缺勤统计对话框。"""
 from core.group_members_cache import resolve_student_from_group_cache
+from ui.group_members_cache_preparation import GroupMembersCachePreparation
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QHBoxLayout, QFileDialog, QMessageBox, QApplication, QWidget, QProgressDialog
@@ -36,6 +37,7 @@ class AbsenceStatsDialog(QDialog):
         self.course_name = course_name
         self.teaching_class_name = teaching_class_name
         self.crawler = crawler
+        self._group_members_cache_preparation = GroupMembersCachePreparation(crawler, self)
         self.communication_manager = CommunicationManager()
         self.table = None
         self.export_worker = None
@@ -331,8 +333,24 @@ class AbsenceStatsDialog(QDialog):
 
         resolved = self._resolve_student_message_target(student_name)
         if resolved["status"] == "cache_missing":
+            self._prepare_group_members_cache(
+                lambda: self._show_student_message_dialog(stats, student_name, student_id)
+            )
+            return
+
+        self._show_student_message_dialog(stats, student_name, student_id, resolved)
+
+    def _show_student_message_dialog(
+        self,
+        stats: dict,
+        student_name: str,
+        student_id: str,
+        resolved: dict | None = None,
+    ):
+        resolved = resolved or self._resolve_student_message_target(student_name)
+        if resolved["status"] == "cache_missing":
             cache_name = f"{self.course_name}-{self.teaching_class_name}".strip("-")
-            QMessageBox.warning(self, "未找到群成员缓存", f"未找到群成员缓存文件：\n{cache_name}.json")
+            QMessageBox.warning(self, "未找到群成员缓存", f"准备缓存后仍未找到群成员文件：\n{cache_name}.json")
             return
         if resolved["status"] == "duplicate":
             QMessageBox.information(self, "存在重名学生", f"{student_name} 在群成员缓存中存在重名，请到“消息”模块中手动发送。")
@@ -348,6 +366,32 @@ class AbsenceStatsDialog(QDialog):
             parent=self,
         )
         dialog.exec()
+
+    def _prepare_group_members_cache(self, on_ready):
+        if not self.course_name or not self.teaching_class_name or self.crawler is None:
+            QMessageBox.warning(self, "发送失败", "无法确定当前课程和班级，请重新选择后重试")
+            return
+
+        started = self._group_members_cache_preparation.start(
+            self.course_name,
+            self.teaching_class_name,
+            self.course_id,
+            self.class_id,
+            lambda result: self._on_group_members_cache_prepared(result, on_ready),
+        )
+        if not started:
+            QMessageBox.information(self, "正在准备", "群成员缓存正在准备中，请稍候")
+
+    def _on_group_members_cache_prepared(self, result: dict, on_ready):
+        if not isinstance(result, dict) or not result.get("success"):
+            error = result.get("error", "准备群成员缓存失败") if isinstance(result, dict) else "准备群成员缓存失败"
+            QMessageBox.warning(self, "发送失败", error)
+            return
+
+        warning = str(result.get("warning") or "").strip()
+        if warning:
+            QMessageBox.warning(self, "缓存同步提示", warning)
+        on_ready()
 
     @staticmethod
     def _format_student_label(stats: dict) -> str:
@@ -401,6 +445,16 @@ class AbsenceStatsDialog(QDialog):
             QMessageBox.warning(self, "无数据", "当前没有可提醒的缺勤统计数据")
             return
 
+        first_stats = dict(next(iter(self.absence_stats.values()), {}) or {})
+        first_student_name = str(first_stats.get("name") or "").strip()
+        resolved = self._resolve_student_message_target(first_student_name)
+        if resolved["status"] == "cache_missing":
+            self._prepare_group_members_cache(self._open_reminder_dialog)
+            return
+
+        self._open_reminder_dialog()
+
+    def _open_reminder_dialog(self):
         default_threshold = AbsenceStatsDialog._calculate_reminder_threshold(self.total_activities)
         dialog = HomeworkReminderDialog(
             threshold=default_threshold,
@@ -421,7 +475,7 @@ class AbsenceStatsDialog(QDialog):
         self._reminder_template = dialog.message_template
         self._send_reminders(dialog.threshold, dialog.message_template)
 
-    def _send_reminders(self, threshold: int, template: str):
+    def _send_reminders(self, threshold: int, template: str, cache_prepared: bool = False):
         eligible_stats = [
             dict(stats or {})
             for stats in self.absence_stats.values()
@@ -429,6 +483,18 @@ class AbsenceStatsDialog(QDialog):
         ]
         if not eligible_stats:
             QMessageBox.information(self, "无需提醒", f"当前没有缺勤数达到 {threshold} 的学生")
+            return
+
+        first_student_name = str(eligible_stats[0].get("name") or "").strip()
+        first_resolved = self._resolve_student_message_target(first_student_name)
+        if first_resolved["status"] == "cache_missing":
+            if cache_prepared:
+                cache_name = f"{self.course_name}-{self.teaching_class_name}".strip("-")
+                QMessageBox.warning(self, "未找到群成员缓存", f"准备缓存后仍未找到群成员文件：\n{cache_name}.json")
+                return
+            self._prepare_group_members_cache(
+                lambda: self._send_reminders(threshold, template, cache_prepared=True)
+            )
             return
 
         self._set_reminder_busy(True)
@@ -447,9 +513,8 @@ class AbsenceStatsDialog(QDialog):
                 resolved = self._resolve_student_message_target(student_name)
 
                 if resolved["status"] == "cache_missing":
-                    cache_name = f"{self.course_name}-{self.teaching_class_name}".strip("-")
-                    QMessageBox.warning(self, "未找到群成员缓存", f"未找到群成员缓存文件：\n{cache_name}.json")
-                    return
+                    failed_messages.append(f"{student_label}：群成员缓存准备后仍不可用，已停止后续发送")
+                    break
                 if resolved["status"] == "duplicate":
                     duplicate_messages.append(
                         f"{student_label}：因学生重名，未自动发送提醒信息，请通过消息手动发送。"

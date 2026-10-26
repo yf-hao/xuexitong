@@ -7,13 +7,13 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QProgressDialog
 from PyQt6.QtGui import QFont, QColor
 from core.group_members_cache import resolve_student_from_group_cache
+from ui.group_members_cache_preparation import GroupMembersCachePreparation
 from ui.styles import STAT_BUTTON_HIGHLIGHT_STYLE, STAT_BUTTON_STYLE, STAT_CARD_CONTAINER_STYLE, STAT_CARD_STYLE
 from ui.dialogs.student_message_dialog import StudentMessageDialog
 from ui.dialogs.homework_reminder_dialog import DEFAULT_HOMEWORK_REMINDER_TEMPLATE, HomeworkReminderDialog
 from ui.workers import (
     AttendanceWorker, AttendanceDetailWorker, AbsenceStatsWorker, HomeworkWorker,
-    HomeworkStatsExportWorker, GroupMembersCachePrepareWorker,
-    GroupMembersCacheUploadWorker,
+    HomeworkStatsExportWorker, GroupMembersCacheUploadWorker,
 )
 from models.activity import Activity
 from core.communication_manager import CommunicationManager
@@ -58,7 +58,8 @@ class StudyStatusView(QWidget):
         self._absence_stats_loading = False
         self._absence_dialog_open = False
         self.homework_export_worker = None
-        self._group_members_cache_worker = None
+        self._group_members_cache_preparation = GroupMembersCachePreparation(self.crawler, self)
+        self._group_members_cache_preparation.progress.connect(self.status_update.emit)
         self._group_cache_upload_workers = {}
         self._group_cache_upload_attempted = set()
         self.btn_homework_export = None
@@ -266,39 +267,22 @@ class StudyStatusView(QWidget):
             if not self.current_course_name or not self.current_class_name:
                 QMessageBox.warning(self, "发送失败", "无法确定当前课程和班级，请重新选择后重试")
                 return
-            worker = getattr(self, "_group_members_cache_worker", None)
-            if worker is not None and worker.isRunning():
+            if self._group_members_cache_preparation.is_running:
                 QMessageBox.information(self, "正在准备", "群成员缓存正在准备中，请稍候")
                 return
 
-            self.status_update.emit("正在准备群成员缓存...")
-            worker = GroupMembersCachePrepareWorker(
-                self.crawler,
+            started = self._group_members_cache_preparation.start(
                 self.current_course_name,
                 self.current_class_name,
                 self.current_course_id,
                 self.current_class_id,
-            )
-            self._group_members_cache_worker = worker
-            dialog = QProgressDialog("正在准备群成员缓存...", "", 0, 0, self)
-            dialog.setWindowTitle("准备群成员缓存")
-            dialog.setCancelButton(None)
-            dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            dialog.setMinimumDuration(0)
-            dialog.setAutoClose(False)
-            dialog.setAutoReset(False)
-            dialog.setMinimumWidth(360)
-            dialog.show()
-            self._group_cache_progress_dialog = dialog
-            worker.progress.connect(self.status_update.emit)
-            worker.progress.connect(dialog.setLabelText)
-            worker.finished_signal.connect(
                 lambda result, current_stats=stats, name=student_name, sid=student_id:
                     StudyStatusView._on_homework_message_cache_prepared(
                         self, current_stats, name, sid, result
-                    )
+                    ),
             )
-            worker.start()
+            if not started:
+                QMessageBox.information(self, "正在准备", "群成员缓存正在准备中，请稍候")
             return
 
         StudyStatusView._show_homework_student_message_dialog(
@@ -307,12 +291,6 @@ class StudyStatusView(QWidget):
         StudyStatusView._ensure_homework_group_cache_uploaded(self, resolved)
 
     def _on_homework_message_cache_prepared(self, stats, student_name: str, student_id: str, result: dict):
-        self._group_members_cache_worker = None
-        dialog = getattr(self, "_group_cache_progress_dialog", None)
-        if dialog is not None:
-            dialog.close()
-            dialog.deleteLater()
-            self._group_cache_progress_dialog = None
         if not isinstance(result, dict) or not result.get("success"):
             error = result.get("error", "准备群成员缓存失败") if isinstance(result, dict) else "准备群成员缓存失败"
             self.status_update.emit("群成员缓存准备失败")
@@ -616,33 +594,19 @@ class StudyStatusView(QWidget):
             self.attendance_table.setItem(row, 3, status_item)
             
             # 查看按钮
-            view_btn = QPushButton("查看")
-            view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            apply_theme_stylesheet(view_btn, """
-                QPushButton {
-                    background-color: transparent;
-                    color: #007acc;
-                    border: 1px solid #007acc;
-                    border-radius: 3px;
-                    padding: 4px 12px;
-                    font-size: 12px;
-                }
-                QPushButton:hover {
-                    background-color: #007acc;
-                    color: white;
-                }
-            """)
-            # 使用 lambda 捕获当前的 activity 和 row
-            view_btn.clicked.connect(lambda checked, a=activity: self._view_attendance_detail(a))
-            
-            # 创建一个单元格 widget 来放置按钮
-            btn_widget = QWidget()
-            btn_layout = QHBoxLayout(btn_widget)
-            btn_layout.addWidget(view_btn)
-            btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            btn_layout.setContentsMargins(5, 2, 5, 2)
-            
+            view_btn = self._create_inline_action_button(
+                "查看",
+                lambda checked=False, a=activity: self._view_attendance_detail(a),
+            )
+            btn_widget = self._build_table_action_widget(view_btn)
+            btn_layout = btn_widget.layout()
+            if btn_layout:
+                btn_layout.setContentsMargins(5, 1, 5, 1)
             self.attendance_table.setCellWidget(row, 4, btn_widget)
+            self.attendance_table.setRowHeight(
+                row,
+                max(40, btn_widget.sizeHint().height()),
+            )
 
         # 设置操作列宽度
         self.attendance_table.setColumnWidth(4, 80)
