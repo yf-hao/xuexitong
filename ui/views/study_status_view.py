@@ -37,6 +37,80 @@ class NumericTableWidgetItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
+class ProportionalColumnTableWidget(QTableWidget):
+    """Table widget that distributes its viewport width by column weights."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._column_weights = ()
+        self._minimum_column_widths = ()
+
+    def set_column_width_distribution(self, weights, minimum_widths):
+        if len(weights) != self.columnCount() or len(minimum_widths) != self.columnCount():
+            raise ValueError("Column weights and minimum widths must match the column count")
+        if any(weight <= 0 for weight in weights) or any(width < 0 for width in minimum_widths):
+            raise ValueError("Column weights must be positive and minimum widths non-negative")
+
+        self._column_weights = tuple(float(weight) for weight in weights)
+        self._minimum_column_widths = tuple(int(width) for width in minimum_widths)
+        for column in range(self.columnCount()):
+            self.horizontalHeader().setSectionResizeMode(
+                column,
+                QHeaderView.ResizeMode.Fixed,
+            )
+        self._resize_columns_to_viewport()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resize_columns_to_viewport()
+
+    def _resize_columns_to_viewport(self):
+        if not self._column_weights:
+            return
+
+        available_width = self.viewport().width()
+        if available_width <= 0:
+            return
+
+        widths = list(self._minimum_column_widths)
+        if sum(widths) <= available_width:
+            remaining_width = available_width
+            remaining_weight = sum(self._column_weights)
+            active_columns = set(range(self.columnCount()))
+
+            while active_columns:
+                constrained = [
+                    column for column in active_columns
+                    if remaining_width * self._column_weights[column] / remaining_weight
+                    < self._minimum_column_widths[column]
+                ]
+                if not constrained:
+                    break
+                for column in constrained:
+                    widths[column] = self._minimum_column_widths[column]
+                    remaining_width -= widths[column]
+                    remaining_weight -= self._column_weights[column]
+                    active_columns.remove(column)
+
+            exact_widths = {
+                column: remaining_width * self._column_weights[column] / remaining_weight
+                for column in active_columns
+            }
+            for column, width in exact_widths.items():
+                widths[column] = int(width)
+
+            leftover = available_width - sum(widths)
+            for column in sorted(
+                exact_widths,
+                key=lambda index: exact_widths[index] - widths[index],
+                reverse=True,
+            )[:leftover]:
+                widths[column] += 1
+
+        for column, width in enumerate(widths):
+            self.setColumnWidth(column, width)
+
+
 class StudyStatusView(QWidget):
     """学情视图 - 显示学生学习情况"""
     
@@ -264,31 +338,34 @@ class StudyStatusView(QWidget):
 
         resolved = self._resolve_student_message_target(student_name)
         if resolved["status"] == "cache_missing":
-            if not self.current_course_name or not self.current_class_name:
-                QMessageBox.warning(self, "发送失败", "无法确定当前课程和班级，请重新选择后重试")
-                return
-            if self._group_members_cache_preparation.is_running:
-                QMessageBox.information(self, "正在准备", "群成员缓存正在准备中，请稍候")
-                return
-
-            started = self._group_members_cache_preparation.start(
-                self.current_course_name,
-                self.current_class_name,
-                self.current_course_id,
-                self.current_class_id,
+            self._start_homework_group_cache_preparation(
                 lambda result, current_stats=stats, name=student_name, sid=student_id:
                     StudyStatusView._on_homework_message_cache_prepared(
                         self, current_stats, name, sid, result
                     ),
+                failure_title="发送失败",
             )
-            if not started:
-                QMessageBox.information(self, "正在准备", "群成员缓存正在准备中，请稍候")
             return
 
         StudyStatusView._show_homework_student_message_dialog(
             self, stats, student_name, student_id, resolved
         )
         StudyStatusView._ensure_homework_group_cache_uploaded(self, resolved)
+
+    def _start_homework_group_cache_preparation(self, on_finished, failure_title: str):
+        if not self.current_course_name or not self.current_class_name:
+            QMessageBox.warning(self, failure_title, "无法确定当前课程和班级，请重新选择后重试")
+            return
+
+        started = self._group_members_cache_preparation.start(
+            self.current_course_name,
+            self.current_class_name,
+            self.current_course_id,
+            self.current_class_id,
+            on_finished,
+        )
+        if not started:
+            QMessageBox.information(self, "正在准备", "群成员缓存正在准备中，请稍候")
 
     def _on_homework_message_cache_prepared(self, stats, student_name: str, student_id: str, result: dict):
         if not isinstance(result, dict) or not result.get("success"):
@@ -408,6 +485,31 @@ class StudyStatusView(QWidget):
             QMessageBox.warning(self, "无数据", "当前没有可提醒的作业统计数据")
             return
 
+        first_stats = self.current_homework_data[0]
+        first_student_name = str(getattr(first_stats, "user_name", "") or "").strip()
+        resolved = self._resolve_student_message_target(first_student_name)
+        if resolved["status"] == "cache_missing":
+            self._start_homework_group_cache_preparation(
+                self._on_homework_reminder_cache_prepared,
+                failure_title="提醒失败",
+            )
+            return
+
+        self._open_homework_reminder_dialog()
+
+    def _on_homework_reminder_cache_prepared(self, result: dict):
+        if not isinstance(result, dict) or not result.get("success"):
+            error = result.get("error", "准备群成员缓存失败") if isinstance(result, dict) else "准备群成员缓存失败"
+            self.status_update.emit("群成员缓存准备失败")
+            QMessageBox.warning(self, "提醒失败", error)
+            return
+
+        warning = str(result.get("warning") or "").strip()
+        if warning:
+            QMessageBox.warning(self, "缓存同步提示", warning)
+        self._open_homework_reminder_dialog()
+
+    def _open_homework_reminder_dialog(self):
         default_threshold = StudyStatusView._calculate_homework_reminder_threshold(self.current_homework_data)
         dialog = HomeworkReminderDialog(
             threshold=default_threshold,
@@ -564,13 +666,14 @@ class StudyStatusView(QWidget):
         self.current_attendance_data = ended_attendance
         
         # 创建表格显示考勤数据
-        self.attendance_table = QTableWidget()
+        self.attendance_table = ProportionalColumnTableWidget()
         self.attendance_table.setColumnCount(5)
         self.attendance_table.setHorizontalHeaderLabels(["活动名称", "活动类型", "活动时间", "状态", "操作"])
         self.attendance_table.setRowCount(len(ended_attendance))
-        header = self.attendance_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.attendance_table.set_column_width_distribution(
+            weights=(30, 12, 36, 12, 10),
+            minimum_widths=(180, 95, 300, 85, 80),
+        )
         self._apply_stats_table_style(self.attendance_table)
         self.attendance_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.attendance_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -608,9 +711,6 @@ class StudyStatusView(QWidget):
                 max(40, btn_widget.sizeHint().height()),
             )
 
-        # 设置操作列宽度
-        self.attendance_table.setColumnWidth(4, 80)
-        
         self.content_layout.addWidget(self.attendance_table)
         
         # 添加缺勤统计按钮
@@ -824,7 +924,7 @@ class StudyStatusView(QWidget):
         
         # 设置列宽
         self.homework_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)  # 学号
-        self.homework_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)  # 姓名
+        self.homework_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)     # 姓名
         self.homework_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)         # 作业数
         self.homework_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)         # 已提交
         self.homework_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)         # 待批
@@ -835,17 +935,17 @@ class StudyStatusView(QWidget):
         self.homework_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Fixed)         # 沟通情况
         self.homework_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.ResizeMode.Fixed)        # 发送消息
         
-        self.homework_table.setColumnWidth(0, 120)  # 学号
+        self.homework_table.setColumnWidth(0, 180)  # 学号
         self.homework_table.setColumnWidth(1, 100)  # 姓名
-        self.homework_table.setColumnWidth(2, 70)   # 作业数
-        self.homework_table.setColumnWidth(3, 70)   # 已提交
-        self.homework_table.setColumnWidth(4, 70)   # 待批
-        self.homework_table.setColumnWidth(5, 70)   # 未提交
-        self.homework_table.setColumnWidth(6, 70)   # 平均分
-        self.homework_table.setColumnWidth(7, 70)   # 最低分
-        self.homework_table.setColumnWidth(8, 70)   # 最高分
-        self.homework_table.setColumnWidth(9, 80)   # 沟通情况
-        self.homework_table.setColumnWidth(10, 96)  # 发送消息
+        self.homework_table.setColumnWidth(2, 78)   # 作业数
+        self.homework_table.setColumnWidth(3, 78)   # 已提交
+        self.homework_table.setColumnWidth(4, 78)   # 待批
+        self.homework_table.setColumnWidth(5, 78)   # 未提交
+        self.homework_table.setColumnWidth(6, 78)   # 平均分
+        self.homework_table.setColumnWidth(7, 78)   # 最低分
+        self.homework_table.setColumnWidth(8, 78)   # 最高分
+        self.homework_table.setColumnWidth(9, 92)   # 沟通情况
+        self.homework_table.setColumnWidth(10, 112) # 发送消息
         
         # 连接单元格点击事件
         self.homework_table.cellClicked.connect(self._on_homework_cell_clicked)
@@ -919,7 +1019,15 @@ class StudyStatusView(QWidget):
             self.homework_table.setItem(row, 9, comm_item)
 
             message_btn = self._create_inline_action_button("发送消息", lambda checked=False, s=stats: self._on_homework_message_clicked(s))
-            self.homework_table.setCellWidget(row, 10, self._build_table_action_widget(message_btn))
+            message_widget = self._build_table_action_widget(message_btn)
+            message_layout = message_widget.layout()
+            if message_layout:
+                message_layout.setContentsMargins(5, 1, 5, 1)
+            self.homework_table.setCellWidget(row, 10, message_widget)
+            self.homework_table.setRowHeight(
+                row,
+                max(40, message_widget.sizeHint().height()),
+            )
         
         # 数据填充完成，启用排序功能
         self.homework_table.setSortingEnabled(True)
