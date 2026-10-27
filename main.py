@@ -106,16 +106,27 @@ class AppController:
         login_win = LoginWindow(self.crawler)
         if login_win.exec():
             # Login successful
+            loading_win = None
             try:
+                # 登录窗口已关闭，先显示加载窗口，避免构建主窗口期间没有可见窗口
+                from ui.loading_window import LoadingWindow
+                loading_win = LoadingWindow()
+                loading_win.show()
+                loading_win.pump()
+
                 from ui.main_window import MainWindow
-                self.main_win = MainWindow(self.crawler)
+                loading_win.pump()
+                self.main_win = MainWindow(self.crawler, init_progress=loading_win.pump)
                 self.main_win.showMaximized()
+                loading_win.close()
                 app.setQuitOnLastWindowClosed(True) # 恢复正常退出逻辑
                 exit_code = app.exec()
                 sys.exit(exit_code)
             except Exception as e:
                 import traceback
                 from PyQt6.QtWidgets import QMessageBox
+                if loading_win is not None:
+                    loading_win.close()
                 error_trace = traceback.format_exc()
                 get_logger().error("FATAL ERROR:\n%s", error_trace)
                 QMessageBox.critical(None, "程序启动失败", f"发生了未预期的错误:\n{str(e)}\n\n详情请查看日志文件或查看以下堆栈:\n{error_trace}")

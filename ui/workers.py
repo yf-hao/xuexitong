@@ -730,6 +730,7 @@ class FullCourseInfoWorker(QThread):
                 params = self.crawler.session_manager.course_params or {}
                 course_id = course_id or params.get("courseid") or params.get("courseId")
                 cpi = cpi or params.get("cpi")
+            category_course_id, category_cpi = course_id, cpi
             
             # 2. 如果是编辑模式，获取服务器最新的详细设置 (名称、教师、单位名等)
             if self.is_edit and course_id and cpi:
@@ -756,7 +757,17 @@ class FullCourseInfoWorker(QThread):
             unit_fid = ""
             if self.is_edit:
                 unit_fid = result["initial_data"].get("unit_id")
-            
+            else:
+                # 新建课程：与对话框默认选中的单位保持一致，并使用单位自身的 data 作为 cpi
+                units = result["creation_data"].get("units") or []
+                default_unit = next(
+                    (u for u in units if u.get("name") == "郑州西亚斯学院 (4311)"),
+                    units[0] if units else {},
+                )
+                unit_fid = default_unit.get("fid", "")
+                cpi = default_unit.get("data", "")
+                course_id = "0"
+
             if not unit_fid and result["creation_data"].get("units"):
                 unit_fid = result["creation_data"]["units"][0].get("fid")
             
@@ -766,21 +777,62 @@ class FullCourseInfoWorker(QThread):
                 result["groups_data"] = self.crawler.get_group_list(str(unit_fid), str(cpi), target_course_id)
             
             # 4. 获取课程分类 (调用 API)
-            if course_id and unit_fid and cpi:
-                print(f"DEBUG: FullCourseInfoWorker fetching categories for {course_id}...")
-                result["categories_data"] = self.crawler.get_course_category_list(str(course_id), str(unit_fid), str(cpi))
+            if category_course_id and unit_fid and category_cpi:
+                print(f"DEBUG: FullCourseInfoWorker fetching categories for {category_course_id}...")
+                result["categories_data"] = self.crawler.get_course_category_list(
+                    str(category_course_id), str(unit_fid), str(category_cpi)
+                )
 
             # 5. 获取学期列表
             if unit_fid:
                 print(f"DEBUG: FullCourseInfoWorker fetching semesters for fid={unit_fid}...")
                 target_course_id = str(course_id) if course_id else "0"
                 result["semesters_data"] = self.crawler.get_semester_list(str(unit_fid), target_course_id)
+                result["semesters_fid"] = str(unit_fid)
 
             self.finished.emit(result)
         except Exception as e:
             print(f"FullCourseInfoWorker error: {e}")
             import traceback
             traceback.print_exc()
+            self.finished.emit({"success": False, "error": str(e)})
+
+
+class SemesterListWorker(QThread):
+    """Fetch the semester list for a selected unit without blocking the UI."""
+    semesters_ready = pyqtSignal(str, dict)
+
+    def __init__(self, crawler, fid: str, course_id: str = "0"):
+        super().__init__()
+        self.crawler = crawler
+        self.fid = fid
+        self.course_id = course_id
+
+    def run(self):
+        try:
+            result = self.crawler.get_semester_list(self.fid, self.course_id)
+        except Exception as e:
+            result = {"success": False, "error": f"获取学期列表失败: {e}"}
+        self.semesters_ready.emit(self.fid, result)
+
+
+class GroupListWorker(QThread):
+    """Fetch the department list for a selected unit without blocking the UI."""
+    groups_ready = pyqtSignal(str, str, dict)
+
+    def __init__(self, crawler, fid: str, cpi: str, course_id: str = "0"):
+        super().__init__()
+        self.crawler = crawler
+        self.fid = fid
+        self.cpi = cpi
+        self.course_id = course_id
+
+    def run(self):
+        try:
+            result = self.crawler.get_group_list(self.fid, self.cpi, self.course_id)
+        except Exception as e:
+            result = {"success": False, "error": f"获取院系列表失败: {e}"}
+        self.groups_ready.emit(self.fid, self.cpi, result)
 
 
 class AttendanceWorker(QThread):

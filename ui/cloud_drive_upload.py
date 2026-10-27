@@ -147,7 +147,10 @@ class FolderUploadThread(QThread):
         files = []
 
         for root, dir_names, file_names in os.walk(self.local_folder, followlinks=False):
-            dir_names.sort()
+            # 云盘不支持的文件夹名（如 .haomd）连同其内容一起跳过
+            dir_names[:] = sorted(
+                name for name in dir_names if self._is_valid_remote_folder_name(name)
+            )
             file_names.sort()
 
             relative_root = os.path.relpath(root, self.local_folder)
@@ -155,6 +158,8 @@ class FolderUploadThread(QThread):
                 directories.append(relative_root)
 
             for file_name in file_names:
+                if not self._is_valid_remote_folder_name(file_name):
+                    continue
                 file_path = os.path.join(root, file_name)
                 if os.path.islink(file_path) or not os.path.isfile(file_path):
                     continue
@@ -163,6 +168,15 @@ class FolderUploadThread(QThread):
 
         directories.sort(key=lambda path: (path.count(os.sep), path))
         return directories, files
+
+    @staticmethod
+    def _is_valid_remote_folder_name(folder_name):
+        """云盘禁止 " : * \\ < | > / ? 且首尾不能是 .。"""
+        return not (
+            any(ch in '":*\\<|>/?' for ch in folder_name)
+            or folder_name.startswith(".")
+            or folder_name.endswith(".")
+        )
 
     def _create_remote_folder(self, parent_id, folder_name):
         existing_folder = self._find_folder_id(parent_id, folder_name)

@@ -45,9 +45,11 @@ class ClickableLabel(QLabel):
 class MainWindow(QMainWindow):
     SELECTOR_MAX_WIDTH = 640
 
-    def __init__(self, crawler):
+    def __init__(self, crawler, init_progress=None):
         super().__init__()
         self.crawler = crawler
+        # 构建期间由启动流程传入，用于让加载动画有机会刷新
+        self._init_progress = init_progress or (lambda: None)
         self.setWindowTitle(APP_TITLE)
         self.resize(1200, 900)
         self.worker = None 
@@ -57,6 +59,7 @@ class MainWindow(QMainWindow):
         
         # State tracking for UI consistency
         self.last_nav_title = None
+        self._reload_course_id = None
         self._startup_retry_actions = {}
         self._startup_retry_messages = {}
         
@@ -217,10 +220,12 @@ class MainWindow(QMainWindow):
         # Page 1: Statistics View
         self.stats_view = StatsView(self.crawler, self._update_status, parent=self)
         self.stacked_widget.addWidget(self.stats_view)
+        self._init_progress()
         
         # Page 2: Management View
         self.management_view = ManagementView(self.crawler, self._update_status, self._get_current_class_ids, parent=self)
         self.stacked_widget.addWidget(self.management_view)
+        self._init_progress()
         
         # Page 3: Activities View
         self.activities_view = ActivitiesView(
@@ -232,39 +237,47 @@ class MainWindow(QMainWindow):
             parent=self
         )
         self.stacked_widget.addWidget(self.activities_view)
+        self._init_progress()
 
         # Page 4: Question Bank View
         self.question_bank_view = QuestionBankView(self.crawler, parent=self)
         self.question_bank_view.status_update.connect(self._update_status)
         self.stacked_widget.addWidget(self.question_bank_view)
+        self._init_progress()
 
         # Page 5: Learning View
         self.learning_view = LearningView(self.crawler, self._update_status, parent=self)
         self.stacked_widget.addWidget(self.learning_view)
+        self._init_progress()
         
         # Page 6: Study Status View
         self.study_status_view = StudyStatusView(self.crawler, parent=self)
         self.study_status_view.status_update.connect(self._update_status)
         self.stacked_widget.addWidget(self.study_status_view)
+        self._init_progress()
 
         # Page 7: Homework Create View
         self.homework_create_view = HomeworkCreateView(self.crawler, parent=self)
         self.homework_create_view.status_update.connect(self._update_status)
         self.stacked_widget.addWidget(self.homework_create_view)
+        self._init_progress()
 
         # Page 8: Cloud Drive View
         self.cloud_drive_view = CloudDriveView(self.crawler, parent=self)
         self.cloud_drive_view.status_update.connect(self._update_status)
         self.stacked_widget.addWidget(self.cloud_drive_view)
+        self._init_progress()
 
         # Page 9: Notes View
         self.notes_view = NotesView(self.crawler, parent=self)
         self.stacked_widget.addWidget(self.notes_view)
+        self._init_progress()
 
         # Page 10: Chat View
         self.chat_view = ChatView(self.crawler, parent=self)
         self.chat_view.msync_status_changed.connect(self._update_status)
         self.stacked_widget.addWidget(self.chat_view)
+        self._init_progress()
 
         # Page 11: Exam View
         self.exam_view = ExamView(
@@ -275,6 +288,7 @@ class MainWindow(QMainWindow):
         )
         self.exam_view.review_requested.connect(self._open_exam_review)
         self.stacked_widget.addWidget(self.exam_view)
+        self._init_progress()
 
         self.exam_review_view = ExamReviewView(self.crawler, parent=self)
         self.exam_review_view.back_requested.connect(self._return_to_exam_list)
@@ -282,6 +296,7 @@ class MainWindow(QMainWindow):
             self._on_bulk_grading_status
         )
         self.stacked_widget.addWidget(self.exam_review_view)
+        self._init_progress()
 
         content_layout.addWidget(self.stacked_widget)
         splitter.addWidget(content_container)
@@ -412,9 +427,12 @@ class MainWindow(QMainWindow):
     def _get_current_class_id(self):
         return self.clazz_box.currentData()
 
-    def load_courses(self):
+    def load_courses(self, preserve_nav=False):
         self._clear_startup_retries()
         self.status_label.setText("正在异步加载课程列表...")
+        # 重新加载后继续选中当前课程，并保留当前导航项
+        current_course = self.course_box.currentData() if preserve_nav else None
+        self._reload_course_id = str(current_course.id) if current_course else None
         self.course_box.blockSignals(True)
         self.course_box.clear()
         
@@ -446,7 +464,8 @@ class MainWindow(QMainWindow):
         )
         if courses:
             settings = QSettings("HaoSoft", "XuexitongManager")
-            last_course_id = settings.value("last_course_id", "")
+            last_course_id = self._reload_course_id or settings.value("last_course_id", "")
+            self._reload_course_id = None
 
             selected_index = 0
             if last_course_id:

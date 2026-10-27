@@ -6,17 +6,83 @@ from PyQt6.QtWidgets import (
     QCheckBox, QMessageBox, QInputDialog, QFileDialog, QApplication, QDialog, QListWidget, QListWidgetItem,
     QLineEdit, QTextEdit, QComboBox, QSizePolicy, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, QCoreApplication, QUrl, QTimer, QSize, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QCoreApplication, QUrl, QTimer, QSize, QThread, QObject, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QPixmap, QImageReader, QPainter, QColor, QLinearGradient, QFont
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from ui.workers import (
-    CreateCourseWorker, UpdateCourseDataWorker, CourseStateWorker, FullCourseInfoWorker,
+    CreateCourseWorker, UpdateCourseDataWorker, CourseStateWorker, FullCourseInfoWorker, SemesterListWorker, GroupListWorker,
     GetTeachersWorker, AddTeamTeacherWorker, RemoveTeamTeacherWorker,
     CloneVerifyWorker, CloneSubmitVerifyWorker, CloneActionWorker, ClazzManageWorker,
     RenameClazzWorker, ParseStudentExcelWorker, AddStudentsBatchWorker,
     GetWeightWorker, WeightWorker, DeleteClazzWorker
 )
 from ui.theme import apply_theme_stylesheet, bind_theme_tree, refresh_theme_styles
+
+
+class _SemesterListResultHandler(QObject):
+    def __init__(self, dialog, unit_combo, semester_combo, status_callback):
+        super().__init__(dialog)
+        self.dialog = dialog
+        self.unit_combo = unit_combo
+        self.semester_combo = semester_combo
+        self.status_callback = status_callback
+
+    @pyqtSlot(str, dict)
+    def update_semesters(self, fid, result):
+        selected_unit = self.dialog.units_data.get(self.unit_combo.currentText(), {})
+        if str(selected_unit.get("fid", "")) != fid:
+            return
+
+        self.dialog.actual_semesters_data.clear()
+        self.semester_combo.clear()
+        semesters = result.get("semesters", []) if result.get("success") else []
+        if not isinstance(semesters, list):
+            semesters = []
+        for semester in semesters:
+            name = semester.get("name", "")
+            if name:
+                self.semester_combo.addItem(name)
+                self.dialog.actual_semesters_data[name] = semester
+
+        has_semesters = self.semester_combo.count() > 0
+        self.semester_combo.setEnabled(has_semesters)
+        if not result.get("success"):
+            error = result.get("error", "获取学期列表失败")
+            self.semester_combo.setToolTip(error)
+            self.status_callback(f"获取学期列表失败: {error}")
+        elif not has_semesters:
+            self.semester_combo.setToolTip("当前单位没有可选学期")
+            self.status_callback("当前单位没有可选学期")
+        else:
+            self.semester_combo.setToolTip("")
+
+
+class _GroupListResultHandler(QObject):
+    def __init__(self, dialog, unit_combo, dept_combo, status_callback):
+        super().__init__(dialog)
+        self.dialog = dialog
+        self.unit_combo = unit_combo
+        self.dept_combo = dept_combo
+        self.status_callback = status_callback
+
+    @pyqtSlot(str, str, dict)
+    def update_groups(self, fid, cpi, result):
+        selected_unit = self.dialog.units_data.get(self.unit_combo.currentText(), {})
+        if str(selected_unit.get("fid", "")) != fid or str(selected_unit.get("data", "")) != cpi:
+            return
+
+        self.dept_combo.setEnabled(True)
+        groups = result.get("groups", []) if result.get("success") else []
+        if not groups:
+            self.status_callback(f"刷新院系列表失败: {result.get('error', '未返回院系')}")
+            return
+
+        self.dept_combo.clear()
+        self.dialog.groups_data.clear()
+        for group_info in groups:
+            self.dialog.groups_data[group_info["name"]] = group_info
+            self.dept_combo.addItem(group_info["name"])
+        self.dept_combo.setCurrentIndex(0)
 
 
 def _management_stat_button_style(palette) -> str:
@@ -1539,8 +1605,8 @@ class ManagementView(QWidget):
         self.management_scroll_layout.addWidget(container)
 
     def _open_new_course_dialog(self):
-        """弹出新建课程对话框 (直接打开，不进行服务器同步)。"""
-        self._open_course_info_dialog(title="新建课程", is_edit=False)
+        """在后台线程预取单位、院系、学期后弹出新建课程对话框。"""
+        self._start_course_info_fetch(title="新建课程", is_edit=False)
 
     def _open_basic_info_dialog(self, data: dict):
         """弹出课程基本信息对话框 (异步获取数据)。"""
@@ -1829,26 +1895,21 @@ class ManagementView(QWidget):
             new_fid = unit_info.get("fid", "")
             new_cpi = unit_info.get("data", "")
             if new_fid and new_cpi:
-                print(f"DEBUG: 单位切换为 {text}, fid={new_fid}, cpi={new_cpi}, 刷新院系列表...")
-                groups_data = self.crawler.get_group_list(new_fid, new_cpi, "0")
-                if groups_data and groups_data.get("success") and groups_data.get("groups"):
-                    groups_list = groups_data["groups"]
-                    dept_combo.clear()
-                    group_names = [g["name"] for g in groups_list]
-                    dept_combo.addItems(group_names)
-                    # 更新 dialog.groups_data
-                    dialog.groups_data.clear()
-                    for group_info in groups_list:
-                        dialog.groups_data[group_info["name"]] = group_info
-                    # 默认选中第一个
-                    if group_names:
-                        dept_combo.setCurrentIndex(0)
-                    print(f"DEBUG: 院系列表已刷新，共 {len(group_names)} 个院系")
-                else:
-                    print(f"DEBUG: 刷新院系列表失败: {groups_data.get('error', '未知错误')}")
+                dept_combo.setEnabled(False)
+                worker = GroupListWorker(self.crawler, str(new_fid), str(new_cpi), "0")
+                self.workers.append(worker)
+                worker.groups_ready.connect(group_result_handler.update_groups)
+                worker.finished.connect(
+                    lambda worker=worker: self.workers.remove(worker)
+                    if worker in self.workers else None
+                )
+                worker.start()
+            else:
+                dept_combo.setEnabled(True)
 
-        # 绑定单位切换事件（在设置初始值前绑定）
-        unit_combo.currentTextChanged.connect(on_unit_changed)
+        group_result_handler = _GroupListResultHandler(
+            dialog, unit_combo, dept_combo, self.status_callback
+        )
 
         # 院系列表填充：使用预取的数据
         groups_data = prefetched_data.get("groups_data", {}) if prefetched_data else None
@@ -1984,10 +2045,20 @@ class ManagementView(QWidget):
             dialog.actual_semesters_data = {} 
             
             sem_data = prefetched_data.get("semesters_data", {}) if prefetched_data else None
-            if not sem_data or not sem_data.get("success"):
+            if not prefetched_data:
                  sem_data = self.crawler.get_semester_list(default_unit_fid, "0")
             
-            if sem_data.get("success") and sem_data.get("semesters"):
+            semesters_fid = (
+                str(prefetched_data.get("semesters_fid", ""))
+                if prefetched_data else str(default_unit_fid)
+            )
+            should_refresh_semesters = semesters_fid != str(default_unit_fid)
+            if (
+                semesters_fid == str(default_unit_fid)
+                and sem_data
+                and sem_data.get("success")
+                and sem_data.get("semesters")
+            ):
                 sem_list = sem_data["semesters"]
                 sem_display_names = []
                 for s_info in sem_list:
@@ -1996,11 +2067,50 @@ class ManagementView(QWidget):
                 semester_combo.addItems(sem_display_names)
                 if sem_display_names:
                     semester_combo.setCurrentIndex(0)
-            else:
-                 fallback_sems = ["2025-2026学年 第一学期", "2024-2025学年 第二学期"]
-                 semester_combo.addItems(fallback_sems)
-                 for s_name in fallback_sems:
-                     dialog.actual_semesters_data[s_name] = {"name": s_name, "data": ""}
+                    semester_combo.setEnabled(True)
+            elif not should_refresh_semesters:
+                semester_combo.setEnabled(False)
+                error = (sem_data or {}).get("error") or "接口未返回可用学期"
+                self.status_callback(f"获取学期列表失败: {error}")
+
+        semester_result_handler = None
+        if not is_edit:
+            semester_result_handler = _SemesterListResultHandler(
+                dialog, unit_combo, semester_combo, self.status_callback
+            )
+            dialog.semester_result_handler = semester_result_handler
+
+        def refresh_semesters(fid):
+            if not fid:
+                dialog.actual_semesters_data.clear()
+                semester_combo.clear()
+                semester_combo.setEnabled(False)
+                self.status_callback("所选单位没有有效的 fid，无法获取学期列表")
+                return
+
+            dialog.actual_semesters_data.clear()
+            semester_combo.clear()
+            semester_combo.setEnabled(False)
+            worker = SemesterListWorker(self.crawler, str(fid), "0")
+            self.workers.append(worker)
+            worker.semesters_ready.connect(semester_result_handler.update_semesters)
+            worker.finished.connect(
+                lambda worker=worker: self.workers.remove(worker)
+                if worker in self.workers else None
+            )
+            worker.start()
+
+        def on_unit_selection_changed(text):
+            on_unit_changed(text)
+            unit_info = dialog.units_data.get(text, {})
+            refresh_semesters(str(unit_info.get("fid", "")))
+
+        if not is_edit:
+            unit_combo.currentTextChanged.connect(on_unit_selection_changed)
+            if should_refresh_semesters:
+                refresh_semesters(str(default_unit_fid))
+        else:
+            unit_combo.currentTextChanged.connect(on_unit_changed)
 
         # 课程说明 (仅在编辑模式显示)
         desc_label = None
