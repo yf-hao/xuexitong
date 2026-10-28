@@ -1,6 +1,7 @@
 """登录成功后、主窗口构建期间显示的加载窗口，避免出现没有任何可见窗口的空档。"""
 
 import os
+import sys
 import tempfile
 import time
 
@@ -219,6 +220,10 @@ class QuickLoadingWindow:
 
 
 def LoadingWindow(message="正在进入系统..."):
+    # Linux desktops may not provide GLX/EGL; keep startup independent of Qt Quick there.
+    if sys.platform.startswith("linux"):
+        return WidgetLoadingWindow(message)
+
     try:
         return QuickLoadingWindow(message)
     except Exception as e:

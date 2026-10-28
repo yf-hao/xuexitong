@@ -1,3 +1,12 @@
+# 版本说明 (Release Notes) - V0.19.2
+
+## 📅 更新日期: 2026-10-29
+
+### 🐞 Linux 启动修复
+- Linux 上使用不依赖 Qt Quick/OpenGL 的加载窗口，避免缺少 GLX/EGL 图形环境时启动失败。
+
+---
+
 # 版本说明 (Release Notes) - V0.19.1
 
 ## 📅 更新日期: 2026-10-27
